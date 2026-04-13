@@ -61,6 +61,8 @@ pub struct App {
     viewport_size: Size,
     /// Last known cursor position (updated on every CursorMoved event).
     last_cursor_pos: iced::Point,
+    /// Whether the toolbar is visible.
+    show_toolbar: bool,
     /// Whether the filmstrip is visible.
     show_filmstrip: bool,
     /// Whether the navigation slider is visible.
@@ -69,6 +71,8 @@ pub struct App {
     show_footer: bool,
     /// Last known window size (for recalculating viewport on layout toggles).
     window_size: Size,
+    /// Context menu position (window coords). `Some` when visible.
+    context_menu_pos: Option<iced::Point>,
 }
 
 enum AppState {
@@ -177,6 +181,22 @@ pub enum Message {
     ToggleFooter,
     /// Vertical scroll over filmstrip, convert to horizontal scroll.
     FilmstripScroll(f32),
+    /// Toggle toolbar visibility.
+    ToggleToolbar,
+    /// Show the context menu at the cursor position.
+    ShowContextMenu,
+    /// Dismiss the context menu.
+    DismissContextMenu,
+    /// Copy the current image to clipboard (as bitmap).
+    CopyImage,
+    /// Copy the full file path to clipboard.
+    CopyFilePath,
+    /// Copy just the filename to clipboard.
+    CopyFilename,
+    /// Open the folder containing the image in the native file explorer.
+    OpenImageLocation,
+    /// Open the native file properties dialog on the Details tab.
+    ImageProperties,
 }
 
 /// Boot function: creates the initial state. Called once by iced.
@@ -188,22 +208,55 @@ pub fn boot() -> App {
         zoom_mode: ZoomMode::default(),
         viewport_size: Size::new(800.0, 600.0),
         last_cursor_pos: iced::Point::ORIGIN,
+        show_toolbar: true,
         show_filmstrip: true,
         show_slider: true,
         show_footer: true,
         window_size: Size::new(800.0, 600.0),
+        context_menu_pos: None,
     }
 }
 
 /// Title function: returns the window title based on current state.
+///
+/// When the footer is hidden, the title bar includes the info that
+/// would normally appear in the footer: file index, zoom, dimensions,
+/// and file size.
 pub fn title(app: &App) -> String {
     match &app.state {
         AppState::Empty => String::new(),
-        AppState::Viewing { nav, .. } => nav
-            .current()
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default(),
+        AppState::Viewing {
+            nav,
+            current_allocation,
+            current_file_size,
+            zoom,
+            ..
+        } => {
+            let filename = nav
+                .current()
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+
+            if app.show_footer {
+                return filename;
+            }
+
+            let position = nav.position_label();
+            let zoom_pct = (*zoom * 100.0).round() as u32;
+
+            let dims = current_allocation
+                .as_ref()
+                .map(|a| {
+                    let s = a.size();
+                    widgets::format_dimensions(s.width, s.height)
+                })
+                .unwrap_or_default();
+
+            let size = widgets::format_file_size(*current_file_size);
+
+            format!("{filename}  |  {position}  |  {zoom_pct}%  |  {dims}  |  {size}")
+        }
     }
 }
 
@@ -252,7 +305,7 @@ fn clamp_pan(pan: (f32, f32), img_w: f32, img_h: f32, vp: Size) -> (f32, f32) {
 
 /// Recalculate the viewport size based on window size and visible chrome.
 fn recalc_viewport(app: &mut App) {
-    let mut chrome_height: f32 = TOOLBAR_HEIGHT;
+    let mut chrome_height: f32 = if app.show_toolbar { TOOLBAR_HEIGHT } else { 0.0 };
     if app.show_filmstrip {
         chrome_height += 72.0; // filmstrip + padding
     }
@@ -285,9 +338,42 @@ fn is_menu_message(msg: &Message) -> bool {
             | Message::ToggleFilmstrip
             | Message::ToggleSlider
             | Message::ToggleFooter
+            | Message::ToggleToolbar
+            // Context menu messages:
+            | Message::ShowContextMenu
+            | Message::DismissContextMenu
+            | Message::CopyImage
+            | Message::CopyFilePath
+            | Message::CopyFilename
+            | Message::OpenImageLocation
+            | Message::ImageProperties
             // Passive events that shouldn't dismiss menus:
             | Message::DragMove(_)
             | Message::DragEnd
+            | Message::WindowResized(_)
+            | Message::ImageAllocated(_, _)
+            | Message::Gif(_)
+            | Message::DirectoryScanned(_, _)
+            | Message::FileDialogResult(_)
+            | Message::NextReleased
+            | Message::PrevReleased
+    )
+}
+
+/// Returns true if the message belongs to the context menu flow.
+fn is_context_menu_message(msg: &Message) -> bool {
+    matches!(
+        msg,
+        Message::ShowContextMenu
+            | Message::DismissContextMenu
+            | Message::CopyImage
+            | Message::CopyFilePath
+            | Message::CopyFilename
+            | Message::OpenImageLocation
+            | Message::ImageProperties
+            | Message::ToggleToolbar
+            // Passive events:
+            | Message::DragMove(_)
             | Message::WindowResized(_)
             | Message::ImageAllocated(_, _)
             | Message::Gif(_)
@@ -303,6 +389,11 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
     // Auto-dismiss any open dropdown when the user interacts outside the menu.
     if app.open_menu.is_some() && !is_menu_message(&message) {
         app.open_menu = None;
+    }
+
+    // Auto-dismiss context menu on any non-context-menu interaction.
+    if app.context_menu_pos.is_some() && !is_context_menu_message(&message) {
+        app.context_menu_pos = None;
     }
 
     match message {
@@ -609,13 +700,14 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             *manual_zoom = true;
 
             // Adjust pan so the source pixel under the cursor stays fixed.
-            // cursor_in_viewport = window cursor pos minus toolbar (30px).
+            // cursor_in_viewport = window cursor pos minus toolbar height.
             // d = cursor offset from viewport center (in logical pixels).
             // ratio = new_zoom / old_zoom.
             // pan_new = d * (1 - ratio) + pan_old * ratio
             let ratio = *zoom / old_zoom;
+            let toolbar_offset = if app.show_toolbar { TOOLBAR_HEIGHT } else { 0.0 };
             let d_x = app.last_cursor_pos.x - app.viewport_size.width / 2.0;
-            let d_y = app.last_cursor_pos.y - TOOLBAR_HEIGHT - app.viewport_size.height / 2.0;
+            let d_y = app.last_cursor_pos.y - toolbar_offset - app.viewport_size.height / 2.0;
             *pan = (
                 d_x * (1.0 - ratio) + pan.0 * ratio,
                 d_y * (1.0 - ratio) + pan.1 * ratio,
@@ -759,6 +851,79 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
         Message::SliderChanged(index) | Message::FilmstripClicked(index) => {
             navigate_to_index(app, index)
+        }
+
+        // --- Toolbar visibility ---
+        Message::ToggleToolbar => {
+            app.show_toolbar = !app.show_toolbar;
+            app.context_menu_pos = None;
+            recalc_viewport(app);
+            Task::none()
+        }
+
+        // --- Context menu ---
+        Message::ShowContextMenu => {
+            app.context_menu_pos = Some(app.last_cursor_pos);
+            Task::none()
+        }
+
+        Message::DismissContextMenu => {
+            app.context_menu_pos = None;
+            Task::none()
+        }
+
+        Message::CopyImage => {
+            app.context_menu_pos = None;
+            let AppState::Viewing { nav, .. } = &app.state else {
+                return Task::none();
+            };
+            let path = nav.current().to_path_buf();
+            Task::perform(
+                async move { crate::platform::copy_image_to_clipboard(&path) },
+                |_| Message::DismissOverlay, // no-op follow-up
+            )
+        }
+
+        Message::CopyFilePath => {
+            app.context_menu_pos = None;
+            let AppState::Viewing { nav, .. } = &app.state else {
+                return Task::none();
+            };
+            let path_str = nav.current().to_string_lossy().to_string();
+            iced::clipboard::write(path_str)
+        }
+
+        Message::CopyFilename => {
+            app.context_menu_pos = None;
+            let AppState::Viewing { nav, .. } = &app.state else {
+                return Task::none();
+            };
+            let name = nav
+                .current()
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            iced::clipboard::write(name)
+        }
+
+        Message::OpenImageLocation => {
+            app.context_menu_pos = None;
+            let AppState::Viewing { nav, .. } = &app.state else {
+                return Task::none();
+            };
+            let path = nav.current().to_path_buf();
+            crate::platform::reveal_in_file_manager(&path);
+            Task::none()
+        }
+
+        Message::ImageProperties => {
+            app.context_menu_pos = None;
+            let AppState::Viewing { nav, .. } = &app.state else {
+                return Task::none();
+            };
+            let path = nav.current().to_path_buf();
+            crate::platform::show_properties(&path);
+            Task::none()
         }
     }
 }
@@ -937,8 +1102,6 @@ fn prefetch_neighbors(nav: &Nav, gif_player: &GifPlayer, depth: usize) -> Task<M
 
 /// View function: assembles toolbar, content area, and footer.
 pub fn view(app: &App) -> Element<'_, Message> {
-    let toolbar = widgets::toolbar::menu_bar(app.open_menu);
-
     let layout_vis = LayoutVisibility {
         show_filmstrip: app.show_filmstrip,
         show_slider: app.show_slider,
@@ -966,9 +1129,10 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     (app.viewport_size.width, app.viewport_size.height),
                 );
 
-                // Wrap image area in mouse_area for scroll, drag, and double-click.
+                // Wrap image area in mouse_area for scroll, drag, double-click, and right-click.
                 let interactive = mouse_area(image_view)
                     .on_press(Message::DragStart)
+                    .on_right_press(Message::ShowContextMenu)
                     .on_scroll(|delta| {
                         let y = match delta {
                             mouse::ScrollDelta::Lines { y, .. } => y,
@@ -1011,11 +1175,13 @@ pub fn view(app: &App) -> Element<'_, Message> {
         },
     };
 
-    // Main layout: toolbar on top, then content fills remaining space.
+    // Main layout: toolbar on top (if visible), then content fills remaining space.
     // Always use Stack so the widget tree structure is stable. This
     // prevents iced from losing internal widget state (e.g. filmstrip
     // scroll position) when toggling menus.
-    let overlay: Element<'_, Message> = if let Some(dropdown) =
+
+    // Build the toolbar dropdown overlay (or invisible placeholder).
+    let toolbar_overlay: Element<'_, Message> = if let Some(dropdown) =
         widgets::toolbar::dropdown(app.open_menu, app.zoom_mode, layout_vis)
     {
         column![dropdown]
@@ -1023,17 +1189,41 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .height(Length::Fill)
             .into()
     } else {
-        // Invisible empty overlay, same tree shape, no visual impact.
         column![].width(Length::Fill).height(Length::Fill).into()
     };
 
-    let stacked = Stack::with_children(vec![content, overlay]);
-    let page = column![toolbar, stacked]
+    // Build the context menu overlay (or invisible placeholder).
+    // The context menu is positioned inside the stacked area (below toolbar),
+    // but pos is in window coordinates, so subtract toolbar height.
+    let ctx_overlay: Element<'_, Message> = if let Some(pos) = app.context_menu_pos {
+        let toolbar_offset = if app.show_toolbar { TOOLBAR_HEIGHT } else { 0.0 };
+        let adjusted_pos = iced::Point::new(pos.x, pos.y - toolbar_offset);
+        widgets::context_menu::context_menu(adjusted_pos, app.show_toolbar)
+    } else {
+        column![].width(Length::Fill).height(Length::Fill).into()
+    };
+
+    let stacked = Stack::with_children(vec![content, toolbar_overlay, ctx_overlay]);
+
+    let mut page = column![]
         .width(Length::Fill)
         .height(Length::Fill);
 
-    if app.open_menu.is_some() {
-        mouse_area(page).on_press(Message::DismissOverlay).into()
+    if app.show_toolbar {
+        page = page.push(widgets::toolbar::menu_bar(app.open_menu));
+    }
+    page = page.push(stacked);
+
+    if app.context_menu_pos.is_some() {
+        mouse_area(page)
+            .on_press(Message::DismissContextMenu)
+            .on_right_press(Message::DismissContextMenu)
+            .into()
+    } else if app.open_menu.is_some() {
+        mouse_area(page)
+            .on_press(Message::DismissOverlay)
+            .on_right_press(Message::DismissOverlay)
+            .into()
     } else {
         mouse_area(page).into()
     }

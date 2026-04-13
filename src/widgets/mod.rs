@@ -1,5 +1,6 @@
-//! UI widgets: toolbar, image display, footer, filmstrip, and slider.
+//! UI widgets: toolbar, image display, footer, filmstrip, slider, and context menu.
 
+pub mod context_menu;
 pub mod filmstrip;
 pub mod footer;
 pub mod image_display;
