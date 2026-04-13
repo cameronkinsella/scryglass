@@ -8,10 +8,15 @@ use crate::app::Message;
 /// Render the bottom footer bar.
 ///
 /// Left side: image dimensions + file size.
-/// Right side: position in directory (e.g. "3/48").
-pub fn footer<'a>(dimensions: &str, file_size: &str, position: &str) -> Element<'a, Message> {
+/// Right side: zoom percentage + position in directory (e.g. "83%  3/48").
+pub fn footer<'a>(
+    dimensions: &str,
+    file_size: &str,
+    zoom_pct: u32,
+    position: &str,
+) -> Element<'a, Message> {
     let left = format!("{dimensions}    {file_size}");
-    let right = position.to_string();
+    let right = format!("{zoom_pct}%    {position}");
     row![
         text(left).size(13),
         space::horizontal(),

@@ -24,23 +24,40 @@ use iced::time::Instant;
 use iced::widget::image::Allocation;
 use iced::widget::{Stack, column, mouse_area};
 use iced::window;
-use iced::{Element, Event, Length, Subscription, Task, event, keyboard, mouse};
+use iced::{Element, Event, Length, Size, Subscription, Task, event, keyboard, mouse};
 
 use crate::cache;
-use crate::config::AppConfig;
+use crate::config::{AppConfig, ZoomMode};
 use crate::gif::{self, GifMessage, GifPlayer};
 use crate::nav::{self, Nav};
 use crate::widgets;
+use crate::widgets::toolbar::OpenMenu;
 
 /// How long the arrow key must be held before continuous scrolling begins.
 const HOLD_THRESHOLD: Duration = Duration::from_millis(300);
+
+/// Scroll-wheel zoom step multiplier (each notch = ×1.1 or ÷1.1).
+const ZOOM_STEP: f32 = 1.1;
+
+/// Minimum zoom factor.
+const ZOOM_MIN: f32 = 0.01;
+
+/// Maximum zoom factor.
+const ZOOM_MAX: f32 = 50.0;
 
 /// Application state: the single source of truth.
 pub struct App {
     state: AppState,
     config: AppConfig,
-    /// Whether the File dropdown menu is open.
-    file_menu_open: bool,
+    /// Which toolbar dropdown menu is open (if any).
+    open_menu: Option<OpenMenu>,
+    /// Current zoom mode.
+    zoom_mode: ZoomMode,
+    /// Size of the viewport (content area below toolbar, above footer).
+    /// Updated on every window resize.
+    viewport_size: Size,
+    /// Last known cursor position (updated on every CursorMoved event).
+    last_cursor_pos: iced::Point,
 }
 
 enum AppState {
@@ -62,7 +79,23 @@ enum AppState {
         gif_player: GifPlayer,
         /// Cached file size in bytes of the current image (set on load).
         current_file_size: u64,
+        /// Current zoom factor (1.0 = 100%).
+        zoom: f32,
+        /// Whether the user has manually adjusted zoom (scroll wheel).
+        manual_zoom: bool,
+        /// Pan offset in logical pixels (applied when image overflows viewport).
+        pan: (f32, f32),
+        /// Mouse drag state for panning.
+        drag: Option<DragState>,
     },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DragState {
+    /// Mouse position when drag started.
+    start: iced::Point,
+    /// Pan offset when drag started.
+    start_pan: (f32, f32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +126,8 @@ pub enum Message {
     PrevReleased,
     /// Toggle the File dropdown menu.
     ToggleFileMenu,
+    /// Toggle the Zoom dropdown menu.
+    ToggleZoomMenu,
     /// Dismiss any open overlay (click outside menu).
     DismissOverlay,
     /// Open a file via native dialog.
@@ -103,6 +138,20 @@ pub enum Message {
     CloseFile,
     /// Quit the application.
     Quit,
+    /// Set the zoom mode.
+    SetZoomMode(ZoomMode),
+    /// Scroll wheel zoom, delta lines Y.
+    ScrollZoom(f32),
+    /// Double-click: reset zoom to auto/opening state.
+    ResetZoom,
+    /// Mouse pressed on image area, begin drag.
+    DragStart,
+    /// Mouse moved during drag.
+    DragMove(iced::Point),
+    /// Mouse released, end drag.
+    DragEnd,
+    /// Window resized.
+    WindowResized(Size),
 }
 
 /// Boot function: creates the initial state. Called once by iced.
@@ -110,7 +159,10 @@ pub fn boot() -> App {
     App {
         state: AppState::Empty,
         config: AppConfig::default(),
-        file_menu_open: false,
+        open_menu: None,
+        zoom_mode: ZoomMode::default(),
+        viewport_size: Size::new(800.0, 600.0),
+        last_cursor_pos: iced::Point::ORIGIN,
     }
 }
 
@@ -127,6 +179,49 @@ pub fn title(app: &App) -> String {
             format!("{name} - scryglass")
         }
     }
+}
+
+/// Compute the "opening" zoom factor for Auto mode.
+/// 100% if it fits, otherwise shrink-to-fit. Never scale up.
+fn auto_zoom(img_w: u32, img_h: u32, vp: Size) -> f32 {
+    if img_w == 0 || img_h == 0 {
+        return 1.0;
+    }
+    let fit_w = vp.width / img_w as f32;
+    let fit_h = vp.height / img_h as f32;
+    let fit = fit_w.min(fit_h);
+    fit.min(1.0)
+}
+
+/// Compute zoom factor for a given ZoomMode.
+fn compute_zoom(mode: ZoomMode, img_w: u32, img_h: u32, vp: Size) -> f32 {
+    if img_w == 0 || img_h == 0 {
+        return 1.0;
+    }
+    match mode {
+        ZoomMode::Auto | ZoomMode::LockZoomRatio => auto_zoom(img_w, img_h, vp),
+        ZoomMode::ScaleToWidth => vp.width / img_w as f32,
+        ZoomMode::ScaleToHeight => vp.height / img_h as f32,
+        ZoomMode::ScaleToFit => {
+            let fit_w = vp.width / img_w as f32;
+            let fit_h = vp.height / img_h as f32;
+            fit_w.min(fit_h)
+        }
+        ZoomMode::ScaleToFill => {
+            let fit_w = vp.width / img_w as f32;
+            let fit_h = vp.height / img_h as f32;
+            fit_w.max(fit_h)
+        }
+    }
+}
+
+/// Clamp pan offset so the image doesn't scroll past edges.
+fn clamp_pan(pan: (f32, f32), img_w: f32, img_h: f32, vp: Size) -> (f32, f32) {
+    let excess_w = (img_w - vp.width).max(0.0) / 2.0;
+    let excess_h = (img_h - vp.height).max(0.0) / 2.0;
+    let x = pan.0.clamp(-excess_w, excess_w);
+    let y = pan.1.clamp(-excess_h, excess_h);
+    (x, y)
 }
 
 /// Update function: handles messages and mutates state.
@@ -149,6 +244,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     held_direction: None,
                     gif_player,
                     current_file_size: file_size,
+                    zoom: 1.0,
+                    manual_zoom: false,
+                    pan: (0.0, 0.0),
+                    drag: None,
                 };
                 tasks
             }
@@ -163,6 +262,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 current_allocation,
                 _prefetch_allocations,
                 loading,
+                zoom,
+                manual_zoom,
+                pan,
                 ..
             } = &mut app.state
             else {
@@ -170,6 +272,11 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             };
 
             if nav.current() == path {
+                let size = allocation.size();
+                if !*manual_zoom || app.zoom_mode != ZoomMode::LockZoomRatio {
+                    *zoom = compute_zoom(app.zoom_mode, size.width, size.height, app.viewport_size);
+                }
+                *pan = (0.0, 0.0);
                 *current_allocation = Some(allocation);
                 *loading = false;
             } else {
@@ -186,15 +293,26 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 current_allocation,
                 loading,
                 gif_player,
+                zoom,
+                manual_zoom,
+                pan,
                 ..
             } = &mut app.state
             else {
                 return Task::none();
             };
 
+            let is_first_frame = current_allocation.is_none()
+                || (*loading && matches!(&gif_msg, GifMessage::FrameAllocated(..)));
+
             let (task, allocation) = gif_player.update(gif_msg, nav.current());
 
             if let Some(alloc) = allocation {
+                if is_first_frame && (!*manual_zoom || app.zoom_mode != ZoomMode::LockZoomRatio) {
+                    let size = alloc.size();
+                    *zoom = compute_zoom(app.zoom_mode, size.width, size.height, app.viewport_size);
+                    *pan = (0.0, 0.0);
+                }
                 *current_allocation = Some(alloc);
                 *loading = false;
             }
@@ -297,18 +415,31 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
         // --- Menu state ---
         Message::ToggleFileMenu => {
-            app.file_menu_open = !app.file_menu_open;
+            app.open_menu = if app.open_menu == Some(OpenMenu::File) {
+                None
+            } else {
+                Some(OpenMenu::File)
+            };
+            Task::none()
+        }
+
+        Message::ToggleZoomMenu => {
+            app.open_menu = if app.open_menu == Some(OpenMenu::Zoom) {
+                None
+            } else {
+                Some(OpenMenu::Zoom)
+            };
             Task::none()
         }
 
         Message::DismissOverlay => {
-            app.file_menu_open = false;
+            app.open_menu = None;
             Task::none()
         }
 
         // --- File menu actions ---
         Message::OpenFile => {
-            app.file_menu_open = false;
+            app.open_menu = None;
             let extensions = AppConfig::supported_extensions()
                 .iter()
                 .map(|s| s.to_string())
@@ -332,12 +463,169 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::FileDialogResult(None) => Task::none(),
 
         Message::CloseFile => {
-            app.file_menu_open = false;
+            app.open_menu = None;
             app.state = AppState::Empty;
             Task::none()
         }
 
         Message::Quit => iced::exit(),
+
+        // --- Zoom mode ---
+        Message::SetZoomMode(mode) => {
+            app.open_menu = None;
+            app.zoom_mode = mode;
+
+            let AppState::Viewing {
+                current_allocation,
+                zoom,
+                manual_zoom,
+                pan,
+                ..
+            } = &mut app.state
+            else {
+                return Task::none();
+            };
+
+            *manual_zoom = false;
+
+            if let Some(alloc) = current_allocation {
+                let size = alloc.size();
+                *zoom = compute_zoom(mode, size.width, size.height, app.viewport_size);
+                let img_w = size.width as f32 * *zoom;
+                let img_h = size.height as f32 * *zoom;
+                *pan = clamp_pan(*pan, img_w, img_h, app.viewport_size);
+            }
+            Task::none()
+        }
+
+        // --- Scroll-wheel zoom ---
+        Message::ScrollZoom(delta_y) => {
+            let AppState::Viewing {
+                current_allocation,
+                zoom,
+                manual_zoom,
+                pan,
+                ..
+            } = &mut app.state
+            else {
+                return Task::none();
+            };
+
+            let factor = if delta_y > 0.0 {
+                ZOOM_STEP
+            } else {
+                1.0 / ZOOM_STEP
+            };
+            *zoom = (*zoom * factor).clamp(ZOOM_MIN, ZOOM_MAX);
+            *manual_zoom = true;
+
+            if let Some(alloc) = current_allocation {
+                let size = alloc.size();
+                let img_w = size.width as f32 * *zoom;
+                let img_h = size.height as f32 * *zoom;
+                *pan = clamp_pan(*pan, img_w, img_h, app.viewport_size);
+            }
+            Task::none()
+        }
+
+        // --- Double-click: reset zoom ---
+        Message::ResetZoom => {
+            let AppState::Viewing {
+                current_allocation,
+                zoom,
+                manual_zoom,
+                pan,
+                ..
+            } = &mut app.state
+            else {
+                return Task::none();
+            };
+
+            *manual_zoom = false;
+            if let Some(alloc) = current_allocation {
+                let size = alloc.size();
+                *zoom = compute_zoom(app.zoom_mode, size.width, size.height, app.viewport_size);
+            }
+            *pan = (0.0, 0.0);
+            Task::none()
+        }
+
+        // --- Drag to pan ---
+        Message::DragStart => {
+            if let AppState::Viewing { drag, pan, .. } = &mut app.state {
+                *drag = Some(DragState {
+                    start: app.last_cursor_pos,
+                    start_pan: *pan,
+                });
+            }
+            Task::none()
+        }
+
+        Message::DragMove(pos) => {
+            app.last_cursor_pos = pos;
+
+            let AppState::Viewing {
+                drag,
+                pan,
+                zoom,
+                current_allocation,
+                ..
+            } = &mut app.state
+            else {
+                return Task::none();
+            };
+
+            if let Some(ds) = drag {
+                let dx = pos.x - ds.start.x;
+                let dy = pos.y - ds.start.y;
+                let new_pan = (ds.start_pan.0 + dx, ds.start_pan.1 + dy);
+
+                if let Some(alloc) = current_allocation {
+                    let size = alloc.size();
+                    let img_w = size.width as f32 * *zoom;
+                    let img_h = size.height as f32 * *zoom;
+                    *pan = clamp_pan(new_pan, img_w, img_h, app.viewport_size);
+                }
+            }
+            Task::none()
+        }
+
+        Message::DragEnd => {
+            if let AppState::Viewing { drag, .. } = &mut app.state {
+                *drag = None;
+            }
+            Task::none()
+        }
+
+        // --- Window resized ---
+        Message::WindowResized(size) => {
+            // Approximate viewport: subtract toolbar (~30px) and footer (~25px).
+            app.viewport_size = Size::new(size.width, (size.height - 55.0).max(1.0));
+
+            let AppState::Viewing {
+                current_allocation,
+                zoom,
+                manual_zoom,
+                pan,
+                ..
+            } = &mut app.state
+            else {
+                return Task::none();
+            };
+
+            if !*manual_zoom && let Some(alloc) = current_allocation {
+                let s = alloc.size();
+                *zoom = compute_zoom(app.zoom_mode, s.width, s.height, app.viewport_size);
+            }
+
+            if let Some(alloc) = current_allocation {
+                let s = alloc.size();
+                let img_w = s.width as f32 * *zoom;
+                let img_h = s.height as f32 * *zoom;
+                *pan = clamp_pan(*pan, img_w, img_h, app.viewport_size);
+            }
+            Task::none()
+        }
     }
 }
 
@@ -368,6 +656,9 @@ fn navigate(app: &mut App, direction: Direction) -> Task<Message> {
         loading,
         gif_player,
         current_file_size,
+        manual_zoom,
+        pan,
+        drag,
         ..
     } = &mut app.state
     else {
@@ -382,6 +673,17 @@ fn navigate(app: &mut App, direction: Direction) -> Task<Message> {
     *loading = true;
     gif_player.stop();
     _prefetch_allocations.clear();
+    *drag = None;
+
+    // Reset pan on navigation. Zoom is preserved only in LockZoomRatio mode.
+    // Don't change zoom here. The previous image stays visible until the new
+    // allocation arrives (flicker prevention), so keep the old zoom to avoid a
+    // brief flash at the wrong scale. The correct zoom will be set in
+    // ImageAllocated / GifMessage::FrameAllocated.
+    *pan = (0.0, 0.0);
+    if app.zoom_mode != ZoomMode::LockZoomRatio {
+        *manual_zoom = false;
+    }
 
     *current_file_size = std::fs::metadata(nav.current())
         .map(|m| m.len())
@@ -443,7 +745,7 @@ fn prefetch_neighbors(nav: &Nav, gif_player: &GifPlayer, depth: usize) -> Task<M
 
 /// View function: assembles toolbar, content area, and footer.
 pub fn view(app: &App) -> Element<'_, Message> {
-    let toolbar = widgets::toolbar::menu_bar(app.file_menu_open);
+    let toolbar = widgets::toolbar::menu_bar(app.open_menu);
 
     let content = match &app.state {
         AppState::Empty => widgets::image_display::drop_prompt(),
@@ -451,29 +753,59 @@ pub fn view(app: &App) -> Element<'_, Message> {
             nav,
             current_allocation,
             current_file_size,
+            zoom,
+            pan,
             ..
         } => match current_allocation {
             Some(allocation) => {
                 let size = allocation.size();
+                let zoom_pct = (*zoom * 100.0).round() as u32;
                 let footer = widgets::footer::footer(
                     &widgets::format_dimensions(size.width, size.height),
                     &widgets::format_file_size(*current_file_size),
+                    zoom_pct,
                     &nav.position_label(),
                 );
-                column![widgets::image_display::image_display(allocation), footer,].into()
+
+                let image_view = widgets::image_display::image_display(
+                    allocation,
+                    *zoom,
+                    *pan,
+                    (app.viewport_size.width, app.viewport_size.height),
+                );
+
+                // Wrap image area in mouse_area for scroll, drag, and double-click.
+                let interactive = mouse_area(image_view)
+                    .on_scroll(|delta| {
+                        let y = match delta {
+                            mouse::ScrollDelta::Lines { y, .. } => y,
+                            mouse::ScrollDelta::Pixels { y, .. } => {
+                                if y > 0.0 {
+                                    1.0
+                                } else if y < 0.0 {
+                                    -1.0
+                                } else {
+                                    0.0
+                                }
+                            }
+                        };
+                        Message::ScrollZoom(y)
+                    })
+                    .on_double_click(Message::ResetZoom);
+
+                column![interactive, footer].into()
             }
             None => widgets::image_display::loading_prompt(),
         },
     };
 
     // Main layout: toolbar on top, then content fills remaining space.
-    // If the file menu is open, layer the dropdown on top of the content
+    // If a menu is open, layer the dropdown on top of the content
     // area so it floats over the image instead of pushing it down.
-    if let Some(dropdown) = widgets::toolbar::dropdown(app.file_menu_open) {
+    if let Some(dropdown) = widgets::toolbar::dropdown(app.open_menu, app.zoom_mode) {
         let overlay = column![dropdown].width(Length::Fill).height(Length::Fill);
 
         let stacked = Stack::with_children(vec![content, overlay.into()]);
-        // mouse_area wraps the whole view so clicking outside dismisses the menu.
         let page = column![toolbar, stacked];
         mouse_area(page).on_press(Message::DismissOverlay).into()
     } else {
@@ -545,8 +877,20 @@ fn handle_event(event: Event, _status: event::Status, _id: window::Id) -> Option
         Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Forward)) => Some(Message::Next),
         Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Back)) => Some(Message::Prev),
 
+        // --- Mouse: cursor moved (for drag panning) ---
+        Event::Mouse(mouse::Event::CursorMoved { position }) => Some(Message::DragMove(*position)),
+
+        // --- Mouse: left button released (end drag) ---
+        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(Message::DragEnd),
+
+        // --- Mouse: left button pressed (start drag) ---
+        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => Some(Message::DragStart),
+
         // --- File drop ---
         Event::Window(window::Event::FileDropped(path)) => Some(Message::FileDropped(path.clone())),
+
+        // --- Window resized ---
+        Event::Window(window::Event::Resized(size)) => Some(Message::WindowResized(*size)),
 
         _ => None,
     }

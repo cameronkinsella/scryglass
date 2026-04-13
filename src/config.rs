@@ -5,6 +5,48 @@ const SUPPORTED_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff", "tif", "ico", "avif",
 ];
 
+/// How the image zoom level is determined when opening/navigating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ZoomMode {
+    /// 100% if it fits, shrink to fit if too large. Never scale up.
+    #[default]
+    Auto,
+    /// Same initial rules as Auto, but zoom is preserved across navigation.
+    LockZoomRatio,
+    /// Scale until the image width fills the window width.
+    ScaleToWidth,
+    /// Scale until the image height fills the window height.
+    ScaleToHeight,
+    /// Scale until the image fits entirely (no overflow on either axis).
+    ScaleToFit,
+    /// Scale until both axes fill the window (may overflow one axis).
+    ScaleToFill,
+}
+
+impl ZoomMode {
+    /// All modes in menu order.
+    pub const ALL: &'static [ZoomMode] = &[
+        ZoomMode::Auto,
+        ZoomMode::LockZoomRatio,
+        ZoomMode::ScaleToWidth,
+        ZoomMode::ScaleToHeight,
+        ZoomMode::ScaleToFit,
+        ZoomMode::ScaleToFill,
+    ];
+
+    /// Human-readable label for menu display.
+    pub fn label(self) -> &'static str {
+        match self {
+            ZoomMode::Auto => "Auto",
+            ZoomMode::LockZoomRatio => "Lock Zoom Ratio",
+            ZoomMode::ScaleToWidth => "Scale to Width",
+            ZoomMode::ScaleToHeight => "Scale to Height",
+            ZoomMode::ScaleToFit => "Scale to Fit",
+            ZoomMode::ScaleToFill => "Scale to Fill",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     /// Number of images to pre-fetch in each direction.

@@ -1,7 +1,7 @@
-//! Toolbar widget: "File" dropdown menu with Open, Close, and Quit actions.
+//! Toolbar widget: "File" and "Zoom" dropdown menus.
 //!
-//! Renders a menu-bar style row. Clicking "File" toggles a dropdown that
-//! floats over the content below. Menu items are flat, borderless buttons
+//! Renders a menu-bar style row. Clicking "File" or "Zoom" toggles a dropdown
+//! that floats over the content below. Menu items are flat, borderless buttons
 //! with a subtle hover highlight, matching the look of a native menu bar.
 
 use iced::widget::button::{self, Status, Style};
@@ -9,6 +9,14 @@ use iced::widget::{column, container, row, text};
 use iced::{Background, Border, Color, Element, Length, Padding, Theme};
 
 use crate::app::Message;
+use crate::config::ZoomMode;
+
+/// Which toolbar dropdown is currently open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenMenu {
+    File,
+    Zoom,
+}
 
 // ---------------------------------------------------------------------------
 // Custom button styles
@@ -84,27 +92,37 @@ fn menu_item_style(theme: &Theme, status: Status) -> Style {
 // ---------------------------------------------------------------------------
 
 /// Render just the menu bar row (always visible at the top).
-pub fn menu_bar<'a>(file_menu_open: bool) -> Element<'a, Message> {
+pub fn menu_bar<'a>(open_menu: Option<OpenMenu>) -> Element<'a, Message> {
     let file_button = button::Button::new(text("File").size(13))
         .on_press(Message::ToggleFileMenu)
         .padding([4, 10])
-        .style(if file_menu_open {
+        .style(if open_menu == Some(OpenMenu::File) {
             menu_tab_active_style as fn(&Theme, Status) -> Style
         } else {
             menu_tab_style as fn(&Theme, Status) -> Style
         });
 
-    row![file_button].padding([2, 4]).into()
+    let zoom_button = button::Button::new(text("Zoom").size(13))
+        .on_press(Message::ToggleZoomMenu)
+        .padding([4, 10])
+        .style(if open_menu == Some(OpenMenu::Zoom) {
+            menu_tab_active_style as fn(&Theme, Status) -> Style
+        } else {
+            menu_tab_style as fn(&Theme, Status) -> Style
+        });
+
+    row![file_button, zoom_button].padding([2, 4]).into()
 }
 
-/// Render the dropdown panel (only when `file_menu_open` is true).
+/// Render the dropdown panel if a menu is open.
 /// This is meant to be layered ON TOP of the content via a `Stack`.
 ///
-/// Returns `None` if the menu is closed.
-pub fn dropdown<'a>(file_menu_open: bool) -> Option<Element<'a, Message>> {
-    if !file_menu_open {
-        return None;
-    }
+/// Returns `None` if no menu is open.
+pub fn dropdown<'a>(
+    open_menu: Option<OpenMenu>,
+    current_zoom_mode: ZoomMode,
+) -> Option<Element<'a, Message>> {
+    let open = open_menu?;
 
     let item = |label: &str, msg: Message| {
         button::Button::new(text(label.to_string()).size(13))
@@ -114,24 +132,53 @@ pub fn dropdown<'a>(file_menu_open: bool) -> Option<Element<'a, Message>> {
             .style(menu_item_style as fn(&Theme, button::Status) -> button::Style)
     };
 
-    let panel = container(
-        column![
-            item("Open…", Message::OpenFile),
-            item("Close", Message::CloseFile),
-            item("Quit", Message::Quit),
-        ]
-        .width(150),
-    )
-    .padding(Padding::from(2))
-    .style(container::bordered_box);
+    match open {
+        OpenMenu::File => {
+            let panel = container(
+                column![
+                    item("Open…", Message::OpenFile),
+                    item("Close", Message::CloseFile),
+                    item("Quit", Message::Quit),
+                ]
+                .width(150),
+            )
+            .padding(Padding::from(2))
+            .style(container::bordered_box);
 
-    // Position: flush left under the "File" tab, with a small offset.
-    let positioned = container(panel).padding(Padding {
-        top: 0.0,
-        right: 0.0,
-        bottom: 0.0,
-        left: 6.0,
-    });
+            let positioned = container(panel).padding(Padding {
+                top: 0.0,
+                right: 0.0,
+                bottom: 0.0,
+                left: 6.0,
+            });
 
-    Some(positioned.into())
+            Some(positioned.into())
+        }
+        OpenMenu::Zoom => {
+            let mut items: Vec<Element<'a, Message>> = Vec::new();
+            for &mode in ZoomMode::ALL {
+                let prefix = if mode == current_zoom_mode {
+                    "● "
+                } else {
+                    "   "
+                };
+                let label = format!("{prefix}{}", mode.label());
+                items.push(item(&label, Message::SetZoomMode(mode)).into());
+            }
+
+            let panel = container(column(items).width(180))
+                .padding(Padding::from(2))
+                .style(container::bordered_box);
+
+            // Position under the "Zoom" tab, offset by roughly the width of "File" tab.
+            let positioned = container(panel).padding(Padding {
+                top: 0.0,
+                right: 0.0,
+                bottom: 0.0,
+                left: 52.0,
+            });
+
+            Some(positioned.into())
+        }
+    }
 }
