@@ -198,15 +198,12 @@ pub fn boot() -> App {
 /// Title function: returns the window title based on current state.
 pub fn title(app: &App) -> String {
     match &app.state {
-        AppState::Empty => String::from("scryglass"),
-        AppState::Viewing { nav, .. } => {
-            let name = nav
-                .current()
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            format!("{name} - scryglass")
-        }
+        AppState::Empty => String::new(),
+        AppState::Viewing { nav, .. } => nav
+            .current()
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
     }
 }
 

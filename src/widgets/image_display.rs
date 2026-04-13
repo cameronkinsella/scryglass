@@ -47,12 +47,23 @@ pub fn image_display(
     let zoomed_h = img_h * zoom;
 
     // If the zoomed image fits entirely within the viewport, no cropping
-    // is needed. Just show the whole image centered.
+    // is needed. Just show the whole image centered, scaled down.
     if zoomed_w <= vp_w && zoomed_h <= vp_h {
+        // ContentFit::Contain with Fill layout scales the image to fit the
+        // viewport (contain_zoom). We want the image at `zoom` size, so
+        // apply scale = zoom / contain_zoom.
+        let contain_zoom = (vp_w / img_w).min(vp_h / img_h);
+        let scale_factor = if contain_zoom > 0.0 {
+            zoom / contain_zoom
+        } else {
+            1.0
+        };
+
         let img_widget = image(allocation.handle().clone())
             .content_fit(ContentFit::Contain)
             .width(Length::Fill)
-            .height(Length::Fill);
+            .height(Length::Fill)
+            .scale(scale_factor);
 
         return container(img_widget)
             .width(Length::Fill)
