@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-iced = { version = "0.14", features = ["image"] }
+iced = { version = "0.14", features = ["image", "tokio"] }
 anyhow = "1"
 thiserror = "2"
+gif = "0.14"
 
 [dev-dependencies]
 tempfile = "3"

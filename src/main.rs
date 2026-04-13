@@ -1,6 +1,7 @@
 mod app;
 mod cache;
 mod config;
+mod gif;
 mod nav;
 mod viewer;
 

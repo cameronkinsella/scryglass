@@ -13,19 +13,27 @@
 //! A short press moves exactly one image. Continuous scrolling only begins
 //! after the key has been held for a brief threshold (`HOLD_THRESHOLD`),
 //! driven by OS key-repeat events.
+//!
+//! Animated GIFs are decoded into compact sub-rectangle frames and composited
+//! at display time. Only one GPU texture is active per GIF at any moment.
+//! Pre-fetched GIF decode data is cached so navigation to neighbor GIFs is
+//! instant.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use iced::keyboard::Key;
 use iced::keyboard::key::Named;
 use iced::time::Instant;
-use iced::widget::image::Allocation;
+use iced::widget::image::{Allocation, Handle};
 use iced::window;
 use iced::{Element, Event, Subscription, Task, event, keyboard};
 
 use crate::cache;
 use crate::config::AppConfig;
+use crate::gif::{self, DecodedGif, GifCanvas};
 use crate::nav::{self, Nav};
 use crate::viewer;
 
@@ -46,22 +54,37 @@ enum AppState {
     /// Actively viewing images.
     Viewing {
         nav: Nav,
-        /// GPU-allocated texture for the current image.
+        /// GPU-allocated texture for the current image / current GIF frame.
         /// Once set, this is NEVER set to `None`. On navigation we keep
         /// the previous image visible until the new allocation arrives.
         current_allocation: Option<Allocation>,
         /// Pre-allocated textures for neighbor images. Holding these keeps
         /// iced's GPU texture memory alive so navigation is instant.
         _prefetch_allocations: Vec<Allocation>,
-        /// True while waiting for the current image's `ImageAllocated`.
+        /// True while waiting for the current image's allocation to arrive.
         /// Navigation is blocked until this clears.
         loading: bool,
         /// Which arrow key is currently held, and when the hold started.
-        /// Set on the initial `KeyPressed` (non-repeat), cleared on
-        /// `KeyReleased`. OS key-repeat events only navigate after
-        /// `HOLD_THRESHOLD` has elapsed since the initial press.
         held_direction: Option<(Direction, Instant)>,
+        /// Animated GIF state. `None` for static images.
+        gif_state: Option<Box<GifState>>,
+        /// Pre-decoded GIF data cache (keyed by path).
+        /// Neighbor GIFs are decoded during prefetch so navigation is instant.
+        gif_cache: HashMap<PathBuf, Arc<DecodedGif>>,
     },
+}
+
+/// State for an actively-animating GIF.
+struct GifState {
+    /// The decoded GIF data (shared with gif_cache via Arc).
+    decoded: Arc<DecodedGif>,
+    /// Canvas for compositing frames at display time.
+    canvas: GifCanvas,
+    /// Current frame index (circular).
+    frame_index: usize,
+    /// The active GPU allocation for the current composited frame.
+    /// We hold this to keep the texture alive until the next frame.
+    _frame_allocation: Option<Allocation>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,8 +99,14 @@ pub enum Message {
     FileDropped(PathBuf),
     /// Directory scan completed.
     DirectoryScanned(PathBuf, Result<Vec<PathBuf>, String>),
-    /// An image allocation completed (current or prefetch).
+    /// A static image allocation completed (current or prefetch).
     ImageAllocated(PathBuf, Result<Allocation, cache::Error>),
+    /// GIF decode completed (off-thread). Carries path and decoded data.
+    GifDecoded(PathBuf, Result<Arc<DecodedGif>, String>),
+    /// A GIF frame was allocated to GPU memory.
+    GifFrameAllocated(PathBuf, Result<Allocation, cache::Error>),
+    /// Timer tick to advance GIF animation.
+    GifTick,
     /// Navigate forward (arrow right initial press).
     Next,
     /// Navigate backward (arrow left initial press).
@@ -139,13 +168,16 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
         Message::DirectoryScanned(start_file, Ok(files)) => match Nav::new(files, &start_file) {
             Ok(nav) => {
-                let tasks = allocate_current_and_prefetch(&nav, app.config.prefetch_depth);
+                let tasks =
+                    load_current_and_prefetch(&nav, &HashMap::new(), app.config.prefetch_depth);
                 app.state = AppState::Viewing {
                     nav,
                     current_allocation: None,
                     _prefetch_allocations: Vec::new(),
                     loading: true,
                     held_direction: None,
+                    gif_state: None,
+                    gif_cache: HashMap::new(),
                 };
                 tasks
             }
@@ -170,8 +202,6 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 // This is the current image, show it now.
                 *current_allocation = Some(allocation);
                 *loading = false;
-                // No auto-advance here. Continuous scrolling is driven by
-                // OS key-repeat events (NextRepeat / PrevRepeat).
             } else {
                 // This is a prefetch. Hold the allocation to keep texture alive.
                 _prefetch_allocations.push(allocation);
@@ -180,6 +210,93 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
 
         Message::ImageAllocated(_path, Err(_err)) => Task::none(),
+
+        Message::GifDecoded(path, Ok(decoded)) => {
+            let AppState::Viewing {
+                nav,
+                gif_cache,
+                gif_state,
+                loading,
+                ..
+            } = &mut app.state
+            else {
+                return Task::none();
+            };
+
+            // Always cache the decoded data.
+            gif_cache.insert(path.clone(), Arc::clone(&decoded));
+
+            // If this is the current image, start displaying it.
+            if nav.current() == path {
+                return start_gif_display(decoded, &path, gif_state, loading);
+            }
+
+            Task::none()
+        }
+
+        Message::GifDecoded(_path, Err(_err)) => Task::none(),
+
+        Message::GifFrameAllocated(path, Ok(allocation)) => {
+            let AppState::Viewing {
+                nav,
+                current_allocation,
+                loading,
+                gif_state,
+                ..
+            } = &mut app.state
+            else {
+                return Task::none();
+            };
+
+            if nav.current() != path {
+                return Task::none();
+            }
+
+            let Some(gs) = gif_state.as_mut() else {
+                return Task::none();
+            };
+
+            *current_allocation = Some(allocation.clone());
+            gs._frame_allocation = Some(allocation);
+            *loading = false;
+
+            Task::none()
+        }
+
+        Message::GifFrameAllocated(_path, Err(_err)) => Task::none(),
+
+        Message::GifTick => {
+            let AppState::Viewing { nav, gif_state, .. } = &mut app.state else {
+                return Task::none();
+            };
+
+            let Some(gs) = gif_state.as_mut() else {
+                return Task::none();
+            };
+
+            let frame_count = gs.decoded.frames.len();
+            if frame_count <= 1 {
+                return Task::none();
+            }
+
+            // Apply disposal from the current frame, then advance.
+            let current_frame = &gs.decoded.frames[gs.frame_index];
+            gs.canvas.apply_disposal(current_frame);
+
+            // Advance to next frame (circular).
+            gs.frame_index = (gs.frame_index + 1) % frame_count;
+
+            // Composite the new frame.
+            let next_frame = &gs.decoded.frames[gs.frame_index];
+            gs.canvas.composite_frame(next_frame);
+
+            // Allocate the composited canvas to GPU.
+            let pixels = gs.canvas.pixels().to_vec();
+            let handle = Handle::from_rgba(gs.decoded.width, gs.decoded.height, pixels);
+            let p = nav.current().to_path_buf();
+            cache::allocate_handle(handle)
+                .map(move |result| Message::GifFrameAllocated(p.clone(), result))
+        }
 
         // --- Initial press (non-repeat): always navigate + record hold start ---
         Message::Next => {
@@ -192,7 +309,6 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 return Task::none();
             };
 
-            // Record when the key was first pressed.
             *held_direction = Some((Direction::Forward, Instant::now()));
 
             if *loading {
@@ -232,7 +348,6 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 return Task::none();
             };
 
-            // Only scroll if we're past the hold threshold.
             let past_threshold = held_direction
                 .map(|(_, pressed_at)| pressed_at.elapsed() >= HOLD_THRESHOLD)
                 .unwrap_or(false);
@@ -290,6 +405,34 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
     }
 }
 
+/// Begin displaying a GIF from its decoded data.
+///
+/// Composites frame 0, fires an allocation task, and sets up the GIF state.
+fn start_gif_display(
+    decoded: Arc<DecodedGif>,
+    path: &std::path::Path,
+    gif_state: &mut Option<Box<GifState>>,
+    loading: &mut bool,
+) -> Task<Message> {
+    let mut canvas = GifCanvas::new(decoded.width, decoded.height);
+    let first_frame = &decoded.frames[0];
+    canvas.composite_frame(first_frame);
+
+    let pixels = canvas.pixels().to_vec();
+    let handle = Handle::from_rgba(decoded.width, decoded.height, pixels);
+
+    *gif_state = Some(Box::new(GifState {
+        decoded,
+        canvas,
+        frame_index: 0,
+        _frame_allocation: None,
+    }));
+    *loading = true;
+
+    let p = path.to_path_buf();
+    cache::allocate_handle(handle).map(move |result| Message::GifFrameAllocated(p.clone(), result))
+}
+
 /// Navigate to the next/prev image.
 ///
 /// We do NOT clear `current_allocation` here. The previous image stays visible
@@ -299,6 +442,8 @@ fn navigate(app: &mut App, direction: Direction) -> Task<Message> {
         nav,
         _prefetch_allocations,
         loading,
+        gif_state,
+        gif_cache,
         ..
     } = &mut app.state
     else {
@@ -311,33 +456,100 @@ fn navigate(app: &mut App, direction: Direction) -> Task<Message> {
     }
 
     *loading = true;
+    // Clear GIF state since we're navigating away from any active GIF.
+    *gif_state = None;
 
     // Clear old prefetch allocations. They'll be replaced by new ones.
     _prefetch_allocations.clear();
 
-    allocate_current_and_prefetch(nav, app.config.prefetch_depth)
+    // Prune the GIF cache to only keep current + neighbor GIFs.
+    let current_path = nav.current().to_path_buf();
+    let neighbors: std::collections::HashSet<PathBuf> = {
+        let mut set = std::collections::HashSet::new();
+        set.insert(current_path.clone());
+        for p in nav.peek_around(app.config.prefetch_depth) {
+            set.insert(p);
+        }
+        set
+    };
+    gif_cache.retain(|path, _| neighbors.contains(path));
+    if gif::is_gif(&current_path)
+        && let Some(decoded) = gif_cache.get(&current_path).cloned()
+    {
+        // GIF already decoded, start displaying immediately.
+        let task = start_gif_display(decoded, &current_path, gif_state, loading);
+        // Still fire prefetch for neighbors.
+        let prefetch = prefetch_neighbors(nav, gif_cache, app.config.prefetch_depth);
+        return Task::batch([task, prefetch]);
+    }
+
+    load_current_and_prefetch(nav, gif_cache, app.config.prefetch_depth)
 }
 
-/// Fire allocation tasks for the current image and its neighbors.
-fn allocate_current_and_prefetch(nav: &Nav, depth: usize) -> Task<Message> {
+/// Fire allocation/decode tasks for the current image and its neighbors.
+fn load_current_and_prefetch(
+    nav: &Nav,
+    gif_cache: &HashMap<PathBuf, Arc<DecodedGif>>,
+    depth: usize,
+) -> Task<Message> {
     let current_path = nav.current().to_path_buf();
-    let current_task = {
+
+    let current_task = if gif::is_gif(&current_path) {
+        // Decode GIF frames off the main thread.
+        let p = current_path.clone();
+        Task::perform(
+            async move {
+                match gif::decode_gif(&p) {
+                    Ok(decoded) => (p, Ok(decoded)),
+                    Err(e) => (p, Err(e.to_string())),
+                }
+            },
+            |(path, result)| Message::GifDecoded(path, result),
+        )
+    } else {
         let p = current_path.clone();
         cache::allocate_path(&p).map(move |result| Message::ImageAllocated(p.clone(), result))
     };
 
-    let prefetch_tasks: Vec<Task<Message>> = nav
+    let prefetch = prefetch_neighbors(nav, gif_cache, depth);
+
+    Task::batch([current_task, prefetch])
+}
+
+/// Fire prefetch tasks for neighbor images/GIFs.
+fn prefetch_neighbors(
+    nav: &Nav,
+    gif_cache: &HashMap<PathBuf, Arc<DecodedGif>>,
+    depth: usize,
+) -> Task<Message> {
+    let tasks: Vec<Task<Message>> = nav
         .peek_around(depth)
         .into_iter()
         .map(|p| {
-            let p2 = p.clone();
-            cache::allocate_path(&p).map(move |result| Message::ImageAllocated(p2.clone(), result))
+            if gif::is_gif(&p) {
+                // Only decode if not already cached.
+                if gif_cache.contains_key(&p) {
+                    return Task::none();
+                }
+                let p2 = p.clone();
+                Task::perform(
+                    async move {
+                        match gif::decode_gif(&p2) {
+                            Ok(decoded) => (p2, Ok(decoded)),
+                            Err(e) => (p2, Err(e.to_string())),
+                        }
+                    },
+                    |(path, result)| Message::GifDecoded(path, result),
+                )
+            } else {
+                let p2 = p.clone();
+                cache::allocate_path(&p)
+                    .map(move |result| Message::ImageAllocated(p2.clone(), result))
+            }
         })
         .collect();
 
-    let mut all = vec![current_task];
-    all.extend(prefetch_tasks);
-    Task::batch(all)
+    Task::batch(tasks)
 }
 
 /// View function: pure rendering, no side effects.
@@ -356,9 +568,24 @@ pub fn view(app: &App) -> Element<'_, Message> {
     }
 }
 
-/// Subscription: listens for keyboard and file-drop events.
-pub fn subscription(_app: &App) -> Subscription<Message> {
-    event::listen_with(handle_event)
+/// Subscription: listens for keyboard and file-drop events, plus GIF animation ticks.
+pub fn subscription(app: &App) -> Subscription<Message> {
+    let events = event::listen_with(handle_event);
+
+    // If viewing an animated GIF with multiple frames, tick at the current frame's delay.
+    if let AppState::Viewing {
+        gif_state: Some(gs),
+        loading: false,
+        ..
+    } = &app.state
+        && gs.decoded.frames.len() > 1
+    {
+        let delay = gs.decoded.frames[gs.frame_index].delay;
+        let tick = iced::time::every(delay).map(|_| Message::GifTick);
+        return Subscription::batch([events, tick]);
+    }
+
+    events
 }
 
 fn handle_event(event: Event, _status: event::Status, _id: window::Id) -> Option<Message> {

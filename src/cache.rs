@@ -32,3 +32,11 @@ pub fn handle_for(path: &Path) -> Handle {
 pub fn allocate_path(path: &Path) -> Task<Result<Allocation, Error>> {
     image::allocate(Handle::from_path(path))
 }
+
+/// Kick off allocation of a pre-built `Handle`.
+///
+/// Used for animated GIF frames, where each frame is decoded and composited
+/// into RGBA pixels via `Handle::from_rgba()`.
+pub fn allocate_handle(handle: Handle) -> Task<Result<Allocation, Error>> {
+    image::allocate(handle)
+}
