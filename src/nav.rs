@@ -111,6 +111,16 @@ impl Nav {
     pub fn position_label(&self) -> String {
         format!("{}/{}", self.cursor + 1, self.files.len())
     }
+
+    /// Access the full file list.
+    pub fn files(&self) -> &[PathBuf] {
+        &self.files
+    }
+
+    /// Jump the cursor to an absolute index (wraps via modular arithmetic).
+    pub fn set_cursor(&mut self, index: usize) {
+        self.cursor = index % self.files.len();
+    }
 }
 
 /// Scan `dir` for files with supported image extensions, returning a sorted list.

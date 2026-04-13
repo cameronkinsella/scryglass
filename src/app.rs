@@ -31,7 +31,7 @@ use crate::config::{AppConfig, ZoomMode};
 use crate::gif::{self, GifMessage, GifPlayer};
 use crate::nav::{self, Nav};
 use crate::widgets;
-use crate::widgets::toolbar::OpenMenu;
+use crate::widgets::toolbar::{LayoutVisibility, OpenMenu};
 
 /// How long the arrow key must be held before continuous scrolling begins.
 const HOLD_THRESHOLD: Duration = Duration::from_millis(300);
@@ -44,6 +44,9 @@ const ZOOM_MIN: f32 = 0.01;
 
 /// Maximum zoom factor.
 const ZOOM_MAX: f32 = 50.0;
+
+/// Height of the toolbar in logical pixels.
+const TOOLBAR_HEIGHT: f32 = 30.0;
 
 /// Application state: the single source of truth.
 pub struct App {
@@ -58,6 +61,14 @@ pub struct App {
     viewport_size: Size,
     /// Last known cursor position (updated on every CursorMoved event).
     last_cursor_pos: iced::Point,
+    /// Whether the filmstrip is visible.
+    show_filmstrip: bool,
+    /// Whether the navigation slider is visible.
+    show_slider: bool,
+    /// Whether the footer is visible.
+    show_footer: bool,
+    /// Last known window size (for recalculating viewport on layout toggles).
+    window_size: Size,
 }
 
 enum AppState {
@@ -128,6 +139,8 @@ pub enum Message {
     ToggleFileMenu,
     /// Toggle the Zoom dropdown menu.
     ToggleZoomMenu,
+    /// Toggle the Layout dropdown menu.
+    ToggleLayoutMenu,
     /// Dismiss any open overlay (click outside menu).
     DismissOverlay,
     /// Open a file via native dialog.
@@ -152,6 +165,18 @@ pub enum Message {
     DragEnd,
     /// Window resized.
     WindowResized(Size),
+    /// Slider dragged to an image index.
+    SliderChanged(usize),
+    /// Filmstrip thumbnail clicked.
+    FilmstripClicked(usize),
+    /// Toggle filmstrip visibility.
+    ToggleFilmstrip,
+    /// Toggle slider visibility.
+    ToggleSlider,
+    /// Toggle footer visibility.
+    ToggleFooter,
+    /// Vertical scroll over filmstrip, convert to horizontal scroll.
+    FilmstripScroll(f32),
 }
 
 /// Boot function: creates the initial state. Called once by iced.
@@ -163,6 +188,10 @@ pub fn boot() -> App {
         zoom_mode: ZoomMode::default(),
         viewport_size: Size::new(800.0, 600.0),
         last_cursor_pos: iced::Point::ORIGIN,
+        show_filmstrip: true,
+        show_slider: true,
+        show_footer: true,
+        window_size: Size::new(800.0, 600.0),
     }
 }
 
@@ -224,8 +253,61 @@ fn clamp_pan(pan: (f32, f32), img_w: f32, img_h: f32, vp: Size) -> (f32, f32) {
     (x, y)
 }
 
+/// Recalculate the viewport size based on window size and visible chrome.
+fn recalc_viewport(app: &mut App) {
+    let mut chrome_height: f32 = TOOLBAR_HEIGHT;
+    if app.show_filmstrip {
+        chrome_height += 72.0; // filmstrip + padding
+    }
+    if app.show_slider {
+        chrome_height += 28.0; // slider + padding
+    }
+    if app.show_footer {
+        chrome_height += 25.0; // footer
+    }
+    app.viewport_size = Size::new(
+        app.window_size.width,
+        (app.window_size.height - chrome_height).max(1.0),
+    );
+}
+
+/// Returns true if the message is related to menu interaction
+/// (opening/closing menus, selecting menu items, or passive events
+/// that shouldn't dismiss menus like cursor moves and window resizes).
+fn is_menu_message(msg: &Message) -> bool {
+    matches!(
+        msg,
+        Message::ToggleFileMenu
+            | Message::ToggleZoomMenu
+            | Message::ToggleLayoutMenu
+            | Message::DismissOverlay
+            | Message::OpenFile
+            | Message::CloseFile
+            | Message::Quit
+            | Message::SetZoomMode(_)
+            | Message::ToggleFilmstrip
+            | Message::ToggleSlider
+            | Message::ToggleFooter
+            // Passive events that shouldn't dismiss menus:
+            | Message::DragMove(_)
+            | Message::DragEnd
+            | Message::WindowResized(_)
+            | Message::ImageAllocated(_, _)
+            | Message::Gif(_)
+            | Message::DirectoryScanned(_, _)
+            | Message::FileDialogResult(_)
+            | Message::NextReleased
+            | Message::PrevReleased
+    )
+}
+
 /// Update function: handles messages and mutates state.
 pub fn update(app: &mut App, message: Message) -> Task<Message> {
+    // Auto-dismiss any open dropdown when the user interacts outside the menu.
+    if app.open_menu.is_some() && !is_menu_message(&message) {
+        app.open_menu = None;
+    }
+
     match message {
         Message::FileDropped(path) => open_path(path),
 
@@ -432,6 +514,15 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
 
+        Message::ToggleLayoutMenu => {
+            app.open_menu = if app.open_menu == Some(OpenMenu::Layout) {
+                None
+            } else {
+                Some(OpenMenu::Layout)
+            };
+            Task::none()
+        }
+
         Message::DismissOverlay => {
             app.open_menu = None;
             Task::none()
@@ -498,7 +589,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
 
-        // --- Scroll-wheel zoom ---
+        // --- Scroll-wheel zoom (toward cursor) ---
         Message::ScrollZoom(delta_y) => {
             let AppState::Viewing {
                 current_allocation,
@@ -511,13 +602,27 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 return Task::none();
             };
 
+            let old_zoom = *zoom;
             let factor = if delta_y > 0.0 {
                 ZOOM_STEP
             } else {
                 1.0 / ZOOM_STEP
             };
-            *zoom = (*zoom * factor).clamp(ZOOM_MIN, ZOOM_MAX);
+            *zoom = (old_zoom * factor).clamp(ZOOM_MIN, ZOOM_MAX);
             *manual_zoom = true;
+
+            // Adjust pan so the source pixel under the cursor stays fixed.
+            // cursor_in_viewport = window cursor pos minus toolbar (30px).
+            // d = cursor offset from viewport center (in logical pixels).
+            // ratio = new_zoom / old_zoom.
+            // pan_new = d * (1 - ratio) + pan_old * ratio
+            let ratio = *zoom / old_zoom;
+            let d_x = app.last_cursor_pos.x - app.viewport_size.width / 2.0;
+            let d_y = app.last_cursor_pos.y - TOOLBAR_HEIGHT - app.viewport_size.height / 2.0;
+            *pan = (
+                d_x * (1.0 - ratio) + pan.0 * ratio,
+                d_y * (1.0 - ratio) + pan.1 * ratio,
+            );
 
             if let Some(alloc) = current_allocation {
                 let size = alloc.size();
@@ -599,8 +704,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
         // --- Window resized ---
         Message::WindowResized(size) => {
-            // Approximate viewport: subtract toolbar (~30px) and footer (~25px).
-            app.viewport_size = Size::new(size.width, (size.height - 55.0).max(1.0));
+            app.window_size = size;
+            recalc_viewport(app);
 
             let AppState::Viewing {
                 current_allocation,
@@ -625,6 +730,38 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 *pan = clamp_pan(*pan, img_w, img_h, app.viewport_size);
             }
             Task::none()
+        }
+
+        // --- Slider and filmstrip visibility ---
+        Message::ToggleFilmstrip => {
+            app.show_filmstrip = !app.show_filmstrip;
+            recalc_viewport(app);
+            Task::none()
+        }
+
+        Message::ToggleSlider => {
+            app.show_slider = !app.show_slider;
+            recalc_viewport(app);
+            Task::none()
+        }
+
+        Message::ToggleFooter => {
+            app.show_footer = !app.show_footer;
+            recalc_viewport(app);
+            Task::none()
+        }
+
+        Message::FilmstripScroll(delta_y) => {
+            // Convert vertical scroll delta to horizontal scroll on the filmstrip.
+            let offset = iced::widget::scrollable::AbsoluteOffset {
+                x: -delta_y * 60.0,
+                y: 0.0,
+            };
+            iced::widget::operation::scroll_by(widgets::filmstrip::filmstrip_id(), offset)
+        }
+
+        Message::SliderChanged(index) | Message::FilmstripClicked(index) => {
+            navigate_to_index(app, index)
         }
     }
 }
@@ -710,6 +847,64 @@ fn navigate(app: &mut App, direction: Direction) -> Task<Message> {
     load_current_and_prefetch(nav, gif_player, app.config.prefetch_depth)
 }
 
+/// Jump to a specific image index (slider / filmstrip click).
+fn navigate_to_index(app: &mut App, index: usize) -> Task<Message> {
+    let AppState::Viewing {
+        nav,
+        _prefetch_allocations,
+        loading,
+        gif_player,
+        current_file_size,
+        manual_zoom,
+        pan,
+        drag,
+        ..
+    } = &mut app.state
+    else {
+        return Task::none();
+    };
+
+    // Don't navigate if already at this index.
+    if nav.cursor() == index {
+        return Task::none();
+    }
+
+    nav.set_cursor(index);
+
+    *loading = true;
+    gif_player.stop();
+    _prefetch_allocations.clear();
+    *drag = None;
+    *pan = (0.0, 0.0);
+    if app.zoom_mode != ZoomMode::LockZoomRatio {
+        *manual_zoom = false;
+    }
+
+    *current_file_size = std::fs::metadata(nav.current())
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    let keep: HashSet<PathBuf> = {
+        let mut set = HashSet::new();
+        set.insert(nav.current().to_path_buf());
+        for p in nav.peek_around(app.config.prefetch_depth) {
+            set.insert(p);
+        }
+        set
+    };
+    gif_player.prune_cache(&keep);
+
+    let current_path = nav.current().to_path_buf();
+    if gif::is_gif(&current_path)
+        && let Some(gif_task) = gif_player.try_start_from_cache(&current_path)
+    {
+        let prefetch = prefetch_neighbors(nav, gif_player, app.config.prefetch_depth);
+        return Task::batch([gif_task.map(Message::Gif), prefetch]);
+    }
+
+    load_current_and_prefetch(nav, gif_player, app.config.prefetch_depth)
+}
+
 /// Fire allocation/decode tasks for the current image and its neighbors.
 fn load_current_and_prefetch(nav: &Nav, gif_player: &GifPlayer, depth: usize) -> Task<Message> {
     let current_path = nav.current().to_path_buf();
@@ -747,6 +942,12 @@ fn prefetch_neighbors(nav: &Nav, gif_player: &GifPlayer, depth: usize) -> Task<M
 pub fn view(app: &App) -> Element<'_, Message> {
     let toolbar = widgets::toolbar::menu_bar(app.open_menu);
 
+    let layout_vis = LayoutVisibility {
+        show_filmstrip: app.show_filmstrip,
+        show_slider: app.show_slider,
+        show_footer: app.show_footer,
+    };
+
     let content = match &app.state {
         AppState::Empty => widgets::image_display::drop_prompt(),
         AppState::Viewing {
@@ -760,12 +961,6 @@ pub fn view(app: &App) -> Element<'_, Message> {
             Some(allocation) => {
                 let size = allocation.size();
                 let zoom_pct = (*zoom * 100.0).round() as u32;
-                let footer = widgets::footer::footer(
-                    &widgets::format_dimensions(size.width, size.height),
-                    &widgets::format_file_size(*current_file_size),
-                    zoom_pct,
-                    &nav.position_label(),
-                );
 
                 let image_view = widgets::image_display::image_display(
                     allocation,
@@ -776,6 +971,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
                 // Wrap image area in mouse_area for scroll, drag, and double-click.
                 let interactive = mouse_area(image_view)
+                    .on_press(Message::DragStart)
                     .on_scroll(|delta| {
                         let y = match delta {
                             mouse::ScrollDelta::Lines { y, .. } => y,
@@ -793,23 +989,56 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     })
                     .on_double_click(Message::ResetZoom);
 
-                column![interactive, footer].into()
+                // Build the bottom section: filmstrip, slider, footer (each optional).
+                let mut col = column![interactive];
+
+                if app.show_filmstrip {
+                    col = col.push(widgets::filmstrip::filmstrip(nav.files(), nav.cursor()));
+                }
+                if app.show_slider {
+                    col = col.push(widgets::nav_slider::nav_slider(nav.cursor(), nav.len()));
+                }
+                if app.show_footer {
+                    let footer = widgets::footer::footer(
+                        &widgets::format_dimensions(size.width, size.height),
+                        &widgets::format_file_size(*current_file_size),
+                        zoom_pct,
+                        &nav.position_label(),
+                    );
+                    col = col.push(footer);
+                }
+
+                col.into()
             }
             None => widgets::image_display::loading_prompt(),
         },
     };
 
     // Main layout: toolbar on top, then content fills remaining space.
-    // If a menu is open, layer the dropdown on top of the content
-    // area so it floats over the image instead of pushing it down.
-    if let Some(dropdown) = widgets::toolbar::dropdown(app.open_menu, app.zoom_mode) {
-        let overlay = column![dropdown].width(Length::Fill).height(Length::Fill);
+    // Always use Stack so the widget tree structure is stable. This
+    // prevents iced from losing internal widget state (e.g. filmstrip
+    // scroll position) when toggling menus.
+    let overlay: Element<'_, Message> = if let Some(dropdown) =
+        widgets::toolbar::dropdown(app.open_menu, app.zoom_mode, layout_vis)
+    {
+        column![dropdown]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    } else {
+        // Invisible empty overlay, same tree shape, no visual impact.
+        column![].width(Length::Fill).height(Length::Fill).into()
+    };
 
-        let stacked = Stack::with_children(vec![content, overlay.into()]);
-        let page = column![toolbar, stacked];
+    let stacked = Stack::with_children(vec![content, overlay]);
+    let page = column![toolbar, stacked]
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+    if app.open_menu.is_some() {
         mouse_area(page).on_press(Message::DismissOverlay).into()
     } else {
-        column![toolbar, content].into()
+        mouse_area(page).into()
     }
 }
 
@@ -846,6 +1075,12 @@ fn is_backward_key(key: &Key) -> bool {
 
 fn handle_event(event: Event, _status: event::Status, _id: window::Id) -> Option<Message> {
     match &event {
+        // --- Keyboard: Escape dismisses open menus ---
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key: Key::Named(Named::Escape),
+            ..
+        }) => Some(Message::DismissOverlay),
+
         // --- Keyboard: initial press ---
         Event::Keyboard(keyboard::Event::KeyPressed {
             key, repeat: false, ..
@@ -883,8 +1118,6 @@ fn handle_event(event: Event, _status: event::Status, _id: window::Id) -> Option
         // --- Mouse: left button released (end drag) ---
         Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(Message::DragEnd),
 
-        // --- Mouse: left button pressed (start drag) ---
-        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => Some(Message::DragStart),
 
         // --- File drop ---
         Event::Window(window::Event::FileDropped(path)) => Some(Message::FileDropped(path.clone())),

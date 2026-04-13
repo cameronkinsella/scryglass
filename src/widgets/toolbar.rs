@@ -5,17 +5,26 @@
 //! with a subtle hover highlight, matching the look of a native menu bar.
 
 use iced::widget::button::{self, Status, Style};
-use iced::widget::{column, container, row, text};
+use iced::widget::{column, container, row, text, toggler};
 use iced::{Background, Border, Color, Element, Length, Padding, Theme};
 
 use crate::app::Message;
 use crate::config::ZoomMode;
+
+/// Layout visibility state passed into dropdown rendering.
+#[derive(Debug, Clone, Copy)]
+pub struct LayoutVisibility {
+    pub show_filmstrip: bool,
+    pub show_slider: bool,
+    pub show_footer: bool,
+}
 
 /// Which toolbar dropdown is currently open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenMenu {
     File,
     Zoom,
+    Layout,
 }
 
 // ---------------------------------------------------------------------------
@@ -111,7 +120,18 @@ pub fn menu_bar<'a>(open_menu: Option<OpenMenu>) -> Element<'a, Message> {
             menu_tab_style as fn(&Theme, Status) -> Style
         });
 
-    row![file_button, zoom_button].padding([2, 4]).into()
+    let layout_button = button::Button::new(text("Layout").size(13))
+        .on_press(Message::ToggleLayoutMenu)
+        .padding([4, 10])
+        .style(if open_menu == Some(OpenMenu::Layout) {
+            menu_tab_active_style as fn(&Theme, Status) -> Style
+        } else {
+            menu_tab_style as fn(&Theme, Status) -> Style
+        });
+
+    row![file_button, zoom_button, layout_button]
+        .padding([2, 4])
+        .into()
 }
 
 /// Render the dropdown panel if a menu is open.
@@ -121,6 +141,7 @@ pub fn menu_bar<'a>(open_menu: Option<OpenMenu>) -> Element<'a, Message> {
 pub fn dropdown<'a>(
     open_menu: Option<OpenMenu>,
     current_zoom_mode: ZoomMode,
+    layout_vis: LayoutVisibility,
 ) -> Option<Element<'a, Message>> {
     let open = open_menu?;
 
@@ -170,12 +191,46 @@ pub fn dropdown<'a>(
                 .padding(Padding::from(2))
                 .style(container::bordered_box);
 
-            // Position under the "Zoom" tab, offset by roughly the width of "File" tab.
             let positioned = container(panel).padding(Padding {
                 top: 0.0,
                 right: 0.0,
                 bottom: 0.0,
                 left: 52.0,
+            });
+
+            Some(positioned.into())
+        }
+        OpenMenu::Layout => {
+            let panel = container(
+                column![
+                    toggler(layout_vis.show_filmstrip)
+                        .label("Filmstrip")
+                        .on_toggle(|_| Message::ToggleFilmstrip)
+                        .size(16)
+                        .text_size(13),
+                    toggler(layout_vis.show_slider)
+                        .label("Slider")
+                        .on_toggle(|_| Message::ToggleSlider)
+                        .size(16)
+                        .text_size(13),
+                    toggler(layout_vis.show_footer)
+                        .label("Footer")
+                        .on_toggle(|_| Message::ToggleFooter)
+                        .size(16)
+                        .text_size(13),
+                ]
+                .spacing(6)
+                .padding([6, 12])
+                .width(180),
+            )
+            .style(container::bordered_box);
+
+            // Position under the "Layout" tab.
+            let positioned = container(panel).padding(Padding {
+                top: 0.0,
+                right: 0.0,
+                bottom: 0.0,
+                left: 100.0,
             });
 
             Some(positioned.into())

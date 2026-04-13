@@ -1,12 +1,19 @@
 //! Image display widget: centered image with zoom and pan support.
 //!
-//! The image is rendered at `native_size × zoom` using `ContentFit::Fill`,
-//! which stretches the image to exactly the requested pixel dimensions.
-//! A clipping viewport container ensures only the visible portion is shown.
-//! The visible region is cropped from the source and positioned via padding.
+//! Zoom and pan are implemented via the `crop()` method on the iced
+//! `Image` widget. At any given zoom level the "visible window" in
+//! source-pixel space is `(viewport / zoom)`. The pan offset shifts
+//! that window. The cropped region is then displayed with
+//! `ContentFit::Contain` inside a `Length::Fill` layout, so iced
+//! scales it up to fill the viewport, effectively rendering the
+//! image at the desired zoom level.
+//!
+//! This approach avoids `scale()` entirely, which eliminates the
+//! interaction between scale-from-center and container positioning
+//! that caused the old padding-based pan to resize the image.
 
 use iced::widget::{center, container, image, text};
-use iced::{Element, Length, Padding};
+use iced::{ContentFit, Element, Length, Rectangle};
 
 use crate::app::Message;
 
@@ -23,71 +30,70 @@ pub fn image_display(
     viewport: (f32, f32),
 ) -> Element<'_, Message> {
     let size = allocation.size();
-    let display_w = size.width as f32 * zoom;
-    let display_h = size.height as f32 * zoom;
-
+    let img_w = size.width as f32;
+    let img_h = size.height as f32;
     let vp_w = viewport.0;
     let vp_h = viewport.1;
 
-    // Calculate where the image top-left should be so that the image is
-    // centered in the viewport, adjusted by the pan offset.
-    let image_x = (vp_w - display_w) / 2.0 + pan.0;
-    let image_y = (vp_h - display_h) / 2.0 + pan.1;
+    if img_w <= 0.0 || img_h <= 0.0 || zoom <= 0.0 {
+        return container(text(""))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+    }
 
-    // How much of the image is off-screen on each edge (in display pixels).
-    let crop_left = (-image_x).max(0.0);
-    let crop_top = (-image_y).max(0.0);
-    let crop_right = (image_x + display_w - vp_w).max(0.0);
-    let crop_bottom = (image_y + display_h - vp_h).max(0.0);
+    // The zoomed image size in logical pixels.
+    let zoomed_w = img_w * zoom;
+    let zoomed_h = img_h * zoom;
 
-    // Convert crop amounts from display pixels back to original image pixels.
-    let crop_left_px = (crop_left / zoom).round() as u32;
-    let crop_top_px = (crop_top / zoom).round() as u32;
-    let crop_right_px = (crop_right / zoom).round() as u32;
-    let crop_bottom_px = (crop_bottom / zoom).round() as u32;
+    // If the zoomed image fits entirely within the viewport, no cropping
+    // is needed. Just show the whole image centered.
+    if zoomed_w <= vp_w && zoomed_h <= vp_h {
+        let img_widget = image(allocation.handle().clone())
+            .content_fit(ContentFit::Contain)
+            .width(Length::Fill)
+            .height(Length::Fill);
 
-    let visible_w = size
-        .width
-        .saturating_sub(crop_left_px + crop_right_px)
-        .max(1);
-    let visible_h = size
-        .height
-        .saturating_sub(crop_top_px + crop_bottom_px)
-        .max(1);
+        return container(img_widget)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+    }
 
-    let cropped_display_w = visible_w as f32 * zoom;
-    let cropped_display_h = visible_h as f32 * zoom;
+    // --- Crop-based zoom & pan ---
+    //
+    // The visible window in source pixels: viewport / zoom.
+    // Clamp to image dimensions so we never request more than exists.
+    let view_src_w = (vp_w / zoom).min(img_w);
+    let view_src_h = (vp_h / zoom).min(img_h);
 
-    // Crop the source image and render only the visible region at zoom scale.
-    let cropped_img = image(allocation.handle().clone())
-        .content_fit(iced::ContentFit::Fill)
-        .width(Length::Fixed(cropped_display_w))
-        .height(Length::Fixed(cropped_display_h))
-        .crop(iced::Rectangle {
-            x: crop_left_px,
-            y: crop_top_px,
-            width: visible_w,
-            height: visible_h,
-        });
+    // Center of the visible window in source pixels.
+    // Default center is the image center, pan shifts it.
+    // Pan is in logical (screen) pixels, so convert to source pixels
+    // by dividing by zoom.
+    let cx = img_w / 2.0 - pan.0 / zoom;
+    let cy = img_h / 2.0 - pan.1 / zoom;
 
-    // Position: left/top padding is the non-negative part of image_x/y.
-    let pad_left = image_x.max(0.0);
-    let pad_top = image_y.max(0.0);
+    // Top-left corner of the crop rectangle, clamped to valid range.
+    let crop_x = (cx - view_src_w / 2.0).clamp(0.0, img_w - view_src_w);
+    let crop_y = (cy - view_src_h / 2.0).clamp(0.0, img_h - view_src_h);
 
-    let positioned = container(cropped_img)
-        .width(Length::Shrink)
-        .height(Length::Shrink)
-        .padding(Padding {
-            top: pad_top,
-            right: 0.0,
-            bottom: 0.0,
-            left: pad_left,
-        });
+    let crop_rect = Rectangle {
+        x: crop_x.round() as u32,
+        y: crop_y.round() as u32,
+        width: view_src_w.round().max(1.0) as u32,
+        height: view_src_h.round().max(1.0) as u32,
+    };
 
-    container(positioned)
+    let img_widget = image(allocation.handle().clone())
+        .content_fit(ContentFit::Contain)
         .width(Length::Fill)
         .height(Length::Fill)
-        .clip(true)
+        .crop(crop_rect);
+
+    container(img_widget)
+        .width(Length::Fill)
+        .height(Length::Fill)
         .into()
 }
 

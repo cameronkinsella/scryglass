@@ -1,7 +1,9 @@
-//! UI widgets: toolbar, image display, and footer.
+//! UI widgets: toolbar, image display, footer, filmstrip, and slider.
 
+pub mod filmstrip;
 pub mod footer;
 pub mod image_display;
+pub mod nav_slider;
 pub mod toolbar;
 
 /// Format image dimensions for display (e.g. "256 × 512 pixels").
