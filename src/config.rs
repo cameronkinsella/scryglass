@@ -22,6 +22,11 @@ impl AppConfig {
     pub fn is_supported_extension(ext: &str) -> bool {
         SUPPORTED_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
     }
+
+    /// Returns the list of supported extensions (for file dialog filters).
+    pub fn supported_extensions() -> &'static [&'static str] {
+        SUPPORTED_EXTENSIONS
+    }
 }
 
 #[cfg(test)]

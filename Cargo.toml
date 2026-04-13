@@ -8,6 +8,7 @@ iced = { version = "0.14", features = ["image", "tokio"] }
 anyhow = "1"
 thiserror = "2"
 gif = "0.14"
+rfd = "0.15"
 
 [dev-dependencies]
 tempfile = "3"

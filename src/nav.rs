@@ -106,6 +106,11 @@ impl Nav {
     pub fn cursor(&self) -> usize {
         self.cursor
     }
+
+    /// Human-readable position label, e.g. "3/48".
+    pub fn position_label(&self) -> String {
+        format!("{}/{}", self.cursor + 1, self.files.len())
+    }
 }
 
 /// Scan `dir` for files with supported image extensions, returning a sorted list.

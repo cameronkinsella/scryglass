@@ -22,14 +22,15 @@ use iced::keyboard::Key;
 use iced::keyboard::key::Named;
 use iced::time::Instant;
 use iced::widget::image::Allocation;
+use iced::widget::{Stack, column, mouse_area};
 use iced::window;
-use iced::{Element, Event, Subscription, Task, event, keyboard};
+use iced::{Element, Event, Length, Subscription, Task, event, keyboard, mouse};
 
 use crate::cache;
 use crate::config::AppConfig;
 use crate::gif::{self, GifMessage, GifPlayer};
 use crate::nav::{self, Nav};
-use crate::viewer;
+use crate::widgets;
 
 /// How long the arrow key must be held before continuous scrolling begins.
 const HOLD_THRESHOLD: Duration = Duration::from_millis(300);
@@ -38,6 +39,8 @@ const HOLD_THRESHOLD: Duration = Duration::from_millis(300);
 pub struct App {
     state: AppState,
     config: AppConfig,
+    /// Whether the File dropdown menu is open.
+    file_menu_open: bool,
 }
 
 enum AppState {
@@ -53,10 +56,12 @@ enum AppState {
         _prefetch_allocations: Vec<Allocation>,
         /// True while waiting for the current image's allocation.
         loading: bool,
-        /// Which arrow key is currently held, and when the hold started.
+        /// Which direction key is currently held, and when the hold started.
         held_direction: Option<(Direction, Instant)>,
         /// Animated GIF player that handles decode cache and animation.
         gif_player: GifPlayer,
+        /// Cached file size in bytes of the current image (set on load).
+        current_file_size: u64,
     },
 }
 
@@ -74,12 +79,30 @@ pub enum Message {
     ImageAllocated(PathBuf, Result<Allocation, cache::Error>),
     /// Wrapped GIF player message.
     Gif(GifMessage),
+    /// Navigate forward (initial press).
     Next,
+    /// Navigate backward (initial press).
     Prev,
+    /// Navigate forward (OS key-repeat).
     NextRepeat,
+    /// Navigate backward (OS key-repeat).
     PrevRepeat,
+    /// Forward key released.
     NextReleased,
+    /// Backward key released.
     PrevReleased,
+    /// Toggle the File dropdown menu.
+    ToggleFileMenu,
+    /// Dismiss any open overlay (click outside menu).
+    DismissOverlay,
+    /// Open a file via native dialog.
+    OpenFile,
+    /// File dialog completed.
+    FileDialogResult(Option<PathBuf>),
+    /// Close the current image (return to empty state).
+    CloseFile,
+    /// Quit the application.
+    Quit,
 }
 
 /// Boot function: creates the initial state. Called once by iced.
@@ -87,6 +110,7 @@ pub fn boot() -> App {
     App {
         state: AppState::Empty,
         config: AppConfig::default(),
+        file_menu_open: false,
     }
 }
 
@@ -108,28 +132,15 @@ pub fn title(app: &App) -> String {
 /// Update function: handles messages and mutates state.
 pub fn update(app: &mut App, message: Message) -> Task<Message> {
     match message {
-        Message::FileDropped(path) => {
-            let dir = path
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| PathBuf::from("."));
-            let dropped = path;
-            Task::perform(
-                async move {
-                    let result = nav::scan_directory(&dir);
-                    match result {
-                        Ok(files) => (dropped, Ok(files)),
-                        Err(e) => (dropped, Err(e.to_string())),
-                    }
-                },
-                |(path, result)| Message::DirectoryScanned(path, result),
-            )
-        }
+        Message::FileDropped(path) => open_path(path),
 
         Message::DirectoryScanned(start_file, Ok(files)) => match Nav::new(files, &start_file) {
             Ok(nav) => {
                 let gif_player = GifPlayer::new();
                 let tasks = load_current_and_prefetch(&nav, &gif_player, app.config.prefetch_depth);
+                let file_size = std::fs::metadata(nav.current())
+                    .map(|m| m.len())
+                    .unwrap_or(0);
                 app.state = AppState::Viewing {
                     nav,
                     current_allocation: None,
@@ -137,6 +148,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     loading: true,
                     held_direction: None,
                     gif_player,
+                    current_file_size: file_size,
                 };
                 tasks
             }
@@ -190,7 +202,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             task.map(Message::Gif)
         }
 
-        // --- Initial press (non-repeat): always navigate + record hold start ---
+        // --- Initial press: always navigate + record hold start ---
         Message::Next => {
             let AppState::Viewing {
                 loading,
@@ -282,7 +294,70 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+
+        // --- Menu state ---
+        Message::ToggleFileMenu => {
+            app.file_menu_open = !app.file_menu_open;
+            Task::none()
+        }
+
+        Message::DismissOverlay => {
+            app.file_menu_open = false;
+            Task::none()
+        }
+
+        // --- File menu actions ---
+        Message::OpenFile => {
+            app.file_menu_open = false;
+            let extensions = AppConfig::supported_extensions()
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>();
+            Task::perform(
+                async move {
+                    let handle = rfd::AsyncFileDialog::new()
+                        .add_filter(
+                            "Images",
+                            &extensions.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                        )
+                        .pick_file()
+                        .await;
+                    handle.map(|h| h.path().to_path_buf())
+                },
+                Message::FileDialogResult,
+            )
+        }
+
+        Message::FileDialogResult(Some(path)) => open_path(path),
+        Message::FileDialogResult(None) => Task::none(),
+
+        Message::CloseFile => {
+            app.file_menu_open = false;
+            app.state = AppState::Empty;
+            Task::none()
+        }
+
+        Message::Quit => iced::exit(),
     }
+}
+
+/// Shared logic for opening a file (from drop or dialog).
+fn open_path(path: PathBuf) -> Task<Message> {
+    let dir = path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let dropped = path;
+    Task::perform(
+        async move {
+            let result = nav::scan_directory(&dir);
+            match result {
+                Ok(files) => (dropped, Ok(files)),
+                Err(e) => (dropped, Err(e.to_string())),
+            }
+        },
+        |(path, result)| Message::DirectoryScanned(path, result),
+    )
 }
 
 /// Navigate to the next/prev image.
@@ -292,6 +367,7 @@ fn navigate(app: &mut App, direction: Direction) -> Task<Message> {
         _prefetch_allocations,
         loading,
         gif_player,
+        current_file_size,
         ..
     } = &mut app.state
     else {
@@ -307,7 +383,10 @@ fn navigate(app: &mut App, direction: Direction) -> Task<Message> {
     gif_player.stop();
     _prefetch_allocations.clear();
 
-    // Prune GIF cache to current + neighbor window.
+    *current_file_size = std::fs::metadata(nav.current())
+        .map(|m| m.len())
+        .unwrap_or(0);
+
     let keep: HashSet<PathBuf> = {
         let mut set = HashSet::new();
         set.insert(nav.current().to_path_buf());
@@ -318,7 +397,6 @@ fn navigate(app: &mut App, direction: Direction) -> Task<Message> {
     };
     gif_player.prune_cache(&keep);
 
-    // Try to start from GIF cache first.
     let current_path = nav.current().to_path_buf();
     if gif::is_gif(&current_path)
         && let Some(gif_task) = gif_player.try_start_from_cache(&current_path)
@@ -363,23 +441,47 @@ fn prefetch_neighbors(nav: &Nav, gif_player: &GifPlayer, depth: usize) -> Task<M
     Task::batch(tasks)
 }
 
-/// View function: pure rendering, no side effects.
+/// View function: assembles toolbar, content area, and footer.
 pub fn view(app: &App) -> Element<'_, Message> {
-    match &app.state {
-        AppState::Empty => viewer::drop_prompt(),
+    let toolbar = widgets::toolbar::menu_bar(app.file_menu_open);
+
+    let content = match &app.state {
+        AppState::Empty => widgets::image_display::drop_prompt(),
         AppState::Viewing {
-            current_allocation, ..
-        } => {
-            if let Some(allocation) = current_allocation {
-                viewer::image_viewer(allocation)
-            } else {
-                viewer::loading_prompt()
+            nav,
+            current_allocation,
+            current_file_size,
+            ..
+        } => match current_allocation {
+            Some(allocation) => {
+                let size = allocation.size();
+                let footer = widgets::footer::footer(
+                    &widgets::format_dimensions(size.width, size.height),
+                    &widgets::format_file_size(*current_file_size),
+                    &nav.position_label(),
+                );
+                column![widgets::image_display::image_display(allocation), footer,].into()
             }
-        }
+            None => widgets::image_display::loading_prompt(),
+        },
+    };
+
+    // Main layout: toolbar on top, then content fills remaining space.
+    // If the file menu is open, layer the dropdown on top of the content
+    // area so it floats over the image instead of pushing it down.
+    if let Some(dropdown) = widgets::toolbar::dropdown(app.file_menu_open) {
+        let overlay = column![dropdown].width(Length::Fill).height(Length::Fill);
+
+        let stacked = Stack::with_children(vec![content, overlay.into()]);
+        // mouse_area wraps the whole view so clicking outside dismisses the menu.
+        let page = column![toolbar, stacked];
+        mouse_area(page).on_press(Message::DismissOverlay).into()
+    } else {
+        column![toolbar, content].into()
     }
 }
 
-/// Subscription: listens for keyboard/file-drop events, plus GIF animation ticks.
+/// Subscription: listens for keyboard/mouse/file-drop events, plus GIF animation ticks.
 pub fn subscription(app: &App) -> Subscription<Message> {
     let events = event::listen_with(handle_event);
 
@@ -398,37 +500,54 @@ pub fn subscription(app: &App) -> Subscription<Message> {
     events
 }
 
+/// Returns true if the key is a forward navigation key (ArrowRight or D).
+fn is_forward_key(key: &Key) -> bool {
+    matches!(key, Key::Named(Named::ArrowRight))
+        || matches!(key, Key::Character(c) if c.as_ref() == "d")
+}
+
+/// Returns true if the key is a backward navigation key (ArrowLeft or A).
+fn is_backward_key(key: &Key) -> bool {
+    matches!(key, Key::Named(Named::ArrowLeft))
+        || matches!(key, Key::Character(c) if c.as_ref() == "a")
+}
+
 fn handle_event(event: Event, _status: event::Status, _id: window::Id) -> Option<Message> {
-    match event {
+    match &event {
+        // --- Keyboard: initial press ---
         Event::Keyboard(keyboard::Event::KeyPressed {
-            key: Key::Named(Named::ArrowRight),
-            repeat: false,
-            ..
-        }) => Some(Message::Next),
+            key, repeat: false, ..
+        }) if is_forward_key(key) => Some(Message::Next),
+
         Event::Keyboard(keyboard::Event::KeyPressed {
-            key: Key::Named(Named::ArrowLeft),
-            repeat: false,
-            ..
-        }) => Some(Message::Prev),
+            key, repeat: false, ..
+        }) if is_backward_key(key) => Some(Message::Prev),
+
+        // --- Keyboard: OS key-repeat ---
         Event::Keyboard(keyboard::Event::KeyPressed {
-            key: Key::Named(Named::ArrowRight),
-            repeat: true,
-            ..
-        }) => Some(Message::NextRepeat),
+            key, repeat: true, ..
+        }) if is_forward_key(key) => Some(Message::NextRepeat),
+
         Event::Keyboard(keyboard::Event::KeyPressed {
-            key: Key::Named(Named::ArrowLeft),
-            repeat: true,
-            ..
-        }) => Some(Message::PrevRepeat),
-        Event::Keyboard(keyboard::Event::KeyReleased {
-            key: Key::Named(Named::ArrowRight),
-            ..
-        }) => Some(Message::NextReleased),
-        Event::Keyboard(keyboard::Event::KeyReleased {
-            key: Key::Named(Named::ArrowLeft),
-            ..
-        }) => Some(Message::PrevReleased),
-        Event::Window(window::Event::FileDropped(path)) => Some(Message::FileDropped(path)),
+            key, repeat: true, ..
+        }) if is_backward_key(key) => Some(Message::PrevRepeat),
+
+        // --- Keyboard: key released ---
+        Event::Keyboard(keyboard::Event::KeyReleased { key, .. }) if is_forward_key(key) => {
+            Some(Message::NextReleased)
+        }
+
+        Event::Keyboard(keyboard::Event::KeyReleased { key, .. }) if is_backward_key(key) => {
+            Some(Message::PrevReleased)
+        }
+
+        // --- Mouse: back/forward buttons (single navigation, no hold) ---
+        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Forward)) => Some(Message::Next),
+        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Back)) => Some(Message::Prev),
+
+        // --- File drop ---
+        Event::Window(window::Event::FileDropped(path)) => Some(Message::FileDropped(path.clone())),
+
         _ => None,
     }
 }
