@@ -3,12 +3,13 @@
 //! iced 0.14 uses free functions: boot() → State, update(&mut State, Message),
 //! view(&State) → Element. The `application()` builder wires them together.
 //!
-//! Images are loaded via `image::allocate()`, which returns an `Allocation`,
-//! a GPU-resident texture guaranteed to render immediately (no flicker).
+//! Images are decoded by the [`crate::media`] pipeline and uploaded as GPU
+//! `Allocation`s, which are guaranteed to render immediately (no flicker).
 //!
-//! Navigation is gated on image load: the cursor does not advance until the
-//! current image's `Allocation` arrives. During a key-hold, the next navigation
-//! fires only once the previous image is ready, no queued-up navigations.
+//! Navigation never blocks: every keypress moves the cursor. Cache hits
+//! display instantly, misses keep the previous image visible while a
+//! cancellable load runs. Stale loads (the user has moved on) are cancelled
+//! via a generation counter.
 //!
 //! A short press moves exactly one image. Continuous scrolling only begins
 //! after the key has been held for a brief threshold (`HOLD_THRESHOLD`),
@@ -34,6 +35,7 @@ use iced::{Event, Size, Subscription, Task, event, keyboard, mouse, window};
 
 use crate::config::AppConfig;
 use crate::gif::GifMessage;
+use crate::media::pipeline::Pipeline;
 use crate::ui;
 use crate::ui::toolbar::OpenMenu;
 
@@ -59,6 +61,8 @@ pub struct App {
     session: Session,
     /// Persisted settings (zoom mode, layout visibility, prefetch depth).
     config: AppConfig,
+    /// Load orchestrator: cancellation generations and priority lanes.
+    pipeline: Pipeline,
     /// Which toolbar dropdown menu is open (if any).
     open_menu: Option<OpenMenu>,
     /// Size of the viewport (content area below toolbar, above footer).
@@ -98,6 +102,7 @@ pub fn boot() -> (App, Task<Message>) {
     let mut app = App {
         session: Session::Empty,
         config: AppConfig::load(),
+        pipeline: Pipeline::new(),
         open_menu: None,
         viewport_size: Size::new(800.0, 600.0),
         last_cursor_pos: iced::Point::ORIGIN,
@@ -154,12 +159,9 @@ pub fn title(app: &App) -> String {
     let zoom_pct = (viewer.zoom * 100.0).round() as u32;
 
     let dims = viewer
-        .current_allocation
-        .as_ref()
-        .map(|a| {
-            let s = a.size();
-            ui::format_dimensions(s.width, s.height)
-        })
+        .displayed
+        .original_size()
+        .map(|(w, h)| ui::format_dimensions(w, h))
         .unwrap_or_default();
 
     let size = ui::file_size_label(viewer.current_file_size);
@@ -194,7 +196,7 @@ pub fn subscription(app: &App) -> Subscription<Message> {
     let events = event::listen_with(handle_event);
 
     if let Some(viewer) = app.viewer()
-        && !viewer.loading
+        && viewer.pending_since.is_none()
         && viewer.gif_player.is_animating()
         && let Some(delay) = viewer.gif_player.current_delay()
     {

@@ -1,20 +1,28 @@
 //! Update function: handles messages, mutates state, fires async tasks.
+//!
+//! Navigation NEVER blocks: every keypress moves the cursor immediately.
+//! A cache hit displays instantly. A miss keeps the previous image on
+//! screen and fires a cancellable load. Whatever load finishes for the
+//! path under the cursor wins ("latest wins" by path equality).
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 
-use iced::Task;
 use iced::time::Instant;
+use iced::widget::image::Handle;
+use iced::{Size, Task};
 
 use crate::cache;
 use crate::config::{AppConfig, ThemeChoice, ZoomMode};
 use crate::gif::{self, GifPlayer};
+use crate::media::pipeline::{Lane, Pipeline};
+use crate::media::registry::DecodeOpts;
+use crate::media::{DecodedMedia, MediaError};
 use crate::nav::{self, Nav};
 use crate::ui;
 use crate::ui::toolbar::OpenMenu;
 
 use super::message::{is_context_menu_message, is_menu_message};
-use super::state::{Direction, DragState, Session, Viewer};
+use super::state::{CachedImage, Direction, DisplayedImage, DragState, Session, Viewer};
 use super::viewer_math::{clamp_pan, compute_zoom, pan_for_zoom_toward_cursor};
 use super::{App, Message, TOOLBAR_HEIGHT, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, recalc_viewport};
 
@@ -41,41 +49,73 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
         Message::DirectoryScanned(start_file, Ok(files)) => match Nav::new(files, &start_file) {
             Ok(nav) => {
-                let gif_player = GifPlayer::new();
-                let tasks = Task::batch([
-                    load_current_and_prefetch(&nav, &gif_player, app.config.prefetch_depth),
-                    probe_file_size(nav.current().to_path_buf()),
-                ]);
-                app.session = Session::Viewing(Viewer::new(nav, gif_player));
-                tasks
+                let depth = app.config.prefetch_depth;
+                let budget = app.config.cache_budget_mb * 1024 * 1024;
+                let pipeline = app.pipeline.clone();
+
+                let mut viewer = Viewer::new(nav, GifPlayer::new(), budget);
+                let current = viewer.nav.current().to_path_buf();
+                let mut tasks = vec![probe_file_size(current.clone())];
+
+                if gif::is_gif(&current) {
+                    tasks.push(viewer.gif_player.decode_current(&current).map(Message::Gif));
+                } else {
+                    tasks.push(fire_load(&pipeline, &mut viewer, current, Lane::Current));
+                }
+                tasks.extend(fire_prefetch(&pipeline, &mut viewer, depth));
+
+                app.session = Session::Viewing(Box::new(viewer));
+                Task::batch(tasks)
             }
             Err(_) => Task::none(),
         },
 
         Message::DirectoryScanned(_start_file, Err(_err)) => Task::none(),
 
-        Message::ImageAllocated(path, Ok(allocation)) => {
+        Message::MediaLoaded { path, result } => {
             let zoom_mode = app.config.zoom_mode;
             let viewport = app.viewport_size;
+            let depth = app.config.prefetch_depth;
+            let pipeline = app.pipeline.clone();
             let Some(viewer) = app.viewer_mut() else {
                 return Task::none();
             };
 
-            if viewer.nav.current() == path {
-                let size = allocation.size();
-                if !viewer.manual_zoom || zoom_mode != ZoomMode::LockZoomRatio {
-                    viewer.zoom = compute_zoom(zoom_mode, size.width, size.height, viewport);
-                }
-                viewer.pan = (0.0, 0.0);
-                viewer.current_allocation = Some(allocation);
-                viewer.loading = false;
-            } else {
-                viewer.prefetch_allocations.push(allocation);
-            }
-            Task::none()
-        }
+            viewer.in_flight.remove(&path);
 
-        Message::ImageAllocated(_path, Err(_err)) => Task::none(),
+            match result {
+                Ok(image) => {
+                    // A "stale" decode is a free prefetch, so cache it anyway.
+                    viewer
+                        .cache
+                        .insert(path.clone(), image.clone(), image.byte_cost());
+                    if viewer.nav.current() == path {
+                        show_loaded(viewer, image, zoom_mode, viewport);
+                    }
+                    let pinned = viewer.pinned_paths(depth);
+                    viewer.cache.evict_over_budget(&pinned);
+                    Task::none()
+                }
+                Err(MediaError::Cancelled) => {
+                    // Cancelled loads that are still wanted get re-fired with
+                    // the live generation.
+                    if viewer.nav.current() == path {
+                        fire_load(&pipeline, viewer, path, Lane::Current)
+                    } else if viewer.pinned_paths(depth).contains(&path) {
+                        fire_load(&pipeline, viewer, path, Lane::Prefetch)
+                    } else {
+                        Task::none()
+                    }
+                }
+                Err(_err) => {
+                    if viewer.nav.current() == path {
+                        // Stop the spinner, the previous image stays visible.
+                        viewer.pending_since = None;
+                    }
+                    Task::none()
+                }
+            }
+        }
 
         Message::FileSizeProbed(path, size) => {
             if let Some(viewer) = app.viewer_mut()
@@ -93,19 +133,23 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 return Task::none();
             };
 
-            let is_first_frame = viewer.current_allocation.is_none()
-                || (viewer.loading && matches!(&gif_msg, gif::GifMessage::FrameAllocated(..)));
+            let is_first_frame = matches!(viewer.displayed, DisplayedImage::None)
+                || (viewer.pending_since.is_some()
+                    && matches!(&gif_msg, gif::GifMessage::FrameAllocated(..)));
 
             let (task, allocation) = viewer.gif_player.update(gif_msg, viewer.nav.current());
 
             if let Some(alloc) = allocation {
+                let size = alloc.size();
                 if is_first_frame && (!viewer.manual_zoom || zoom_mode != ZoomMode::LockZoomRatio) {
-                    let size = alloc.size();
                     viewer.zoom = compute_zoom(zoom_mode, size.width, size.height, viewport);
                     viewer.pan = (0.0, 0.0);
                 }
-                viewer.current_allocation = Some(alloc);
-                viewer.loading = false;
+                viewer.displayed = DisplayedImage::Full {
+                    allocation: alloc,
+                    original_size: (size.width, size.height),
+                };
+                viewer.pending_since = None;
             }
 
             task.map(Message::Gif)
@@ -117,9 +161,6 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 return Task::none();
             };
             viewer.held_direction = Some((Direction::Forward, Instant::now()));
-            if viewer.loading {
-                return Task::none();
-            }
             navigate(app, NavTarget::Delta(Direction::Forward))
         }
 
@@ -128,9 +169,6 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 return Task::none();
             };
             viewer.held_direction = Some((Direction::Backward, Instant::now()));
-            if viewer.loading {
-                return Task::none();
-            }
             navigate(app, NavTarget::Delta(Direction::Backward))
         }
 
@@ -143,7 +181,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 .held_direction
                 .map(|(_, t)| t.elapsed() >= super::HOLD_THRESHOLD)
                 .unwrap_or(false);
-            if !past || viewer.loading {
+            if !past {
                 return Task::none();
             }
             navigate(app, NavTarget::Delta(Direction::Forward))
@@ -157,7 +195,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 .held_direction
                 .map(|(_, t)| t.elapsed() >= super::HOLD_THRESHOLD)
                 .unwrap_or(false);
-            if !past || viewer.loading {
+            if !past {
                 return Task::none();
             }
             navigate(app, NavTarget::Delta(Direction::Backward))
@@ -263,11 +301,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             if let Some(viewer) = app.viewer_mut() {
                 viewer.manual_zoom = false;
 
-                if let Some(alloc) = &viewer.current_allocation {
-                    let size = alloc.size();
-                    viewer.zoom = compute_zoom(mode, size.width, size.height, viewport);
-                    let img_w = size.width as f32 * viewer.zoom;
-                    let img_h = size.height as f32 * viewer.zoom;
+                if let Some((w, h)) = viewer.displayed.original_size() {
+                    viewer.zoom = compute_zoom(mode, w, h, viewport);
+                    let img_w = w as f32 * viewer.zoom;
+                    let img_h = h as f32 * viewer.zoom;
                     viewer.pan = clamp_pan(viewer.pan, img_w, img_h, viewport);
                 }
             }
@@ -307,10 +344,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             );
             viewer.pan = pan_for_zoom_toward_cursor(viewer.pan, ratio, d);
 
-            if let Some(alloc) = &viewer.current_allocation {
-                let size = alloc.size();
-                let img_w = size.width as f32 * viewer.zoom;
-                let img_h = size.height as f32 * viewer.zoom;
+            if let Some((w, h)) = viewer.displayed.original_size() {
+                let img_w = w as f32 * viewer.zoom;
+                let img_h = h as f32 * viewer.zoom;
                 viewer.pan = clamp_pan(viewer.pan, img_w, img_h, viewport);
             }
             Task::none()
@@ -325,9 +361,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             };
 
             viewer.manual_zoom = false;
-            if let Some(alloc) = &viewer.current_allocation {
-                let size = alloc.size();
-                viewer.zoom = compute_zoom(zoom_mode, size.width, size.height, viewport);
+            if let Some((w, h)) = viewer.displayed.original_size() {
+                viewer.zoom = compute_zoom(zoom_mode, w, h, viewport);
             }
             viewer.pan = (0.0, 0.0);
             Task::none()
@@ -358,10 +393,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 let dy = pos.y - ds.start.y;
                 let new_pan = (ds.start_pan.0 + dx, ds.start_pan.1 + dy);
 
-                if let Some(alloc) = &viewer.current_allocation {
-                    let size = alloc.size();
-                    let img_w = size.width as f32 * viewer.zoom;
-                    let img_h = size.height as f32 * viewer.zoom;
+                if let Some((w, h)) = viewer.displayed.original_size() {
+                    let img_w = w as f32 * viewer.zoom;
+                    let img_h = h as f32 * viewer.zoom;
                     viewer.pan = clamp_pan(new_pan, img_w, img_h, viewport);
                 }
             }
@@ -386,17 +420,12 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 return Task::none();
             };
 
-            if !viewer.manual_zoom
-                && let Some(alloc) = &viewer.current_allocation
-            {
-                let s = alloc.size();
-                viewer.zoom = compute_zoom(zoom_mode, s.width, s.height, viewport);
-            }
-
-            if let Some(alloc) = &viewer.current_allocation {
-                let s = alloc.size();
-                let img_w = s.width as f32 * viewer.zoom;
-                let img_h = s.height as f32 * viewer.zoom;
+            if let Some((w, h)) = viewer.displayed.original_size() {
+                if !viewer.manual_zoom {
+                    viewer.zoom = compute_zoom(zoom_mode, w, h, viewport);
+                }
+                let img_w = w as f32 * viewer.zoom;
+                let img_h = h as f32 * viewer.zoom;
                 viewer.pan = clamp_pan(viewer.pan, img_w, img_h, viewport);
             }
             Task::none()
@@ -555,11 +584,13 @@ pub fn open_path(path: PathBuf) -> Task<Message> {
     )
 }
 
-/// Move the cursor (one step or to an absolute index), then reset per-image
-/// state and fire load + prefetch tasks.
+/// Move the cursor (one step or to an absolute index), then update the
+/// display from cache and fire loads. Never waits on anything.
 fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
     let depth = app.config.prefetch_depth;
     let zoom_mode = app.config.zoom_mode;
+    let viewport = app.viewport_size;
+    let pipeline = app.pipeline.clone();
     let Some(viewer) = app.viewer_mut() else {
         return Task::none();
     };
@@ -576,46 +607,114 @@ fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
         }
     }
 
-    viewer.loading = true;
+    // Everything in flight for the old position is now stale.
+    pipeline.bump_generation();
+
     viewer.gif_player.stop();
-    viewer.prefetch_allocations.clear();
     viewer.drag = None;
 
     // Reset pan on navigation. Zoom is preserved only in LockZoomRatio mode.
-    // Don't change zoom here. The previous image stays visible until the new
-    // allocation arrives (flicker prevention), so keep the old zoom to avoid a
-    // brief flash at the wrong scale. The correct zoom will be set in
-    // ImageAllocated / GifMessage::FrameAllocated.
+    // The previous image stays visible until the new one is ready (flicker
+    // prevention). Its zoom is kept until then to avoid a flash at the
+    // wrong scale.
     viewer.pan = (0.0, 0.0);
     if zoom_mode != ZoomMode::LockZoomRatio {
         viewer.manual_zoom = false;
     }
 
     viewer.current_file_size = None;
-    let probe = probe_file_size(viewer.nav.current().to_path_buf());
 
-    let keep: HashSet<PathBuf> = {
-        let mut set = HashSet::new();
-        set.insert(viewer.nav.current().to_path_buf());
-        for p in viewer.nav.peek_around(depth) {
-            set.insert(p);
-        }
-        set
-    };
+    // The GIF decode cache prunes by window, the image cache by byte budget.
+    let keep = viewer.pinned_paths(depth);
     viewer.gif_player.prune_cache(&keep);
 
-    let current_path = viewer.nav.current().to_path_buf();
-    if gif::is_gif(&current_path)
-        && let Some(gif_task) = viewer.gif_player.try_start_from_cache(&current_path)
-    {
-        let prefetch = prefetch_neighbors(&viewer.nav, &viewer.gif_player, depth);
-        return Task::batch([gif_task.map(Message::Gif), prefetch, probe]);
+    let current = viewer.nav.current().to_path_buf();
+    let mut tasks = vec![probe_file_size(current.clone())];
+
+    if gif::is_gif(&current) {
+        viewer.pending_since = Some(Instant::now());
+        if let Some(gif_task) = viewer.gif_player.try_start_from_cache(&current) {
+            tasks.push(gif_task.map(Message::Gif));
+        } else {
+            tasks.push(viewer.gif_player.decode_current(&current).map(Message::Gif));
+        }
+    } else if let Some(cached) = viewer.cache.get(&current).cloned() {
+        // Instant display, the common case within the prefetch window.
+        show_loaded(viewer, cached, zoom_mode, viewport);
+    } else {
+        viewer.pending_since = Some(Instant::now());
+        tasks.push(fire_load(&pipeline, viewer, current, Lane::Current));
     }
 
-    Task::batch([
-        load_current_and_prefetch(&viewer.nav, &viewer.gif_player, depth),
-        probe,
-    ])
+    tasks.extend(fire_prefetch(&pipeline, viewer, depth));
+
+    let pinned = viewer.pinned_paths(depth);
+    viewer.cache.evict_over_budget(&pinned);
+
+    Task::batch(tasks)
+}
+
+/// Put a loaded image on screen, computing zoom from its true dimensions.
+fn show_loaded(viewer: &mut Viewer, image: CachedImage, zoom_mode: ZoomMode, viewport: Size) {
+    let (w, h) = image.original_size;
+    if !viewer.manual_zoom || zoom_mode != ZoomMode::LockZoomRatio {
+        viewer.zoom = compute_zoom(zoom_mode, w, h, viewport);
+    }
+    viewer.pan = (0.0, 0.0);
+    viewer.displayed = DisplayedImage::Full {
+        allocation: image.allocation,
+        original_size: image.original_size,
+    };
+    viewer.pending_since = None;
+}
+
+/// Fire a pipeline load for `path` unless it's already cached or in flight.
+/// The resulting RGBA is uploaded to the GPU and lands as `MediaLoaded`.
+fn fire_load(pipeline: &Pipeline, viewer: &mut Viewer, path: PathBuf, lane: Lane) -> Task<Message> {
+    if viewer.cache.contains(&path) || viewer.in_flight.contains(&path) {
+        return Task::none();
+    }
+    viewer.in_flight.insert(path.clone());
+
+    let generation = pipeline.generation();
+    let load = pipeline.load(path.clone(), DecodeOpts::default(), lane, generation);
+
+    Task::perform(load, |r| r).then(move |result| match result {
+        Ok(DecodedMedia::Static(img)) => {
+            let original_size = img.original_size;
+            let handle = Handle::from_rgba(img.width, img.height, img.pixels);
+            let p = path.clone();
+            cache::allocate_handle(handle).map(move |upload| {
+                let result = upload
+                    .map(|allocation| CachedImage {
+                        allocation,
+                        original_size,
+                    })
+                    .map_err(|e| MediaError::Decode(format!("gpu upload failed: {e:?}")));
+                Message::MediaLoaded {
+                    path: p.clone(),
+                    result,
+                }
+            })
+        }
+        Err(e) => Task::done(Message::MediaLoaded {
+            path: path.clone(),
+            result: Err(e),
+        }),
+    })
+}
+
+/// Warm the prefetch window around the cursor.
+fn fire_prefetch(pipeline: &Pipeline, viewer: &mut Viewer, depth: usize) -> Vec<Task<Message>> {
+    let mut tasks = Vec::new();
+    for p in viewer.nav.peek_around(depth) {
+        if gif::is_gif(&p) {
+            tasks.push(viewer.gif_player.prefetch_decode(&p).map(Message::Gif));
+        } else {
+            tasks.push(fire_load(pipeline, viewer, p, Lane::Prefetch));
+        }
+    }
+    tasks
 }
 
 /// Fetch the file size off-thread, a stat on slow storage can stall for seconds and
@@ -631,37 +730,4 @@ fn probe_file_size(path: PathBuf) -> Task<Message> {
         },
         |(path, size)| Message::FileSizeProbed(path, size),
     )
-}
-
-/// Fire allocation/decode tasks for the current image and its neighbors.
-fn load_current_and_prefetch(nav: &Nav, gif_player: &GifPlayer, depth: usize) -> Task<Message> {
-    let current_path = nav.current().to_path_buf();
-
-    let current_task = if gif::is_gif(&current_path) {
-        gif_player.decode_current(&current_path).map(Message::Gif)
-    } else {
-        let p = current_path.clone();
-        cache::allocate_path(&p).map(move |result| Message::ImageAllocated(p.clone(), result))
-    };
-
-    let prefetch = prefetch_neighbors(nav, gif_player, depth);
-    Task::batch([current_task, prefetch])
-}
-
-/// Fire prefetch tasks for neighbor images/GIFs.
-fn prefetch_neighbors(nav: &Nav, gif_player: &GifPlayer, depth: usize) -> Task<Message> {
-    let tasks: Vec<Task<Message>> = nav
-        .peek_around(depth)
-        .into_iter()
-        .map(|p| {
-            if gif::is_gif(&p) {
-                gif_player.prefetch_decode(&p).map(Message::Gif)
-            } else {
-                let p2 = p.clone();
-                cache::allocate_path(&p)
-                    .map(move |result| Message::ImageAllocated(p2.clone(), result))
-            }
-        })
-        .collect();
-    Task::batch(tasks)
 }

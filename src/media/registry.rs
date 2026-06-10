@@ -30,7 +30,6 @@ impl Default for DecodeOpts {
 
 /// A pluggable image format decoder.
 pub trait ImageFormat: Send + Sync {
-    fn name(&self) -> &'static str;
     /// Lowercase extensions (no dot) this format claims.
     fn extensions(&self) -> &'static [&'static str];
     /// Whether the first bytes of a file look like this format.

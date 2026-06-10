@@ -71,6 +71,8 @@ impl ZoomMode {
 pub struct AppConfig {
     /// Number of images to pre-fetch in each direction.
     pub prefetch_depth: usize,
+    /// GPU image cache budget in megabytes.
+    pub cache_budget_mb: usize,
     /// Active color theme.
     pub theme: ThemeChoice,
     /// Zoom mode applied when opening/navigating images.
@@ -89,6 +91,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             prefetch_depth: 5,
+            cache_budget_mb: 512,
             theme: ThemeChoice::default(),
             zoom_mode: ZoomMode::default(),
             show_toolbar: true,
@@ -171,6 +174,7 @@ mod tests {
     fn toml_roundtrip_preserves_all_fields() {
         let cfg = AppConfig {
             prefetch_depth: 3,
+            cache_budget_mb: 256,
             theme: ThemeChoice::Light,
             zoom_mode: ZoomMode::ScaleToFit,
             show_toolbar: false,

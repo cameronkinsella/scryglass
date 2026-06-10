@@ -6,7 +6,7 @@ use iced::{Element, Length, mouse};
 use crate::ui;
 use crate::ui::toolbar::LayoutVisibility;
 
-use super::state::Session;
+use super::state::{DisplayedImage, Session};
 use super::{App, Message, TOOLBAR_HEIGHT};
 
 /// View function: assembles toolbar, content area, and footer.
@@ -19,13 +19,18 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
     let content = match &app.session {
         Session::Empty => ui::image_display::drop_prompt(),
-        Session::Viewing(viewer) => match &viewer.current_allocation {
-            Some(allocation) => {
-                let size = allocation.size();
+        Session::Viewing(viewer) => match &viewer.displayed {
+            DisplayedImage::Full {
+                allocation,
+                original_size,
+            } => {
+                let texture = allocation.size();
                 let zoom_pct = (viewer.zoom * 100.0).round() as u32;
 
                 let image_view = ui::image_display::image_display(
-                    allocation,
+                    allocation.handle(),
+                    (texture.width, texture.height),
+                    *original_size,
                     viewer.zoom,
                     viewer.pan,
                     (app.viewport_size.width, app.viewport_size.height),
@@ -69,7 +74,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 }
                 if app.config.show_footer {
                     let footer = ui::footer::footer(
-                        &ui::format_dimensions(size.width, size.height),
+                        &ui::format_dimensions(original_size.0, original_size.1),
                         &ui::file_size_label(viewer.current_file_size),
                         zoom_pct,
                         &viewer.nav.position_label(),
@@ -79,7 +84,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
                 col.into()
             }
-            None => ui::image_display::loading_prompt(),
+            DisplayedImage::None => ui::image_display::loading_prompt(),
         },
     };
 

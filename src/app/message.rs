@@ -4,18 +4,22 @@
 use std::path::PathBuf;
 
 use iced::Size;
-use iced::widget::image::Allocation;
 
-use crate::cache;
 use crate::config::ZoomMode;
 use crate::gif::GifMessage;
+use crate::media::MediaError;
+
+use super::state::CachedImage;
 
 #[derive(Debug, Clone)]
 pub enum Message {
     FileDropped(PathBuf),
     DirectoryScanned(PathBuf, Result<Vec<PathBuf>, String>),
-    /// A static image allocation completed (current or prefetch).
-    ImageAllocated(PathBuf, Result<Allocation, cache::Error>),
+    /// A pipeline load finished (current or prefetch), successfully or not.
+    MediaLoaded {
+        path: PathBuf,
+        result: Result<CachedImage, MediaError>,
+    },
     /// Async file-size probe completed for the given path.
     FileSizeProbed(PathBuf, u64),
     /// Wrapped GIF player message.
@@ -125,7 +129,7 @@ pub fn is_menu_message(msg: &Message) -> bool {
             | Message::DragMove(_)
             | Message::DragEnd
             | Message::WindowResized(_)
-            | Message::ImageAllocated(_, _)
+            | Message::MediaLoaded { .. }
             | Message::FileSizeProbed(_, _)
             | Message::Gif(_)
             | Message::DirectoryScanned(_, _)
@@ -150,7 +154,7 @@ pub fn is_context_menu_message(msg: &Message) -> bool {
             // Passive events:
             | Message::DragMove(_)
             | Message::WindowResized(_)
-            | Message::ImageAllocated(_, _)
+            | Message::MediaLoaded { .. }
             | Message::FileSizeProbed(_, _)
             | Message::Gif(_)
             | Message::DirectoryScanned(_, _)

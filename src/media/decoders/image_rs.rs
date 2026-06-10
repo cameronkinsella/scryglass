@@ -16,10 +16,6 @@ use crate::media::{DecodedImage, DecodedMedia, MediaError};
 pub struct ImageRs;
 
 impl ImageFormat for ImageRs {
-    fn name(&self) -> &'static str {
-        "image-rs"
-    }
-
     fn extensions(&self) -> &'static [&'static str] {
         &[
             "png", "jpg", "jpeg", "bmp", "webp", "tiff", "tif", "ico", "avif",
