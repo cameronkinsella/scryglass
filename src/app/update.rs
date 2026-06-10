@@ -42,11 +42,11 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::DirectoryScanned(start_file, Ok(files)) => match Nav::new(files, &start_file) {
             Ok(nav) => {
                 let gif_player = GifPlayer::new();
-                let tasks = load_current_and_prefetch(&nav, &gif_player, app.config.prefetch_depth);
-                let file_size = std::fs::metadata(nav.current())
-                    .map(|m| m.len())
-                    .unwrap_or(0);
-                app.session = Session::Viewing(Viewer::new(nav, gif_player, file_size));
+                let tasks = Task::batch([
+                    load_current_and_prefetch(&nav, &gif_player, app.config.prefetch_depth),
+                    probe_file_size(nav.current().to_path_buf()),
+                ]);
+                app.session = Session::Viewing(Viewer::new(nav, gif_player));
                 tasks
             }
             Err(_) => Task::none(),
@@ -76,6 +76,15 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
 
         Message::ImageAllocated(_path, Err(_err)) => Task::none(),
+
+        Message::FileSizeProbed(path, size) => {
+            if let Some(viewer) = app.viewer_mut()
+                && viewer.nav.current() == path
+            {
+                viewer.current_file_size = Some(size);
+            }
+            Task::none()
+        }
 
         Message::Gif(gif_msg) => {
             let zoom_mode = app.config.zoom_mode;
@@ -582,9 +591,8 @@ fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
         viewer.manual_zoom = false;
     }
 
-    viewer.current_file_size = std::fs::metadata(viewer.nav.current())
-        .map(|m| m.len())
-        .unwrap_or(0);
+    viewer.current_file_size = None;
+    let probe = probe_file_size(viewer.nav.current().to_path_buf());
 
     let keep: HashSet<PathBuf> = {
         let mut set = HashSet::new();
@@ -601,10 +609,28 @@ fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
         && let Some(gif_task) = viewer.gif_player.try_start_from_cache(&current_path)
     {
         let prefetch = prefetch_neighbors(&viewer.nav, &viewer.gif_player, depth);
-        return Task::batch([gif_task.map(Message::Gif), prefetch]);
+        return Task::batch([gif_task.map(Message::Gif), prefetch, probe]);
     }
 
-    load_current_and_prefetch(&viewer.nav, &viewer.gif_player, depth)
+    Task::batch([
+        load_current_and_prefetch(&viewer.nav, &viewer.gif_player, depth),
+        probe,
+    ])
+}
+
+/// Fetch the file size off-thread, a stat on slow storage can stall for seconds and
+/// must never run inside `update()`.
+fn probe_file_size(path: PathBuf) -> Task<Message> {
+    Task::perform(
+        async move {
+            let size = tokio::fs::metadata(&path)
+                .await
+                .map(|m| m.len())
+                .unwrap_or(0);
+            (path, size)
+        },
+        |(path, size)| Message::FileSizeProbed(path, size),
+    )
 }
 
 /// Fire allocation/decode tasks for the current image and its neighbors.

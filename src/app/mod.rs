@@ -162,7 +162,7 @@ pub fn title(app: &App) -> String {
         })
         .unwrap_or_default();
 
-    let size = ui::format_file_size(viewer.current_file_size);
+    let size = ui::file_size_label(viewer.current_file_size);
 
     format!("{filename}  |  {position}  |  {zoom_pct}%  |  {dims}  |  {size}")
 }

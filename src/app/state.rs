@@ -31,8 +31,9 @@ pub struct Viewer {
     pub held_direction: Option<(Direction, Instant)>,
     /// Animated GIF player that handles decode cache and animation.
     pub gif_player: GifPlayer,
-    /// Cached file size in bytes of the current image (set on load).
-    pub current_file_size: u64,
+    /// File size in bytes of the current image. `None` while the async
+    /// metadata probe is in flight.
+    pub current_file_size: Option<u64>,
     /// Current zoom factor (1.0 = 100%).
     pub zoom: f32,
     /// Whether the user has manually adjusted zoom (scroll wheel).
@@ -44,8 +45,9 @@ pub struct Viewer {
 }
 
 impl Viewer {
-    /// Fresh viewer for a newly scanned directory, with the first load pending.
-    pub fn new(nav: Nav, gif_player: GifPlayer, file_size: u64) -> Self {
+    /// Fresh viewer for a newly scanned directory, with the first load and
+    /// metadata probe pending.
+    pub fn new(nav: Nav, gif_player: GifPlayer) -> Self {
         Self {
             nav,
             current_allocation: None,
@@ -53,7 +55,7 @@ impl Viewer {
             loading: true,
             held_direction: None,
             gif_player,
-            current_file_size: file_size,
+            current_file_size: None,
             zoom: 1.0,
             manual_zoom: false,
             pan: (0.0, 0.0),

@@ -16,6 +16,8 @@ pub enum Message {
     DirectoryScanned(PathBuf, Result<Vec<PathBuf>, String>),
     /// A static image allocation completed (current or prefetch).
     ImageAllocated(PathBuf, Result<Allocation, cache::Error>),
+    /// Async file-size probe completed for the given path.
+    FileSizeProbed(PathBuf, u64),
     /// Wrapped GIF player message.
     Gif(GifMessage),
     /// Navigate forward (initial press).
@@ -124,6 +126,7 @@ pub fn is_menu_message(msg: &Message) -> bool {
             | Message::DragEnd
             | Message::WindowResized(_)
             | Message::ImageAllocated(_, _)
+            | Message::FileSizeProbed(_, _)
             | Message::Gif(_)
             | Message::DirectoryScanned(_, _)
             | Message::FileDialogResult(_)
@@ -148,6 +151,7 @@ pub fn is_context_menu_message(msg: &Message) -> bool {
             | Message::DragMove(_)
             | Message::WindowResized(_)
             | Message::ImageAllocated(_, _)
+            | Message::FileSizeProbed(_, _)
             | Message::Gif(_)
             | Message::DirectoryScanned(_, _)
             | Message::FileDialogResult(_)

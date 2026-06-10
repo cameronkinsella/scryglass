@@ -70,7 +70,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 if app.config.show_footer {
                     let footer = ui::footer::footer(
                         &ui::format_dimensions(size.width, size.height),
-                        &ui::format_file_size(viewer.current_file_size),
+                        &ui::file_size_label(viewer.current_file_size),
                         zoom_pct,
                         &viewer.nav.position_label(),
                     );
