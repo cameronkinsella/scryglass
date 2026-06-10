@@ -113,7 +113,14 @@ pub fn view(app: &App) -> Element<'_, Message> {
             0.0
         };
         let adjusted_pos = iced::Point::new(pos.x, pos.y - toolbar_offset);
-        ui::context_menu::context_menu(adjusted_pos, app.config.show_toolbar)
+        // Keep the menu inside the stacked area (window minus toolbar).
+        let bounds = iced::Size::new(
+            app.window_size.width,
+            app.window_size.height - toolbar_offset,
+        );
+        let clamped =
+            ui::context_menu::clamp_menu_pos(adjusted_pos, ui::context_menu::MENU_SIZE, bounds);
+        ui::context_menu::context_menu(clamped, app.config.show_toolbar)
     } else {
         column![].width(Length::Fill).height(Length::Fill).into()
     };
