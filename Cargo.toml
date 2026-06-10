@@ -12,6 +12,7 @@ rfd = "0.15"
 open = "5"
 arboard = "3"
 iced_fonts = { version = "0.3", features = ["bootstrap"] }
+natord = "1.0.9"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_UI_Shell", "Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Registry"] }

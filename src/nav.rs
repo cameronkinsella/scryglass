@@ -135,11 +135,12 @@ pub fn scan_directory(dir: &Path) -> Result<Vec<PathBuf>, NavError> {
         })
         .collect();
 
+    // Natural, case-insensitive ordering: img2 before img10, like file managers.
     files.sort_by(|a, b| {
-        a.file_name()
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .cmp(&b.file_name().unwrap_or_default().to_ascii_lowercase())
+        natord::compare_ignore_case(
+            &a.file_name().unwrap_or_default().to_string_lossy(),
+            &b.file_name().unwrap_or_default().to_string_lossy(),
+        )
     });
 
     Ok(files)
@@ -285,6 +286,30 @@ mod tests {
             .map(|f| f.file_name().unwrap().to_str().unwrap())
             .collect();
         assert_eq!(names, &["apple.png", "Banana.png", "Cherry.png"]);
+    }
+
+    #[test]
+    fn scan_directory_sorts_numbers_naturally() {
+        let dir = TempDir::new().unwrap();
+        make_files(dir.path(), &["img10.png", "img2.png", "img1.png"]);
+        let files = scan_directory(dir.path()).unwrap();
+        let names: Vec<&str> = files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names, &["img1.png", "img2.png", "img10.png"]);
+    }
+
+    #[test]
+    fn scan_directory_natural_sort_is_case_insensitive() {
+        let dir = TempDir::new().unwrap();
+        make_files(dir.path(), &["B1.png", "a10.png", "a2.png"]);
+        let files = scan_directory(dir.path()).unwrap();
+        let names: Vec<&str> = files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names, &["a2.png", "a10.png", "B1.png"]);
     }
 
     #[test]
