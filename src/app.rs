@@ -1315,3 +1315,117 @@ fn handle_event(event: Event, _status: event::Status, _id: window::Id) -> Option
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VP: Size = Size {
+        width: 800.0,
+        height: 600.0,
+    };
+
+    // --- auto_zoom ---
+
+    #[test]
+    fn auto_zoom_returns_one_when_image_fits() {
+        assert_eq!(auto_zoom(400, 300, VP), 1.0);
+    }
+
+    #[test]
+    fn auto_zoom_returns_one_at_exact_viewport_size() {
+        assert_eq!(auto_zoom(800, 600, VP), 1.0);
+    }
+
+    #[test]
+    fn auto_zoom_shrinks_to_fit_width() {
+        // 1600 wide in an 800 viewport → 0.5, height fits at that scale.
+        assert_eq!(auto_zoom(1600, 600, VP), 0.5);
+    }
+
+    #[test]
+    fn auto_zoom_shrinks_to_fit_height() {
+        // 1200 tall in a 600 viewport → 0.5.
+        assert_eq!(auto_zoom(800, 1200, VP), 0.5);
+    }
+
+    #[test]
+    fn auto_zoom_uses_most_constrained_axis() {
+        // fit_w = 0.5, fit_h = 0.25 → 0.25.
+        assert_eq!(auto_zoom(1600, 2400, VP), 0.25);
+    }
+
+    #[test]
+    fn auto_zoom_zero_dimension_returns_one() {
+        assert_eq!(auto_zoom(0, 100, VP), 1.0);
+        assert_eq!(auto_zoom(100, 0, VP), 1.0);
+    }
+
+    // --- compute_zoom ---
+
+    #[test]
+    fn compute_zoom_auto_never_scales_up() {
+        assert_eq!(compute_zoom(ZoomMode::Auto, 400, 300, VP), 1.0);
+    }
+
+    #[test]
+    fn compute_zoom_lock_ratio_matches_auto_on_open() {
+        assert_eq!(
+            compute_zoom(ZoomMode::LockZoomRatio, 1600, 600, VP),
+            compute_zoom(ZoomMode::Auto, 1600, 600, VP),
+        );
+    }
+
+    #[test]
+    fn compute_zoom_scale_to_width_fills_width() {
+        // Scales up: 400 wide → 800 viewport = 2.0.
+        assert_eq!(compute_zoom(ZoomMode::ScaleToWidth, 400, 300, VP), 2.0);
+    }
+
+    #[test]
+    fn compute_zoom_scale_to_height_fills_height() {
+        // 300 tall → 600 viewport = 2.0.
+        assert_eq!(compute_zoom(ZoomMode::ScaleToHeight, 400, 300, VP), 2.0);
+    }
+
+    #[test]
+    fn compute_zoom_scale_to_fit_uses_min_axis() {
+        // fit_w = 2.0, fit_h = 6.0 → 2.0 (no overflow).
+        assert_eq!(compute_zoom(ZoomMode::ScaleToFit, 400, 100, VP), 2.0);
+    }
+
+    #[test]
+    fn compute_zoom_scale_to_fill_uses_max_axis() {
+        // fit_w = 2.0, fit_h = 6.0 → 6.0 (width overflows).
+        assert_eq!(compute_zoom(ZoomMode::ScaleToFill, 400, 100, VP), 6.0);
+    }
+
+    #[test]
+    fn compute_zoom_zero_dimension_returns_one() {
+        assert_eq!(compute_zoom(ZoomMode::ScaleToFill, 0, 100, VP), 1.0);
+    }
+
+    // --- clamp_pan ---
+
+    #[test]
+    fn clamp_pan_centers_image_smaller_than_viewport() {
+        assert_eq!(clamp_pan((50.0, -30.0), 400.0, 300.0, VP), (0.0, 0.0));
+    }
+
+    #[test]
+    fn clamp_pan_limits_to_half_the_excess() {
+        // Image 1000×800 in 800×600: excess/2 = (100, 100).
+        assert_eq!(clamp_pan((500.0, -500.0), 1000.0, 800.0, VP), (100.0, -100.0));
+    }
+
+    #[test]
+    fn clamp_pan_keeps_in_bounds_pan_unchanged() {
+        assert_eq!(clamp_pan((50.0, -50.0), 1000.0, 800.0, VP), (50.0, -50.0));
+    }
+
+    #[test]
+    fn clamp_pan_clamps_one_axis_independently() {
+        // Only width overflows: y is always forced to 0.
+        assert_eq!(clamp_pan((500.0, 40.0), 1000.0, 300.0, VP), (100.0, 0.0));
+    }
+}
