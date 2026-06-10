@@ -74,6 +74,8 @@ pub enum Message {
     FilmstripScroll(f32),
     /// Toggle toolbar visibility.
     ToggleToolbar,
+    /// Switch between the dark and light theme.
+    ToggleTheme,
     /// Show the context menu at the cursor position.
     ShowContextMenu,
     /// Dismiss the context menu.
@@ -108,6 +110,7 @@ pub fn is_menu_message(msg: &Message) -> bool {
             | Message::ToggleSlider
             | Message::ToggleFooter
             | Message::ToggleToolbar
+            | Message::ToggleTheme
             // Context menu messages:
             | Message::ShowContextMenu
             | Message::DismissContextMenu

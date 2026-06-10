@@ -7,7 +7,7 @@ use iced::Task;
 use iced::time::Instant;
 
 use crate::cache;
-use crate::config::{AppConfig, ZoomMode};
+use crate::config::{AppConfig, ThemeChoice, ZoomMode};
 use crate::gif::{self, GifPlayer};
 use crate::nav::{self, Nav};
 use crate::ui;
@@ -430,6 +430,15 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             app.config.show_toolbar = !app.config.show_toolbar;
             app.context_menu_pos = None;
             recalc_viewport(app);
+            save_config(app)
+        }
+
+        // --- Theme ---
+        Message::ToggleTheme => {
+            app.config.theme = match app.config.theme {
+                ThemeChoice::Dark => ThemeChoice::Light,
+                ThemeChoice::Light => ThemeChoice::Dark,
+            };
             save_config(app)
         }
 

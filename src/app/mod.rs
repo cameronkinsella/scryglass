@@ -121,6 +121,14 @@ fn initial_open_arg(mut args: impl Iterator<Item = OsString>) -> Option<PathBuf>
     (path.is_file() || path.is_dir()).then_some(path)
 }
 
+/// Theme function: returns the active theme from config.
+pub fn theme(app: &App) -> iced::Theme {
+    match app.config.theme {
+        crate::config::ThemeChoice::Dark => ui::theme::dark(),
+        crate::config::ThemeChoice::Light => ui::theme::light(),
+    }
+}
+
 /// Title function: returns the window title based on current state.
 ///
 /// When the footer is hidden, the title bar includes the info that

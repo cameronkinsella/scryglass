@@ -9,6 +9,7 @@ mod ui;
 fn main() -> anyhow::Result<()> {
     iced::application(app::boot, app::update, app::view)
         .title(app::title)
+        .theme(app::theme)
         .subscription(app::subscription)
         .font(iced_fonts::BOOTSTRAP_FONT_BYTES)
         .settings(iced::Settings {

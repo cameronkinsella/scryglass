@@ -3,44 +3,11 @@
 //! Renders a floating panel at the cursor position with options:
 //! toolbar toggle, copy image/path/filename, open location, properties.
 
-use iced::widget::button::{self, Status, Style};
-use iced::widget::{column, container, row, rule, text, toggler};
-use iced::{Background, Border, Color, Element, Length, Padding, Theme};
+use iced::widget::{button, column, container, row, rule, text, toggler};
+use iced::{Element, Length, Padding};
 
 use crate::app::Message;
-
-// ---------------------------------------------------------------------------
-// Styles
-// ---------------------------------------------------------------------------
-
-/// Menu item style: full-width, flat, highlight on hover.
-fn ctx_item_style(theme: &Theme, status: Status) -> Style {
-    let palette = theme.extended_palette();
-    match status {
-        Status::Active | Status::Disabled => Style {
-            background: None,
-            text_color: palette.background.base.text,
-            border: Border::default(),
-            ..Style::default()
-        },
-        Status::Hovered => Style {
-            background: Some(Background::Color(palette.primary.base.color)),
-            text_color: Color::WHITE,
-            border: Border::default(),
-            ..Style::default()
-        },
-        Status::Pressed => Style {
-            background: Some(Background::Color(palette.primary.strong.color)),
-            text_color: Color::WHITE,
-            border: Border::default(),
-            ..Style::default()
-        },
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+use crate::ui::theme;
 
 /// Render the context menu at the given position.
 ///
@@ -60,11 +27,11 @@ pub fn context_menu<'a>(pos: iced::Point, show_toolbar: bool) -> Element<'a, Mes
         .spacing(6)
         .align_y(iced::Alignment::Center);
 
-        button::Button::new(content)
+        button(content)
             .on_press(msg)
             .padding([5, 12])
             .width(Length::Fill)
-            .style(ctx_item_style as fn(&Theme, button::Status) -> button::Style)
+            .style(theme::menu_item)
             .into()
     };
 
@@ -107,7 +74,7 @@ pub fn context_menu<'a>(pos: iced::Point, show_toolbar: bool) -> Element<'a, Mes
         .width(220),
     )
     .padding(Padding::from(2))
-    .style(container::bordered_box);
+    .style(theme::panel);
 
     // Position the panel at the cursor location.
     container(panel)

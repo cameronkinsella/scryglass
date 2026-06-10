@@ -1,15 +1,16 @@
-//! Toolbar widget: "File" and "Zoom" dropdown menus.
+//! Toolbar widget: "File", "Zoom", and "Layout" dropdown menus.
 //!
-//! Renders a menu-bar style row. Clicking "File" or "Zoom" toggles a dropdown
-//! that floats over the content below. Menu items are flat, borderless buttons
+//! Renders a menu-bar style row. Clicking a tab toggles a dropdown that
+//! floats over the content below. Menu items are flat, borderless buttons
 //! with a subtle hover highlight, matching the look of a native menu bar.
+//! All colors come from [`crate::ui::theme`].
 
-use iced::widget::button::{self, Status, Style};
-use iced::widget::{column, container, row, text, toggler};
-use iced::{Background, Border, Color, Element, Length, Padding, Theme};
+use iced::widget::{button, column, container, row, text, toggler};
+use iced::{Element, Length, Padding};
 
 use crate::app::Message;
 use crate::config::ZoomMode;
+use crate::ui::theme;
 
 /// Layout visibility state passed into dropdown rendering.
 #[derive(Debug, Clone, Copy)]
@@ -27,110 +28,29 @@ pub enum OpenMenu {
     Layout,
 }
 
-// ---------------------------------------------------------------------------
-// Custom button styles
-// ---------------------------------------------------------------------------
-
-/// Menu-bar tab style: transparent by default, subtle highlight on hover.
-fn menu_tab_style(theme: &Theme, status: Status) -> Style {
-    let palette = theme.extended_palette();
-    match status {
-        Status::Active | Status::Disabled => Style {
-            background: None,
-            text_color: palette.background.base.text,
-            border: Border::default(),
-            ..Style::default()
-        },
-        Status::Hovered => Style {
-            background: Some(Background::Color(palette.background.weak.color)),
-            text_color: palette.background.base.text,
-            border: Border::default(),
-            ..Style::default()
-        },
-        Status::Pressed => Style {
-            background: Some(Background::Color(palette.background.strong.color)),
-            text_color: palette.background.base.text,
-            border: Border::default(),
-            ..Style::default()
-        },
-    }
-}
-
-/// Active (open) menu-bar tab: highlighted background.
-fn menu_tab_active_style(theme: &Theme, status: Status) -> Style {
-    let palette = theme.extended_palette();
-    let bg = match status {
-        Status::Pressed => palette.background.strong.color,
-        _ => palette.background.weak.color,
-    };
-    Style {
-        background: Some(Background::Color(bg)),
-        text_color: palette.background.base.text,
-        border: Border::default(),
-        ..Style::default()
-    }
-}
-
-/// Dropdown menu item style: full-width, flat, highlight on hover.
-fn menu_item_style(theme: &Theme, status: Status) -> Style {
-    let palette = theme.extended_palette();
-    match status {
-        Status::Active | Status::Disabled => Style {
-            background: None,
-            text_color: palette.background.base.text,
-            border: Border::default(),
-            ..Style::default()
-        },
-        Status::Hovered => Style {
-            background: Some(Background::Color(palette.primary.base.color)),
-            text_color: Color::WHITE,
-            border: Border::default(),
-            ..Style::default()
-        },
-        Status::Pressed => Style {
-            background: Some(Background::Color(palette.primary.strong.color)),
-            text_color: Color::WHITE,
-            border: Border::default(),
-            ..Style::default()
-        },
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
 /// Render just the menu bar row (always visible at the top).
 pub fn menu_bar<'a>(open_menu: Option<OpenMenu>) -> Element<'a, Message> {
-    let file_button = button::Button::new(text("File").size(13))
-        .on_press(Message::ToggleFileMenu)
-        .padding([4, 10])
-        .style(if open_menu == Some(OpenMenu::File) {
-            menu_tab_active_style as fn(&Theme, Status) -> Style
-        } else {
-            menu_tab_style as fn(&Theme, Status) -> Style
-        });
+    let tab = |label: &'a str, menu: OpenMenu, msg: Message| {
+        button(text(label).size(13))
+            .on_press(msg)
+            .padding([4, 10])
+            .style(if open_menu == Some(menu) {
+                theme::menu_tab_active
+            } else {
+                theme::menu_tab
+            })
+    };
 
-    let zoom_button = button::Button::new(text("Zoom").size(13))
-        .on_press(Message::ToggleZoomMenu)
-        .padding([4, 10])
-        .style(if open_menu == Some(OpenMenu::Zoom) {
-            menu_tab_active_style as fn(&Theme, Status) -> Style
-        } else {
-            menu_tab_style as fn(&Theme, Status) -> Style
-        });
+    let bar = row![
+        tab("File", OpenMenu::File, Message::ToggleFileMenu),
+        tab("Zoom", OpenMenu::Zoom, Message::ToggleZoomMenu),
+        tab("Layout", OpenMenu::Layout, Message::ToggleLayoutMenu),
+    ]
+    .padding([2, 4]);
 
-    let layout_button = button::Button::new(text("Layout").size(13))
-        .on_press(Message::ToggleLayoutMenu)
-        .padding([4, 10])
-        .style(if open_menu == Some(OpenMenu::Layout) {
-            menu_tab_active_style as fn(&Theme, Status) -> Style
-        } else {
-            menu_tab_style as fn(&Theme, Status) -> Style
-        });
-
-    row![file_button, zoom_button, layout_button]
-        .padding([2, 4])
+    container(bar)
+        .width(Length::Fill)
+        .style(theme::surface)
         .into()
 }
 
@@ -142,15 +62,16 @@ pub fn dropdown<'a>(
     open_menu: Option<OpenMenu>,
     current_zoom_mode: ZoomMode,
     layout_vis: LayoutVisibility,
+    light_theme: bool,
 ) -> Option<Element<'a, Message>> {
     let open = open_menu?;
 
     let item = |label: &str, msg: Message| {
-        button::Button::new(text(label.to_string()).size(13))
+        button(text(label.to_string()).size(13))
             .on_press(msg)
             .padding([5, 20])
             .width(Length::Fill)
-            .style(menu_item_style as fn(&Theme, button::Status) -> button::Style)
+            .style(theme::menu_item)
     };
 
     match open {
@@ -164,7 +85,7 @@ pub fn dropdown<'a>(
                 .width(150),
             )
             .padding(Padding::from(2))
-            .style(container::bordered_box);
+            .style(theme::panel);
 
             let positioned = container(panel).padding(Padding {
                 top: 0.0,
@@ -189,7 +110,7 @@ pub fn dropdown<'a>(
 
             let panel = container(column(items).width(180))
                 .padding(Padding::from(2))
-                .style(container::bordered_box);
+                .style(theme::panel);
 
             let positioned = container(panel).padding(Padding {
                 top: 0.0,
@@ -201,29 +122,28 @@ pub fn dropdown<'a>(
             Some(positioned.into())
         }
         OpenMenu::Layout => {
+            let toggle = |label: &'a str, active: bool, msg: fn(bool) -> Message| {
+                toggler(active)
+                    .label(label)
+                    .on_toggle(msg)
+                    .size(16)
+                    .text_size(13)
+            };
+
             let panel = container(
                 column![
-                    toggler(layout_vis.show_filmstrip)
-                        .label("Filmstrip")
-                        .on_toggle(|_| Message::ToggleFilmstrip)
-                        .size(16)
-                        .text_size(13),
-                    toggler(layout_vis.show_slider)
-                        .label("Slider")
-                        .on_toggle(|_| Message::ToggleSlider)
-                        .size(16)
-                        .text_size(13),
-                    toggler(layout_vis.show_footer)
-                        .label("Footer")
-                        .on_toggle(|_| Message::ToggleFooter)
-                        .size(16)
-                        .text_size(13),
+                    toggle("Filmstrip", layout_vis.show_filmstrip, |_| {
+                        Message::ToggleFilmstrip
+                    }),
+                    toggle("Slider", layout_vis.show_slider, |_| Message::ToggleSlider),
+                    toggle("Footer", layout_vis.show_footer, |_| Message::ToggleFooter),
+                    toggle("Light theme", light_theme, |_| Message::ToggleTheme),
                 ]
                 .spacing(6)
                 .padding([6, 12])
                 .width(180),
             )
-            .style(container::bordered_box);
+            .style(theme::panel);
 
             // Position under the "Layout" tab.
             let positioned = container(panel).padding(Padding {

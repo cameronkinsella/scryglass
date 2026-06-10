@@ -1,9 +1,10 @@
 //! Footer widget: image info on the left, directory position on the right.
 
-use iced::widget::{row, space, text};
+use iced::widget::{container, row, space, text};
 use iced::{Alignment, Element, Length};
 
 use crate::app::Message;
+use crate::ui::theme;
 
 /// Render the bottom footer bar.
 ///
@@ -48,7 +49,7 @@ pub fn footer<'a>(
     .align_y(Alignment::Center)
     .width(Length::Fixed(70.0));
 
-    row![
+    let bar = row![
         dimensions_item,
         file_size_item,
         space::horizontal(),
@@ -56,6 +57,10 @@ pub fn footer<'a>(
         position_item,
     ]
     .align_y(Alignment::Center)
-    .padding([4, 12])
-    .into()
+    .padding([4, 12]);
+
+    container(bar)
+        .width(Length::Fill)
+        .style(theme::surface)
+        .into()
 }

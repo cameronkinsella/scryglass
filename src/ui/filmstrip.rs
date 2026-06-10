@@ -7,69 +7,14 @@
 
 use std::path::Path;
 
-use iced::widget::button::{self, Status, Style};
-use iced::widget::{container, image, mouse_area, row, scrollable};
-use iced::{Background, Border, Color, Element, Length, Padding, Theme};
+use iced::widget::{button, container, image, mouse_area, row, scrollable};
+use iced::{Element, Length, Padding};
 
 use crate::app::Message;
+use crate::ui::theme;
 
 /// Thumbnail size in logical pixels.
 const THUMB_SIZE: f32 = 60.0;
-
-/// Button style for the current (selected) thumbnail, bright thick border.
-fn current_thumb_style(_theme: &Theme, status: Status) -> Style {
-    let highlight = Color::from_rgb(0.2, 0.6, 1.0); // vivid blue
-    let border = Border {
-        color: highlight,
-        width: 4.0,
-        radius: 4.0.into(),
-    };
-    match status {
-        Status::Hovered | Status::Pressed => Style {
-            background: Some(Background::Color(Color::from_rgba(0.2, 0.6, 1.0, 0.3))),
-            border,
-            ..Style::default()
-        },
-        _ => Style {
-            background: Some(Background::Color(Color::from_rgba(0.2, 0.6, 1.0, 0.1))),
-            border,
-            ..Style::default()
-        },
-    }
-}
-
-/// Button style for non-current thumbnails, visible hover highlight.
-fn thumb_style(_theme: &Theme, status: Status) -> Style {
-    match status {
-        Status::Hovered => Style {
-            background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.2))),
-            border: Border {
-                color: Color::from_rgba(1.0, 1.0, 1.0, 0.7),
-                width: 3.0,
-                radius: 4.0.into(),
-            },
-            ..Style::default()
-        },
-        Status::Pressed => Style {
-            background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.3))),
-            border: Border {
-                color: Color::WHITE,
-                width: 3.0,
-                radius: 4.0.into(),
-            },
-            ..Style::default()
-        },
-        _ => Style {
-            background: None,
-            border: Border {
-                color: Color::TRANSPARENT,
-                width: 3.0,
-                radius: 4.0.into(),
-            },
-            ..Style::default()
-        },
-    }
-}
 
 /// Render the filmstrip: a horizontal scrollable row of image thumbnails.
 pub fn filmstrip<'a>(files: &[impl AsRef<Path>], cursor: usize) -> Element<'a, Message> {
@@ -83,16 +28,14 @@ pub fn filmstrip<'a>(files: &[impl AsRef<Path>], cursor: usize) -> Element<'a, M
                 .width(Length::Fixed(THUMB_SIZE))
                 .height(Length::Fixed(THUMB_SIZE));
 
-            let style_fn: fn(&Theme, Status) -> Style = if i == cursor {
-                current_thumb_style
-            } else {
-                thumb_style
-            };
-
-            button::Button::new(img)
+            button(img)
                 .on_press(Message::FilmstripClicked(i))
                 .padding(2)
-                .style(style_fn)
+                .style(if i == cursor {
+                    theme::thumb_current
+                } else {
+                    theme::thumb
+                })
                 .into()
         })
         .collect();

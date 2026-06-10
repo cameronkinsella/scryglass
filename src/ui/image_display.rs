@@ -110,16 +110,24 @@ pub fn image_display(
 
 /// Render the empty/waiting state drop prompt.
 pub fn drop_prompt<'a>() -> Element<'a, Message> {
-    center(text("Drop an image here to begin").size(24))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    center(
+        text("Drop an image here to begin")
+            .size(24)
+            .style(crate::ui::theme::secondary_text),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
 
 /// Render a loading indicator.
 pub fn loading_prompt<'a>() -> Element<'a, Message> {
-    center(text("Loading…").size(24))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    center(
+        text("Loading…")
+            .size(24)
+            .style(crate::ui::theme::secondary_text),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }

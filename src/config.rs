@@ -14,6 +14,16 @@ const SUPPORTED_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff", "tif", "ico", "avif",
 ];
 
+/// Which color theme the UI uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ThemeChoice {
+    /// Near-black chrome designed for photo viewing.
+    #[default]
+    Dark,
+    /// Bright chrome for well-lit environments.
+    Light,
+}
+
 /// How the image zoom level is determined when opening/navigating.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ZoomMode {
@@ -61,6 +71,8 @@ impl ZoomMode {
 pub struct AppConfig {
     /// Number of images to pre-fetch in each direction.
     pub prefetch_depth: usize,
+    /// Active color theme.
+    pub theme: ThemeChoice,
     /// Zoom mode applied when opening/navigating images.
     pub zoom_mode: ZoomMode,
     /// Whether the toolbar is visible.
@@ -77,6 +89,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             prefetch_depth: 5,
+            theme: ThemeChoice::default(),
             zoom_mode: ZoomMode::default(),
             show_toolbar: true,
             show_filmstrip: true,
@@ -158,6 +171,7 @@ mod tests {
     fn toml_roundtrip_preserves_all_fields() {
         let cfg = AppConfig {
             prefetch_depth: 3,
+            theme: ThemeChoice::Light,
             zoom_mode: ZoomMode::ScaleToFit,
             show_toolbar: false,
             show_filmstrip: true,
@@ -165,6 +179,11 @@ mod tests {
             show_footer: true,
         };
         assert_eq!(AppConfig::from_toml(&cfg.to_toml()), cfg);
+    }
+
+    #[test]
+    fn default_theme_is_dark() {
+        assert_eq!(AppConfig::default().theme, ThemeChoice::Dark);
     }
 
     #[test]

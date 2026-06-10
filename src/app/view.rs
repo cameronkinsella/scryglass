@@ -89,9 +89,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // scroll position) when toggling menus.
 
     // Build the toolbar dropdown overlay (or invisible placeholder).
-    let toolbar_overlay: Element<'_, Message> = if let Some(dropdown) =
-        ui::toolbar::dropdown(app.open_menu, app.config.zoom_mode, layout_vis)
-    {
+    let toolbar_overlay: Element<'_, Message> = if let Some(dropdown) = ui::toolbar::dropdown(
+        app.open_menu,
+        app.config.zoom_mode,
+        layout_vis,
+        app.config.theme == crate::config::ThemeChoice::Light,
+    ) {
         column![dropdown]
             .width(Length::Fill)
             .height(Length::Fill)
