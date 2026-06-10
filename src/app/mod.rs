@@ -24,11 +24,13 @@ pub use message::Message;
 pub use update::update;
 pub use view::view;
 
+use std::ffi::OsString;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use iced::keyboard::Key;
 use iced::keyboard::key::Named;
-use iced::{Event, Size, Subscription, event, keyboard, mouse, window};
+use iced::{Event, Size, Subscription, Task, event, keyboard, mouse, window};
 
 use crate::config::{AppConfig, ZoomMode};
 use crate::gif::GifMessage;
@@ -98,8 +100,11 @@ impl App {
 }
 
 /// Boot function: creates the initial state. Called once by iced.
-pub fn boot() -> App {
-    App {
+///
+/// If a file or directory path was passed on the command line (e.g. via
+/// "Open with…" in a file manager), opening it starts immediately.
+pub fn boot() -> (App, Task<Message>) {
+    let app = App {
         session: Session::Empty,
         config: AppConfig::default(),
         open_menu: None,
@@ -112,7 +117,21 @@ pub fn boot() -> App {
         show_footer: true,
         window_size: Size::new(800.0, 600.0),
         context_menu_pos: None,
-    }
+    };
+
+    let task = initial_open_arg(std::env::args_os())
+        .map(update::open_path)
+        .unwrap_or_else(Task::none);
+
+    (app, task)
+}
+
+/// The first CLI argument as a path, if it points to an existing file
+/// or directory.
+fn initial_open_arg(mut args: impl Iterator<Item = OsString>) -> Option<PathBuf> {
+    let _exe = args.next();
+    let path = PathBuf::from(args.next()?);
+    (path.is_file() || path.is_dir()).then_some(path)
 }
 
 /// Title function: returns the window title based on current state.
@@ -255,5 +274,58 @@ fn handle_event(event: Event, _status: event::Status, _id: window::Id) -> Option
         Event::Window(window::Event::Resized(size)) => Some(Message::WindowResized(*size)),
 
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn args(items: &[&std::path::Path]) -> impl Iterator<Item = OsString> {
+        std::iter::once(OsString::from("scryglass.exe"))
+            .chain(items.iter().map(|p| p.as_os_str().to_owned()))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn initial_open_arg_returns_existing_file() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("photo.png");
+        fs::write(&file, b"").unwrap();
+        assert_eq!(initial_open_arg(args(&[&file])), Some(file));
+    }
+
+    #[test]
+    fn initial_open_arg_returns_existing_directory() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(
+            initial_open_arg(args(&[dir.path()])),
+            Some(dir.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn initial_open_arg_rejects_missing_path() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("nope.png");
+        assert_eq!(initial_open_arg(args(&[&missing])), None);
+    }
+
+    #[test]
+    fn initial_open_arg_without_args_returns_none() {
+        assert_eq!(initial_open_arg(args(&[])), None);
+    }
+
+    #[test]
+    fn initial_open_arg_ignores_extra_args() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("a.png");
+        fs::write(&file, b"").unwrap();
+        let extra = dir.path().join("b.png");
+        fs::write(&extra, b"").unwrap();
+        assert_eq!(initial_open_arg(args(&[&file, &extra])), Some(file));
     }
 }

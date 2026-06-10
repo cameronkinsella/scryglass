@@ -501,19 +501,32 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
     }
 }
 
-/// Shared logic for opening a file (from drop, dialog, or CLI argument).
+/// Shared logic for opening a path (from drop, dialog, or CLI argument).
+///
+/// A file opens at that file within its parent directory. A directory
+/// opens at its first supported image.
 pub fn open_path(path: PathBuf) -> Task<Message> {
-    let dir = path
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
-    let dropped = path;
     Task::perform(
         async move {
-            let result = nav::scan_directory(&dir);
-            match result {
-                Ok(files) => (dropped, Ok(files)),
-                Err(e) => (dropped, Err(e.to_string())),
+            let (dir, start) = if path.is_dir() {
+                (path, None)
+            } else {
+                let dir = path
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from("."));
+                (dir, Some(path))
+            };
+
+            match nav::scan_directory(&dir) {
+                Ok(files) => match start.or_else(|| files.first().cloned()) {
+                    Some(start) => (start, Ok(files)),
+                    None => (
+                        dir,
+                        Err(String::from("directory contains no supported images")),
+                    ),
+                },
+                Err(e) => (start.unwrap_or(dir), Err(e.to_string())),
             }
         },
         |(path, result)| Message::DirectoryScanned(path, result),
