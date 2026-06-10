@@ -1,4 +1,13 @@
-//! Application configuration: pre-fetch depth and supported image formats.
+//! Application configuration: persisted settings, pre-fetch depth, and
+//! supported image formats.
+//!
+//! Settings live in `config_dir()/scryglass/config.toml`. Every field has a
+//! serde default so the format can evolve additively: unknown keys are
+//! ignored and missing keys fall back to defaults.
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
 
 /// Supported image file extensions (lowercase, no dot).
 const SUPPORTED_EXTENSIONS: &[&str] = &[
@@ -6,7 +15,7 @@ const SUPPORTED_EXTENSIONS: &[&str] = &[
 ];
 
 /// How the image zoom level is determined when opening/navigating.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ZoomMode {
     /// 100% if it fits, shrink to fit if too large. Never scale up.
     #[default]
@@ -47,15 +56,33 @@ impl ZoomMode {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppConfig {
     /// Number of images to pre-fetch in each direction.
     pub prefetch_depth: usize,
+    /// Zoom mode applied when opening/navigating images.
+    pub zoom_mode: ZoomMode,
+    /// Whether the toolbar is visible.
+    pub show_toolbar: bool,
+    /// Whether the filmstrip is visible.
+    pub show_filmstrip: bool,
+    /// Whether the navigation slider is visible.
+    pub show_slider: bool,
+    /// Whether the footer is visible.
+    pub show_footer: bool,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { prefetch_depth: 5 }
+        Self {
+            prefetch_depth: 5,
+            zoom_mode: ZoomMode::default(),
+            show_toolbar: true,
+            show_filmstrip: true,
+            show_slider: true,
+            show_footer: true,
+        }
     }
 }
 
@@ -69,6 +96,43 @@ impl AppConfig {
     pub fn supported_extensions() -> &'static [&'static str] {
         SUPPORTED_EXTENSIONS
     }
+
+    /// Location of the persisted config file, if a config dir exists.
+    pub fn path() -> Option<PathBuf> {
+        dirs::config_dir().map(|d| d.join("scryglass").join("config.toml"))
+    }
+
+    /// Load the persisted config, falling back to defaults if the file is
+    /// missing or unreadable.
+    pub fn load() -> Self {
+        Self::path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|s| Self::from_toml(&s))
+            .unwrap_or_default()
+    }
+
+    /// Parse a TOML document. Unknown keys are ignored, missing keys take
+    /// their defaults, and a malformed document yields the full defaults.
+    pub fn from_toml(s: &str) -> Self {
+        toml::from_str(s).unwrap_or_default()
+    }
+
+    /// Serialize to a TOML document.
+    pub fn to_toml(&self) -> String {
+        toml::to_string_pretty(self).unwrap_or_default()
+    }
+
+    /// Write the config to disk. Errors are deliberately swallowed,
+    /// failing to persist settings must never disturb the viewer.
+    pub async fn save(self) {
+        let Some(path) = Self::path() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        let _ = tokio::fs::write(&path, self.to_toml()).await;
+    }
 }
 
 #[cfg(test)]
@@ -79,6 +143,65 @@ mod tests {
     fn default_prefetch_depth_is_5() {
         let cfg = AppConfig::default();
         assert_eq!(cfg.prefetch_depth, 5);
+    }
+
+    #[test]
+    fn default_shows_all_chrome() {
+        let cfg = AppConfig::default();
+        assert!(cfg.show_toolbar);
+        assert!(cfg.show_filmstrip);
+        assert!(cfg.show_slider);
+        assert!(cfg.show_footer);
+    }
+
+    #[test]
+    fn toml_roundtrip_preserves_all_fields() {
+        let cfg = AppConfig {
+            prefetch_depth: 3,
+            zoom_mode: ZoomMode::ScaleToFit,
+            show_toolbar: false,
+            show_filmstrip: true,
+            show_slider: false,
+            show_footer: true,
+        };
+        assert_eq!(AppConfig::from_toml(&cfg.to_toml()), cfg);
+    }
+
+    #[test]
+    fn from_toml_ignores_unknown_keys() {
+        let cfg = AppConfig::from_toml("some_future_setting = 42\nprefetch_depth = 7\n");
+        assert_eq!(cfg.prefetch_depth, 7);
+    }
+
+    #[test]
+    fn from_toml_defaults_missing_keys() {
+        let cfg = AppConfig::from_toml("show_footer = false\n");
+        assert!(!cfg.show_footer);
+        assert_eq!(cfg.prefetch_depth, 5);
+        assert_eq!(cfg.zoom_mode, ZoomMode::Auto);
+        assert!(cfg.show_toolbar);
+    }
+
+    #[test]
+    fn from_toml_empty_document_is_default() {
+        assert_eq!(AppConfig::from_toml(""), AppConfig::default());
+    }
+
+    #[test]
+    fn from_toml_malformed_document_is_default() {
+        assert_eq!(
+            AppConfig::from_toml("not valid toml ["),
+            AppConfig::default()
+        );
+    }
+
+    #[test]
+    fn zoom_mode_serializes_as_readable_name() {
+        let cfg = AppConfig {
+            zoom_mode: ZoomMode::LockZoomRatio,
+            ..Default::default()
+        };
+        assert!(cfg.to_toml().contains("LockZoomRatio"));
     }
 
     #[test]

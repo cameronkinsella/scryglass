@@ -55,7 +55,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::DirectoryScanned(_start_file, Err(_err)) => Task::none(),
 
         Message::ImageAllocated(path, Ok(allocation)) => {
-            let zoom_mode = app.zoom_mode;
+            let zoom_mode = app.config.zoom_mode;
             let viewport = app.viewport_size;
             let Some(viewer) = app.viewer_mut() else {
                 return Task::none();
@@ -78,7 +78,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::ImageAllocated(_path, Err(_err)) => Task::none(),
 
         Message::Gif(gif_msg) => {
-            let zoom_mode = app.zoom_mode;
+            let zoom_mode = app.config.zoom_mode;
             let viewport = app.viewport_size;
             let Some(viewer) = app.viewer_mut() else {
                 return Task::none();
@@ -248,30 +248,28 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         // --- Zoom mode ---
         Message::SetZoomMode(mode) => {
             app.open_menu = None;
-            app.zoom_mode = mode;
+            app.config.zoom_mode = mode;
             let viewport = app.viewport_size;
 
-            let Some(viewer) = app.viewer_mut() else {
-                return Task::none();
-            };
+            if let Some(viewer) = app.viewer_mut() {
+                viewer.manual_zoom = false;
 
-            viewer.manual_zoom = false;
-
-            if let Some(alloc) = &viewer.current_allocation {
-                let size = alloc.size();
-                viewer.zoom = compute_zoom(mode, size.width, size.height, viewport);
-                let img_w = size.width as f32 * viewer.zoom;
-                let img_h = size.height as f32 * viewer.zoom;
-                viewer.pan = clamp_pan(viewer.pan, img_w, img_h, viewport);
+                if let Some(alloc) = &viewer.current_allocation {
+                    let size = alloc.size();
+                    viewer.zoom = compute_zoom(mode, size.width, size.height, viewport);
+                    let img_w = size.width as f32 * viewer.zoom;
+                    let img_h = size.height as f32 * viewer.zoom;
+                    viewer.pan = clamp_pan(viewer.pan, img_w, img_h, viewport);
+                }
             }
-            Task::none()
+            save_config(app)
         }
 
         // --- Scroll-wheel zoom (toward cursor) ---
         Message::ScrollZoom(delta_y) => {
             let viewport = app.viewport_size;
             let cursor = app.last_cursor_pos;
-            let toolbar_offset = if app.show_toolbar {
+            let toolbar_offset = if app.config.show_toolbar {
                 TOOLBAR_HEIGHT
             } else {
                 0.0
@@ -311,7 +309,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
         // --- Double-click: reset zoom ---
         Message::ResetZoom => {
-            let zoom_mode = app.zoom_mode;
+            let zoom_mode = app.config.zoom_mode;
             let viewport = app.viewport_size;
             let Some(viewer) = app.viewer_mut() else {
                 return Task::none();
@@ -372,7 +370,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::WindowResized(size) => {
             app.window_size = size;
             recalc_viewport(app);
-            let zoom_mode = app.zoom_mode;
+            let zoom_mode = app.config.zoom_mode;
             let viewport = app.viewport_size;
 
             let Some(viewer) = app.viewer_mut() else {
@@ -397,21 +395,21 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
         // --- Slider and filmstrip visibility ---
         Message::ToggleFilmstrip => {
-            app.show_filmstrip = !app.show_filmstrip;
+            app.config.show_filmstrip = !app.config.show_filmstrip;
             recalc_viewport(app);
-            Task::none()
+            save_config(app)
         }
 
         Message::ToggleSlider => {
-            app.show_slider = !app.show_slider;
+            app.config.show_slider = !app.config.show_slider;
             recalc_viewport(app);
-            Task::none()
+            save_config(app)
         }
 
         Message::ToggleFooter => {
-            app.show_footer = !app.show_footer;
+            app.config.show_footer = !app.config.show_footer;
             recalc_viewport(app);
-            Task::none()
+            save_config(app)
         }
 
         Message::FilmstripScroll(delta_y) => {
@@ -429,10 +427,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
         // --- Toolbar visibility ---
         Message::ToggleToolbar => {
-            app.show_toolbar = !app.show_toolbar;
+            app.config.show_toolbar = !app.config.show_toolbar;
             app.context_menu_pos = None;
             recalc_viewport(app);
-            Task::none()
+            save_config(app)
         }
 
         // --- Context menu ---
@@ -501,6 +499,12 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
     }
 }
 
+/// Persist the current config in the background. Saving is fire-and-forget:
+/// the viewer must never wait on it.
+fn save_config(app: &App) -> Task<Message> {
+    Task::future(app.config.clone().save()).discard()
+}
+
 /// Shared logic for opening a path (from drop, dialog, or CLI argument).
 ///
 /// A file opens at that file within its parent directory. A directory
@@ -537,7 +541,7 @@ pub fn open_path(path: PathBuf) -> Task<Message> {
 /// state and fire load + prefetch tasks.
 fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
     let depth = app.config.prefetch_depth;
-    let zoom_mode = app.zoom_mode;
+    let zoom_mode = app.config.zoom_mode;
     let Some(viewer) = app.viewer_mut() else {
         return Task::none();
     };

@@ -12,9 +12,9 @@ use super::{App, Message, TOOLBAR_HEIGHT};
 /// View function: assembles toolbar, content area, and footer.
 pub fn view(app: &App) -> Element<'_, Message> {
     let layout_vis = LayoutVisibility {
-        show_filmstrip: app.show_filmstrip,
-        show_slider: app.show_slider,
-        show_footer: app.show_footer,
+        show_filmstrip: app.config.show_filmstrip,
+        show_slider: app.config.show_slider,
+        show_footer: app.config.show_footer,
     };
 
     let content = match &app.session {
@@ -55,19 +55,19 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 // Build the bottom section: filmstrip, slider, footer (each optional).
                 let mut col = column![interactive];
 
-                if app.show_filmstrip {
+                if app.config.show_filmstrip {
                     col = col.push(widgets::filmstrip::filmstrip(
                         viewer.nav.files(),
                         viewer.nav.cursor(),
                     ));
                 }
-                if app.show_slider {
+                if app.config.show_slider {
                     col = col.push(widgets::nav_slider::nav_slider(
                         viewer.nav.cursor(),
                         viewer.nav.len(),
                     ));
                 }
-                if app.show_footer {
+                if app.config.show_footer {
                     let footer = widgets::footer::footer(
                         &widgets::format_dimensions(size.width, size.height),
                         &widgets::format_file_size(viewer.current_file_size),
@@ -90,7 +90,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
     // Build the toolbar dropdown overlay (or invisible placeholder).
     let toolbar_overlay: Element<'_, Message> = if let Some(dropdown) =
-        widgets::toolbar::dropdown(app.open_menu, app.zoom_mode, layout_vis)
+        widgets::toolbar::dropdown(app.open_menu, app.config.zoom_mode, layout_vis)
     {
         column![dropdown]
             .width(Length::Fill)
@@ -104,13 +104,13 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // The context menu is positioned inside the stacked area (below toolbar),
     // but pos is in window coordinates, so subtract toolbar height.
     let ctx_overlay: Element<'_, Message> = if let Some(pos) = app.context_menu_pos {
-        let toolbar_offset = if app.show_toolbar {
+        let toolbar_offset = if app.config.show_toolbar {
             TOOLBAR_HEIGHT
         } else {
             0.0
         };
         let adjusted_pos = iced::Point::new(pos.x, pos.y - toolbar_offset);
-        widgets::context_menu::context_menu(adjusted_pos, app.show_toolbar)
+        widgets::context_menu::context_menu(adjusted_pos, app.config.show_toolbar)
     } else {
         column![].width(Length::Fill).height(Length::Fill).into()
     };
@@ -119,7 +119,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
     let mut page = column![].width(Length::Fill).height(Length::Fill);
 
-    if app.show_toolbar {
+    if app.config.show_toolbar {
         page = page.push(widgets::toolbar::menu_bar(app.open_menu));
     }
     page = page.push(stacked);

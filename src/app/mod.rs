@@ -32,7 +32,7 @@ use iced::keyboard::Key;
 use iced::keyboard::key::Named;
 use iced::{Event, Size, Subscription, Task, event, keyboard, mouse, window};
 
-use crate::config::{AppConfig, ZoomMode};
+use crate::config::AppConfig;
 use crate::gif::GifMessage;
 use crate::widgets;
 use crate::widgets::toolbar::OpenMenu;
@@ -57,24 +57,15 @@ const TOOLBAR_HEIGHT: f32 = 30.0;
 /// Application state: the single source of truth.
 pub struct App {
     session: Session,
+    /// Persisted settings (zoom mode, layout visibility, prefetch depth).
     config: AppConfig,
     /// Which toolbar dropdown menu is open (if any).
     open_menu: Option<OpenMenu>,
-    /// Current zoom mode.
-    zoom_mode: ZoomMode,
     /// Size of the viewport (content area below toolbar, above footer).
     /// Updated on every window resize.
     viewport_size: Size,
     /// Last known cursor position (updated on every CursorMoved event).
     last_cursor_pos: iced::Point,
-    /// Whether the toolbar is visible.
-    show_toolbar: bool,
-    /// Whether the filmstrip is visible.
-    show_filmstrip: bool,
-    /// Whether the navigation slider is visible.
-    show_slider: bool,
-    /// Whether the footer is visible.
-    show_footer: bool,
     /// Last known window size (for recalculating viewport on layout toggles).
     window_size: Size,
     /// Context menu position (window coords). `Some` when visible.
@@ -104,20 +95,16 @@ impl App {
 /// If a file or directory path was passed on the command line (e.g. via
 /// "Open with…" in a file manager), opening it starts immediately.
 pub fn boot() -> (App, Task<Message>) {
-    let app = App {
+    let mut app = App {
         session: Session::Empty,
-        config: AppConfig::default(),
+        config: AppConfig::load(),
         open_menu: None,
-        zoom_mode: ZoomMode::default(),
         viewport_size: Size::new(800.0, 600.0),
         last_cursor_pos: iced::Point::ORIGIN,
-        show_toolbar: true,
-        show_filmstrip: true,
-        show_slider: true,
-        show_footer: true,
         window_size: Size::new(800.0, 600.0),
         context_menu_pos: None,
     };
+    recalc_viewport(&mut app);
 
     let task = initial_open_arg(std::env::args_os())
         .map(update::open_path)
@@ -151,7 +138,7 @@ pub fn title(app: &App) -> String {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    if app.show_footer {
+    if app.config.show_footer {
         return filename;
     }
 
@@ -174,18 +161,18 @@ pub fn title(app: &App) -> String {
 
 /// Recalculate the viewport size based on window size and visible chrome.
 fn recalc_viewport(app: &mut App) {
-    let mut chrome_height: f32 = if app.show_toolbar {
+    let mut chrome_height: f32 = if app.config.show_toolbar {
         TOOLBAR_HEIGHT
     } else {
         0.0
     };
-    if app.show_filmstrip {
+    if app.config.show_filmstrip {
         chrome_height += 72.0; // filmstrip + padding
     }
-    if app.show_slider {
+    if app.config.show_slider {
         chrome_height += 28.0; // slider + padding
     }
-    if app.show_footer {
+    if app.config.show_footer {
         chrome_height += 25.0; // footer
     }
     app.viewport_size = Size::new(
