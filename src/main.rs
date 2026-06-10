@@ -2,6 +2,9 @@ mod app;
 mod cache;
 mod config;
 mod gif;
+// TODO: drop the allow once everything reads from the pipeline.
+#[allow(dead_code)]
+mod media;
 mod nav;
 mod platform;
 mod ui;
