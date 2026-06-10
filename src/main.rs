@@ -11,6 +11,10 @@ fn main() -> anyhow::Result<()> {
         .title(app::title)
         .subscription(app::subscription)
         .font(iced_fonts::BOOTSTRAP_FONT_BYTES)
+        .settings(iced::Settings {
+            vsync: false,
+            ..Default::default()
+        })
         .run()?;
     Ok(())
 }
