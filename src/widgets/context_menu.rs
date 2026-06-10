@@ -49,22 +49,24 @@ fn ctx_item_style(theme: &Theme, status: Status) -> Style {
 pub fn context_menu<'a>(pos: iced::Point, show_toolbar: bool) -> Element<'a, Message> {
     use iced_fonts::bootstrap;
 
-    let item =
-        |icon_fn: fn() -> iced::widget::Text<'a>, label: &str, msg: Message| -> Element<'a, Message> {
-            let content = row![
-                icon_fn().size(14).width(Length::Fixed(20.0)),
-                text(label.to_string()).size(13),
-            ]
-            .spacing(6)
-            .align_y(iced::Alignment::Center);
+    let item = |icon_fn: fn() -> iced::widget::Text<'a>,
+                label: &str,
+                msg: Message|
+     -> Element<'a, Message> {
+        let content = row![
+            icon_fn().size(14).width(Length::Fixed(20.0)),
+            text(label.to_string()).size(13),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
 
-            button::Button::new(content)
-                .on_press(msg)
-                .padding([5, 12])
-                .width(Length::Fill)
-                .style(ctx_item_style as fn(&Theme, button::Status) -> button::Style)
-                .into()
-        };
+        button::Button::new(content)
+            .on_press(msg)
+            .padding([5, 12])
+            .width(Length::Fill)
+            .style(ctx_item_style as fn(&Theme, button::Status) -> button::Style)
+            .into()
+    };
 
     let toolbar_toggle: Element<'a, Message> = toggler(show_toolbar)
         .label("Toolbar")
@@ -80,11 +82,27 @@ pub fn context_menu<'a>(pos: iced::Point, show_toolbar: bool) -> Element<'a, Mes
             toolbar_row,
             rule::horizontal(1),
             item(bootstrap::image, "Copy image", Message::CopyImage),
-            item(bootstrap::clipboard, "Copy file path", Message::CopyFilePath),
-            item(bootstrap::file_earmark, "Copy filename", Message::CopyFilename),
+            item(
+                bootstrap::clipboard,
+                "Copy file path",
+                Message::CopyFilePath
+            ),
+            item(
+                bootstrap::file_earmark,
+                "Copy filename",
+                Message::CopyFilename
+            ),
             rule::horizontal(1),
-            item(bootstrap::folder, "Open image location", Message::OpenImageLocation),
-            item(bootstrap::info_circle, "Image properties", Message::ImageProperties),
+            item(
+                bootstrap::folder,
+                "Open image location",
+                Message::OpenImageLocation
+            ),
+            item(
+                bootstrap::info_circle,
+                "Image properties",
+                Message::ImageProperties
+            ),
         ]
         .width(220),
     )
@@ -103,6 +121,3 @@ pub fn context_menu<'a>(pos: iced::Point, show_toolbar: bool) -> Element<'a, Mes
         .height(Length::Fill)
         .into()
 }
-
-
-

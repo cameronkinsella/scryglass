@@ -1,0 +1,140 @@
+//! View function: assembles toolbar, content area, overlays, and footer.
+
+use iced::widget::{Stack, column, mouse_area};
+use iced::{Element, Length, mouse};
+
+use crate::widgets;
+use crate::widgets::toolbar::LayoutVisibility;
+
+use super::state::Session;
+use super::{App, Message, TOOLBAR_HEIGHT};
+
+/// View function: assembles toolbar, content area, and footer.
+pub fn view(app: &App) -> Element<'_, Message> {
+    let layout_vis = LayoutVisibility {
+        show_filmstrip: app.show_filmstrip,
+        show_slider: app.show_slider,
+        show_footer: app.show_footer,
+    };
+
+    let content = match &app.session {
+        Session::Empty => widgets::image_display::drop_prompt(),
+        Session::Viewing(viewer) => match &viewer.current_allocation {
+            Some(allocation) => {
+                let size = allocation.size();
+                let zoom_pct = (viewer.zoom * 100.0).round() as u32;
+
+                let image_view = widgets::image_display::image_display(
+                    allocation,
+                    viewer.zoom,
+                    viewer.pan,
+                    (app.viewport_size.width, app.viewport_size.height),
+                );
+
+                // Wrap image area in mouse_area for scroll, drag, double-click, and right-click.
+                let interactive = mouse_area(image_view)
+                    .on_press(Message::DragStart)
+                    .on_right_press(Message::ShowContextMenu)
+                    .on_scroll(|delta| {
+                        let y = match delta {
+                            mouse::ScrollDelta::Lines { y, .. } => y,
+                            mouse::ScrollDelta::Pixels { y, .. } => {
+                                if y > 0.0 {
+                                    1.0
+                                } else if y < 0.0 {
+                                    -1.0
+                                } else {
+                                    0.0
+                                }
+                            }
+                        };
+                        Message::ScrollZoom(y)
+                    })
+                    .on_double_click(Message::ResetZoom);
+
+                // Build the bottom section: filmstrip, slider, footer (each optional).
+                let mut col = column![interactive];
+
+                if app.show_filmstrip {
+                    col = col.push(widgets::filmstrip::filmstrip(
+                        viewer.nav.files(),
+                        viewer.nav.cursor(),
+                    ));
+                }
+                if app.show_slider {
+                    col = col.push(widgets::nav_slider::nav_slider(
+                        viewer.nav.cursor(),
+                        viewer.nav.len(),
+                    ));
+                }
+                if app.show_footer {
+                    let footer = widgets::footer::footer(
+                        &widgets::format_dimensions(size.width, size.height),
+                        &widgets::format_file_size(viewer.current_file_size),
+                        zoom_pct,
+                        &viewer.nav.position_label(),
+                    );
+                    col = col.push(footer);
+                }
+
+                col.into()
+            }
+            None => widgets::image_display::loading_prompt(),
+        },
+    };
+
+    // Main layout: toolbar on top (if visible), then content fills remaining space.
+    // Always use Stack so the widget tree structure is stable. This
+    // prevents iced from losing internal widget state (e.g. filmstrip
+    // scroll position) when toggling menus.
+
+    // Build the toolbar dropdown overlay (or invisible placeholder).
+    let toolbar_overlay: Element<'_, Message> = if let Some(dropdown) =
+        widgets::toolbar::dropdown(app.open_menu, app.zoom_mode, layout_vis)
+    {
+        column![dropdown]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    } else {
+        column![].width(Length::Fill).height(Length::Fill).into()
+    };
+
+    // Build the context menu overlay (or invisible placeholder).
+    // The context menu is positioned inside the stacked area (below toolbar),
+    // but pos is in window coordinates, so subtract toolbar height.
+    let ctx_overlay: Element<'_, Message> = if let Some(pos) = app.context_menu_pos {
+        let toolbar_offset = if app.show_toolbar {
+            TOOLBAR_HEIGHT
+        } else {
+            0.0
+        };
+        let adjusted_pos = iced::Point::new(pos.x, pos.y - toolbar_offset);
+        widgets::context_menu::context_menu(adjusted_pos, app.show_toolbar)
+    } else {
+        column![].width(Length::Fill).height(Length::Fill).into()
+    };
+
+    let stacked = Stack::with_children(vec![content, toolbar_overlay, ctx_overlay]);
+
+    let mut page = column![].width(Length::Fill).height(Length::Fill);
+
+    if app.show_toolbar {
+        page = page.push(widgets::toolbar::menu_bar(app.open_menu));
+    }
+    page = page.push(stacked);
+
+    if app.context_menu_pos.is_some() {
+        mouse_area(page)
+            .on_press(Message::DismissContextMenu)
+            .on_right_press(Message::DismissContextMenu)
+            .into()
+    } else if app.open_menu.is_some() {
+        mouse_area(page)
+            .on_press(Message::DismissOverlay)
+            .on_right_press(Message::DismissOverlay)
+            .into()
+    } else {
+        mouse_area(page).into()
+    }
+}

@@ -83,10 +83,7 @@ mod windows {
 
         unsafe {
             // SHOpenFolderAndSelectItems requires COM to be initialized.
-            let _ = Com::CoInitializeEx(
-                std::ptr::null(),
-                Com::COINIT_APARTMENTTHREADED as u32,
-            );
+            let _ = Com::CoInitializeEx(std::ptr::null(), Com::COINIT_APARTMENTTHREADED as u32);
 
             // Parse the path into an ITEMIDLIST (PIDL).
             let wide: Vec<u16> = path
@@ -153,6 +150,3 @@ mod windows {
         }
     }
 }
-
-
-
