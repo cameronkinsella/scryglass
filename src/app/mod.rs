@@ -34,8 +34,8 @@ use iced::{Event, Size, Subscription, Task, event, keyboard, mouse, window};
 
 use crate::config::AppConfig;
 use crate::gif::GifMessage;
-use crate::widgets;
-use crate::widgets::toolbar::OpenMenu;
+use crate::ui;
+use crate::ui::toolbar::OpenMenu;
 
 use state::{Session, Viewer};
 
@@ -150,11 +150,11 @@ pub fn title(app: &App) -> String {
         .as_ref()
         .map(|a| {
             let s = a.size();
-            widgets::format_dimensions(s.width, s.height)
+            ui::format_dimensions(s.width, s.height)
         })
         .unwrap_or_default();
 
-    let size = widgets::format_file_size(viewer.current_file_size);
+    let size = ui::format_file_size(viewer.current_file_size);
 
     format!("{filename}  |  {position}  |  {zoom_pct}%  |  {dims}  |  {size}")
 }

@@ -10,8 +10,8 @@ use crate::cache;
 use crate::config::{AppConfig, ZoomMode};
 use crate::gif::{self, GifPlayer};
 use crate::nav::{self, Nav};
-use crate::widgets;
-use crate::widgets::toolbar::OpenMenu;
+use crate::ui;
+use crate::ui::toolbar::OpenMenu;
 
 use super::message::{is_context_menu_message, is_menu_message};
 use super::state::{Direction, DragState, Session, Viewer};
@@ -418,7 +418,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 x: -delta_y * 60.0,
                 y: 0.0,
             };
-            iced::widget::operation::scroll_by(widgets::filmstrip::filmstrip_id(), offset)
+            iced::widget::operation::scroll_by(ui::filmstrip::filmstrip_id(), offset)
         }
 
         Message::SliderChanged(index) | Message::FilmstripClicked(index) => {

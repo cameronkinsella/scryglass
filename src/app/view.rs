@@ -3,8 +3,8 @@
 use iced::widget::{Stack, column, mouse_area};
 use iced::{Element, Length, mouse};
 
-use crate::widgets;
-use crate::widgets::toolbar::LayoutVisibility;
+use crate::ui;
+use crate::ui::toolbar::LayoutVisibility;
 
 use super::state::Session;
 use super::{App, Message, TOOLBAR_HEIGHT};
@@ -18,13 +18,13 @@ pub fn view(app: &App) -> Element<'_, Message> {
     };
 
     let content = match &app.session {
-        Session::Empty => widgets::image_display::drop_prompt(),
+        Session::Empty => ui::image_display::drop_prompt(),
         Session::Viewing(viewer) => match &viewer.current_allocation {
             Some(allocation) => {
                 let size = allocation.size();
                 let zoom_pct = (viewer.zoom * 100.0).round() as u32;
 
-                let image_view = widgets::image_display::image_display(
+                let image_view = ui::image_display::image_display(
                     allocation,
                     viewer.zoom,
                     viewer.pan,
@@ -56,21 +56,21 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 let mut col = column![interactive];
 
                 if app.config.show_filmstrip {
-                    col = col.push(widgets::filmstrip::filmstrip(
+                    col = col.push(ui::filmstrip::filmstrip(
                         viewer.nav.files(),
                         viewer.nav.cursor(),
                     ));
                 }
                 if app.config.show_slider {
-                    col = col.push(widgets::nav_slider::nav_slider(
+                    col = col.push(ui::nav_slider::nav_slider(
                         viewer.nav.cursor(),
                         viewer.nav.len(),
                     ));
                 }
                 if app.config.show_footer {
-                    let footer = widgets::footer::footer(
-                        &widgets::format_dimensions(size.width, size.height),
-                        &widgets::format_file_size(viewer.current_file_size),
+                    let footer = ui::footer::footer(
+                        &ui::format_dimensions(size.width, size.height),
+                        &ui::format_file_size(viewer.current_file_size),
                         zoom_pct,
                         &viewer.nav.position_label(),
                     );
@@ -79,7 +79,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
                 col.into()
             }
-            None => widgets::image_display::loading_prompt(),
+            None => ui::image_display::loading_prompt(),
         },
     };
 
@@ -90,7 +90,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
     // Build the toolbar dropdown overlay (or invisible placeholder).
     let toolbar_overlay: Element<'_, Message> = if let Some(dropdown) =
-        widgets::toolbar::dropdown(app.open_menu, app.config.zoom_mode, layout_vis)
+        ui::toolbar::dropdown(app.open_menu, app.config.zoom_mode, layout_vis)
     {
         column![dropdown]
             .width(Length::Fill)
@@ -110,7 +110,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             0.0
         };
         let adjusted_pos = iced::Point::new(pos.x, pos.y - toolbar_offset);
-        widgets::context_menu::context_menu(adjusted_pos, app.config.show_toolbar)
+        ui::context_menu::context_menu(adjusted_pos, app.config.show_toolbar)
     } else {
         column![].width(Length::Fill).height(Length::Fill).into()
     };
@@ -120,7 +120,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let mut page = column![].width(Length::Fill).height(Length::Fill);
 
     if app.config.show_toolbar {
-        page = page.push(widgets::toolbar::menu_bar(app.open_menu));
+        page = page.push(ui::toolbar::menu_bar(app.open_menu));
     }
     page = page.push(stacked);
 
