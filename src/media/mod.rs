@@ -9,6 +9,10 @@ pub mod cache;
 pub mod decoders;
 pub mod pipeline;
 pub mod registry;
+pub mod thumbs;
+
+/// Longest side of generated thumbnails, in pixels.
+pub const THUMB_DIM: u32 = 256;
 
 /// A decoded still image, ready for GPU upload.
 pub struct DecodedImage {
@@ -20,6 +24,19 @@ pub struct DecodedImage {
     pub pixels: Vec<u8>,
     /// Dimensions after orientation but before any downscale. The image's
     /// true size, used for zoom math and the footer.
+    pub original_size: (u32, u32),
+    /// Small preview generated from the decoded pixels, powering the
+    /// filmstrip and instant placeholders. `None` when the image itself
+    /// is already thumbnail-sized.
+    pub thumbnail: Option<ThumbData>,
+}
+
+/// CPU-side thumbnail pixels (RGBA8, orientation applied).
+pub struct ThumbData {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+    /// True dimensions of the image this previews.
     pub original_size: (u32, u32),
 }
 

@@ -20,21 +20,39 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let content = match &app.session {
         Session::Empty => ui::image_display::drop_prompt(),
         Session::Viewing(viewer) => match &viewer.displayed {
-            DisplayedImage::Full {
-                allocation,
-                original_size,
-            } => {
-                let texture = allocation.size();
+            DisplayedImage::Full { .. } | DisplayedImage::Placeholder(_) => {
+                // Full images and blurred placeholders render through the
+                // same path: zoom/pan run on the true dimensions either way.
+                let (handle, texture_size, original_size, pixelated) = match &viewer.displayed {
+                    DisplayedImage::Full {
+                        allocation,
+                        original_size,
+                    } => {
+                        let texture = allocation.size();
+                        (
+                            allocation.handle(),
+                            (texture.width, texture.height),
+                            *original_size,
+                            app.config.pixelated_zoom,
+                        )
+                    }
+                    DisplayedImage::Placeholder(thumb) => {
+                        // Placeholders always smooth: the bilinear upscale
+                        // IS the blur.
+                        (&thumb.handle, thumb.size, thumb.original_size, false)
+                    }
+                    DisplayedImage::None => unreachable!(),
+                };
                 let zoom_pct = (viewer.zoom * 100.0).round() as u32;
 
                 let image_view = ui::image_display::image_display(
-                    allocation.handle(),
-                    (texture.width, texture.height),
-                    *original_size,
+                    handle,
+                    texture_size,
+                    original_size,
                     viewer.zoom,
                     viewer.pan,
                     (app.viewport_size.width, app.viewport_size.height),
-                    app.config.pixelated_zoom,
+                    pixelated,
                 );
 
                 // Wrap image area in mouse_area for scroll, drag, double-click, and right-click.

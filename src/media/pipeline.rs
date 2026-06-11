@@ -14,10 +14,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use tokio::io::AsyncReadExt;
 use tokio::sync::Semaphore;
 
 use super::registry::{self, DecodeOpts};
-use super::{DecodedMedia, MediaError};
+use super::{DecodedMedia, MediaError, ThumbData, thumbs};
 
 /// Which queue a load belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +35,7 @@ pub struct Pipeline {
     generation: Arc<AtomicU64>,
     current_lane: Arc<Semaphore>,
     prefetch_lane: Arc<Semaphore>,
+    thumb_lane: Arc<Semaphore>,
 }
 
 impl Pipeline {
@@ -45,6 +47,7 @@ impl Pipeline {
             generation: Arc::new(AtomicU64::new(0)),
             current_lane: Arc::new(Semaphore::new(2)),
             prefetch_lane: Arc::new(Semaphore::new(prefetch_permits)),
+            thumb_lane: Arc::new(Semaphore::new(2)),
         }
     }
 
@@ -107,6 +110,62 @@ impl Pipeline {
             Ok(media)
         }
     }
+}
+
+impl Pipeline {
+    /// Probe a file prefix for an embedded EXIF thumbnail. Fast enough
+    /// (a few hundred KiB read + a tiny decode) to provide a placeholder
+    /// while scrubbing, even over slow storage.
+    pub fn load_thumb(
+        &self,
+        path: PathBuf,
+        generation: u64,
+    ) -> impl Future<Output = Result<ThumbData, MediaError>> + Send + 'static {
+        let live = self.generation.clone();
+        let semaphore = self.thumb_lane.clone();
+
+        async move {
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .map_err(|_| MediaError::Cancelled)?;
+            if live.load(Ordering::SeqCst) != generation {
+                return Err(MediaError::Cancelled);
+            }
+
+            let prefix = read_prefix(&path, thumbs::PREFIX_LEN)
+                .await
+                .map_err(|e| MediaError::Read(e.to_string()))?;
+            if live.load(Ordering::SeqCst) != generation {
+                return Err(MediaError::Cancelled);
+            }
+
+            tokio::task::spawn_blocking(move || {
+                thumbs::thumb_from_prefix(&prefix).ok_or(MediaError::Unsupported)
+            })
+            .await
+            .map_err(|e| MediaError::Decode(e.to_string()))?
+        }
+    }
+}
+
+/// Read up to `n` bytes from the start of a file.
+async fn read_prefix(path: &std::path::Path, n: usize) -> std::io::Result<Vec<u8>> {
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut buf = vec![0u8; n];
+    let mut filled = 0;
+    loop {
+        let read = file.read(&mut buf[filled..]).await?;
+        if read == 0 {
+            break;
+        }
+        filled += read;
+        if filled == n {
+            break;
+        }
+    }
+    buf.truncate(filled);
+    Ok(buf)
 }
 
 impl Default for Pipeline {
@@ -181,6 +240,16 @@ mod tests {
 
         let result = task.await.unwrap();
         assert!(matches!(result, Err(MediaError::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn load_thumb_returns_unsupported_without_embedded_thumbnail() {
+        let dir = TempDir::new().unwrap();
+        let path = write_png(&dir, "a.png", 4, 2);
+        let pipeline = Pipeline::new();
+        let generation = pipeline.generation();
+        let result = pipeline.load_thumb(path, generation).await;
+        assert!(matches!(result, Err(MediaError::Unsupported)));
     }
 
     #[tokio::test]

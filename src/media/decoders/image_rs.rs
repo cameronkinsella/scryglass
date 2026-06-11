@@ -41,7 +41,8 @@ impl ImageFormat for ImageRs {
     }
 }
 
-/// Cap dimensions to the texture limit and convert to RGBA8.
+/// Cap dimensions to the texture limit, derive a thumbnail, and convert
+/// to RGBA8.
 fn finish(img: DynamicImage, opts: &DecodeOpts) -> DecodedImage {
     let original_size = (img.width(), img.height());
 
@@ -51,6 +52,22 @@ fn finish(img: DynamicImage, opts: &DecodeOpts) -> DecodedImage {
         img
     };
 
+    // Thumbnails come nearly free here: the pixels are already decoded.
+    let thumbnail = if img.width().max(img.height()) > crate::media::THUMB_DIM {
+        let t = img
+            .thumbnail(crate::media::THUMB_DIM, crate::media::THUMB_DIM)
+            .into_rgba8();
+        let (tw, th) = t.dimensions();
+        Some(crate::media::ThumbData {
+            width: tw,
+            height: th,
+            pixels: t.into_raw(),
+            original_size,
+        })
+    } else {
+        None
+    };
+
     let rgba = img.into_rgba8();
     let (width, height) = rgba.dimensions();
     DecodedImage {
@@ -58,6 +75,7 @@ fn finish(img: DynamicImage, opts: &DecodeOpts) -> DecodedImage {
         height,
         pixels: rgba.into_raw(),
         original_size,
+        thumbnail,
     }
 }
 

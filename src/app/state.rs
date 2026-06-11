@@ -4,11 +4,14 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use iced::time::Instant;
-use iced::widget::image::Allocation;
+use iced::widget::image::{Allocation, Handle};
 
 use crate::gif::GifPlayer;
 use crate::media::cache::ImageCache;
 use crate::nav::Nav;
+
+/// Thumbnail cache budget. Thumbs are ~256 KB each, so this holds 500+.
+const THUMB_BUDGET_BYTES: usize = 128 * 1024 * 1024;
 
 /// Whether the app is idle or actively viewing a directory of images.
 pub enum Session {
@@ -34,12 +37,40 @@ impl CachedImage {
     }
 }
 
+/// A small preview texture, used by the filmstrip and as the blurred
+/// placeholder while the full image decodes.
+#[derive(Debug, Clone)]
+pub struct Thumb {
+    pub handle: Handle,
+    /// Thumbnail texture dimensions.
+    pub size: (u32, u32),
+    /// True dimensions of the image this previews. Zoom math runs on
+    /// these so the placeholder's geometry matches the full image exactly.
+    pub original_size: (u32, u32),
+}
+
+impl Thumb {
+    /// Approximate memory cost in bytes (RGBA8).
+    pub fn byte_cost(&self) -> usize {
+        self.size.0 as usize * self.size.1 as usize * 4
+    }
+}
+
+/// A finished pipeline load: the full image plus its derived thumbnail.
+#[derive(Debug, Clone)]
+pub struct LoadedMedia {
+    pub image: CachedImage,
+    pub thumb: Option<Thumb>,
+}
+
 /// What the image area is currently showing.
 #[derive(Debug, Clone, Default)]
 pub enum DisplayedImage {
     /// Nothing yet, first image still loading.
     #[default]
     None,
+    /// A blurred low-res stand-in while the full image decodes.
+    Placeholder(Thumb),
     /// The fully decoded image.
     Full {
         allocation: Allocation,
@@ -52,6 +83,7 @@ impl DisplayedImage {
     pub fn original_size(&self) -> Option<(u32, u32)> {
         match self {
             DisplayedImage::None => None,
+            DisplayedImage::Placeholder(thumb) => Some(thumb.original_size),
             DisplayedImage::Full { original_size, .. } => Some(*original_size),
         }
     }
@@ -68,8 +100,12 @@ pub struct Viewer {
     /// Holding an `Allocation` keeps iced's texture alive, so cache hits
     /// render instantly.
     pub cache: ImageCache<CachedImage>,
-    /// Paths with a load currently in flight, to avoid duplicate decodes.
+    /// Small previews for placeholders and the filmstrip.
+    pub thumbs: ImageCache<Thumb>,
+    /// Paths with a full load currently in flight, to avoid duplicate decodes.
     pub in_flight: HashSet<PathBuf>,
+    /// Paths with a thumbnail probe in flight.
+    pub in_flight_thumbs: HashSet<PathBuf>,
     /// When the current image's load started, if it isn't displayed yet.
     /// Drives the loading spinner (shown only after a grace period).
     pub pending_since: Option<Instant>,
@@ -98,7 +134,9 @@ impl Viewer {
             nav,
             displayed: DisplayedImage::None,
             cache: ImageCache::new(cache_budget_bytes),
+            thumbs: ImageCache::new(THUMB_BUDGET_BYTES),
             in_flight: HashSet::new(),
+            in_flight_thumbs: HashSet::new(),
             pending_since: Some(Instant::now()),
             held_direction: None,
             gif_player,

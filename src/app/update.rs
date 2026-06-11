@@ -23,7 +23,9 @@ use crate::ui::toast::{Toast, ToastKind};
 use crate::ui::toolbar::OpenMenu;
 
 use super::message::{is_context_menu_message, is_menu_message};
-use super::state::{CachedImage, Direction, DisplayedImage, DragState, Session, Viewer};
+use super::state::{
+    CachedImage, Direction, DisplayedImage, DragState, LoadedMedia, Session, Thumb, Viewer,
+};
 use super::viewer_math::{clamp_pan, compute_zoom, pan_for_zoom_toward_cursor};
 use super::{App, Message, TOOLBAR_HEIGHT, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, recalc_viewport};
 
@@ -61,6 +63,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 if gif::is_gif(&current) {
                     tasks.push(viewer.gif_player.decode_current(&current).map(Message::Gif));
                 } else {
+                    tasks.push(fire_thumb(&pipeline, &mut viewer, current.clone()));
                     tasks.push(fire_load(&pipeline, &mut viewer, current, Lane::Current));
                 }
                 tasks.extend(fire_prefetch(&pipeline, &mut viewer, depth));
@@ -87,16 +90,22 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             viewer.in_flight.remove(&path);
 
             match result {
-                Ok(image) => {
+                Ok(loaded) => {
                     // A "stale" decode is a free prefetch, so cache it anyway.
+                    let image = loaded.image;
                     viewer
                         .cache
                         .insert(path.clone(), image.clone(), image.byte_cost());
+                    if let Some(thumb) = loaded.thumb {
+                        let cost = thumb.byte_cost();
+                        viewer.thumbs.insert(path.clone(), thumb, cost);
+                    }
                     if viewer.nav.current() == path {
                         show_loaded(viewer, image, zoom_mode, viewport);
                     }
                     let pinned = viewer.pinned_paths(depth);
                     viewer.cache.evict_over_budget(&pinned);
+                    viewer.thumbs.evict_over_budget(&pinned);
                     Task::none()
                 }
                 Err(MediaError::Cancelled) => {
@@ -122,6 +131,37 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                         .unwrap_or_default();
                     push_toast(app, ToastKind::Error, format!("{name}: {err}"))
                 }
+            }
+        }
+
+        Message::ThumbLoaded { path, result } => {
+            let zoom_mode = app.config.zoom_mode;
+            let viewport = app.viewport_size;
+            let pipeline = app.pipeline.clone();
+            let Some(viewer) = app.viewer_mut() else {
+                return Task::none();
+            };
+
+            viewer.in_flight_thumbs.remove(&path);
+
+            match result {
+                Ok(thumb) => {
+                    let cost = thumb.byte_cost();
+                    viewer.thumbs.insert(path.clone(), thumb.clone(), cost);
+                    // Show as placeholder if this is the image being waited on.
+                    if viewer.nav.current() == path && viewer.pending_since.is_some() {
+                        show_placeholder(viewer, thumb, zoom_mode, viewport);
+                    }
+                    Task::none()
+                }
+                Err(MediaError::Cancelled)
+                    if viewer.nav.current() == path && viewer.pending_since.is_some() =>
+                {
+                    fire_thumb(&pipeline, viewer, path)
+                }
+                // No embedded thumbnail (e.g. PNGs) or unreadable prefix:
+                // the full load is already on its way, nothing to surface.
+                Err(_) => Task::none(),
             }
         }
 
@@ -685,6 +725,14 @@ fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
         show_loaded(viewer, cached, zoom_mode, viewport);
     } else {
         viewer.pending_since = Some(Instant::now());
+        // Blurred placeholder, instantly from the thumb cache or within
+        // milliseconds from the file's embedded EXIF thumbnail. The image
+        // area tracks the cursor even when full decodes can't keep up.
+        if let Some(thumb) = viewer.thumbs.get(&current).cloned() {
+            show_placeholder(viewer, thumb, zoom_mode, viewport);
+        } else {
+            tasks.push(fire_thumb(&pipeline, viewer, current.clone()));
+        }
         tasks.push(fire_load(&pipeline, viewer, current, Lane::Current));
     }
 
@@ -710,6 +758,36 @@ fn show_loaded(viewer: &mut Viewer, image: CachedImage, zoom_mode: ZoomMode, vie
     viewer.pending_since = None;
 }
 
+/// Put a blurred thumbnail on screen while the full image decodes. Zoom is
+/// computed from the true dimensions, so geometry is identical when the
+/// full image swaps in, no jump. The load stays pending (spinner included).
+fn show_placeholder(viewer: &mut Viewer, thumb: Thumb, zoom_mode: ZoomMode, viewport: Size) {
+    let (w, h) = thumb.original_size;
+    if !viewer.manual_zoom || zoom_mode != ZoomMode::LockZoomRatio {
+        viewer.zoom = compute_zoom(zoom_mode, w, h, viewport);
+    }
+    viewer.pan = (0.0, 0.0);
+    viewer.displayed = DisplayedImage::Placeholder(thumb);
+}
+
+/// Fire an EXIF-thumbnail probe for `path` unless one is cached/in flight.
+fn fire_thumb(pipeline: &Pipeline, viewer: &mut Viewer, path: PathBuf) -> Task<Message> {
+    if viewer.thumbs.contains(&path) || viewer.in_flight_thumbs.contains(&path) {
+        return Task::none();
+    }
+    viewer.in_flight_thumbs.insert(path.clone());
+
+    let load = pipeline.load_thumb(path.clone(), pipeline.generation());
+    Task::perform(load, move |result| Message::ThumbLoaded {
+        path: path.clone(),
+        result: result.map(|data| Thumb {
+            handle: Handle::from_rgba(data.width, data.height, data.pixels),
+            size: (data.width, data.height),
+            original_size: data.original_size,
+        }),
+    })
+}
+
 /// Fire a pipeline load for `path` unless it's already cached or in flight.
 /// The resulting RGBA is uploaded to the GPU and lands as `MediaLoaded`.
 fn fire_load(pipeline: &Pipeline, viewer: &mut Viewer, path: PathBuf, lane: Lane) -> Task<Message> {
@@ -724,13 +802,21 @@ fn fire_load(pipeline: &Pipeline, viewer: &mut Viewer, path: PathBuf, lane: Lane
     Task::perform(load, |r| r).then(move |result| match result {
         Ok(DecodedMedia::Static(img)) => {
             let original_size = img.original_size;
+            let thumb = img.thumbnail.map(|t| Thumb {
+                handle: Handle::from_rgba(t.width, t.height, t.pixels),
+                size: (t.width, t.height),
+                original_size: t.original_size,
+            });
             let handle = Handle::from_rgba(img.width, img.height, img.pixels);
             let p = path.clone();
             cache::allocate_handle(handle).map(move |upload| {
                 let result = upload
-                    .map(|allocation| CachedImage {
-                        allocation,
-                        original_size,
+                    .map(|allocation| LoadedMedia {
+                        image: CachedImage {
+                            allocation,
+                            original_size,
+                        },
+                        thumb: thumb.clone(),
                     })
                     .map_err(|e| MediaError::Decode(format!("gpu upload failed: {e:?}")));
                 Message::MediaLoaded {

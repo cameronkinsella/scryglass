@@ -9,7 +9,7 @@ use crate::config::ZoomMode;
 use crate::gif::GifMessage;
 use crate::media::MediaError;
 
-use super::state::CachedImage;
+use super::state::{LoadedMedia, Thumb};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -18,7 +18,12 @@ pub enum Message {
     /// A pipeline load finished (current or prefetch), successfully or not.
     MediaLoaded {
         path: PathBuf,
-        result: Result<CachedImage, MediaError>,
+        result: Result<LoadedMedia, MediaError>,
+    },
+    /// A thumbnail probe finished (EXIF fast path).
+    ThumbLoaded {
+        path: PathBuf,
+        result: Result<Thumb, MediaError>,
     },
     /// Async file-size probe completed for the given path.
     FileSizeProbed(PathBuf, u64),
@@ -137,6 +142,7 @@ pub fn is_menu_message(msg: &Message) -> bool {
             | Message::DragEnd
             | Message::WindowResized(_)
             | Message::MediaLoaded { .. }
+            | Message::ThumbLoaded { .. }
             | Message::FileSizeProbed(_, _)
             | Message::SpinnerTick
             | Message::DismissToast(_)
@@ -164,6 +170,7 @@ pub fn is_context_menu_message(msg: &Message) -> bool {
             | Message::DragMove(_)
             | Message::WindowResized(_)
             | Message::MediaLoaded { .. }
+            | Message::ThumbLoaded { .. }
             | Message::FileSizeProbed(_, _)
             | Message::SpinnerTick
             | Message::DismissToast(_)
