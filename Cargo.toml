@@ -34,5 +34,9 @@ tempfile = "3"
 [features]
 # RAR support builds the vendored unrar C++ sources. On by default,
 # disable with --no-default-features if the toolchain can't build it.
-default = ["rar"]
+default = ["rar", "disk-thumbs"]
 rar = ["dep:unrar"]
+# Persistent thumbnail cache on disk (privacy-conscious: reconciled
+# against deleted files on folder open, 90-day expiry, size-capped).
+# Also gated at runtime by the `disk_thumbs` config setting.
+disk-thumbs = []

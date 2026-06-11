@@ -35,6 +35,7 @@ use iced::{Event, Size, Subscription, Task, event, keyboard, mouse, window};
 
 use crate::config::AppConfig;
 use crate::gif::GifMessage;
+use crate::media::disk_thumbs::DiskThumbs;
 use crate::media::pipeline::Pipeline;
 use crate::ui;
 use crate::ui::toast::Toast;
@@ -108,10 +109,24 @@ impl App {
 /// If a file or directory path was passed on the command line (e.g. via
 /// "Open with…" in a file manager), opening it starts immediately.
 pub fn boot() -> (App, Task<Message>) {
+    let config = AppConfig::load();
+    let disk_thumbs = DiskThumbs::create(config.disk_thumbs);
+
+    // Startup housekeeping for the persistent thumbnail store: expire
+    // long-unused entries and trim to the size cap. Local cache metadata
+    // only. Source files (and sleeping drives) are never touched.
+    let housekeeping = match disk_thumbs.clone() {
+        Some(disk) => Task::future(async move {
+            let _ = tokio::task::spawn_blocking(move || disk.housekeep()).await;
+        })
+        .discard(),
+        None => Task::none(),
+    };
+
     let mut app = App {
         session: Session::Empty,
-        config: AppConfig::load(),
-        pipeline: Pipeline::new(),
+        config,
+        pipeline: Pipeline::new(disk_thumbs),
         open_menu: None,
         viewport_size: Size::new(800.0, 600.0),
         last_cursor_pos: iced::Point::ORIGIN,
@@ -122,11 +137,11 @@ pub fn boot() -> (App, Task<Message>) {
     };
     recalc_viewport(&mut app);
 
-    let task = initial_open_arg(std::env::args_os())
+    let open = initial_open_arg(std::env::args_os())
         .map(update::open_path)
         .unwrap_or_else(Task::none);
 
-    (app, task)
+    (app, Task::batch([housekeeping, open]))
 }
 
 /// The first CLI argument as a path, if it points to an existing file

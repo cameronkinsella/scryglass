@@ -18,6 +18,7 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::Semaphore;
 
 use super::archive::ArchiveIndex;
+use super::disk_thumbs::DiskThumbs;
 use super::registry::{self, DecodeOpts};
 use super::{DecodedMedia, MediaError, ThumbData, thumbs};
 
@@ -82,10 +83,12 @@ pub struct Pipeline {
     prefetch_lane: Arc<Semaphore>,
     thumb_lane: Arc<Semaphore>,
     urgent_thumb_lane: Arc<Semaphore>,
+    /// Persistent thumbnail store, `None` when disabled by build or config.
+    disk: Option<DiskThumbs>,
 }
 
 impl Pipeline {
-    pub fn new() -> Self {
+    pub fn new(disk: Option<DiskThumbs>) -> Self {
         let prefetch_permits = std::thread::available_parallelism()
             .map(|n| (n.get() / 2).max(2))
             .unwrap_or(2);
@@ -97,7 +100,13 @@ impl Pipeline {
             // Wide enough that scrubbing never waits on the background
             // queue, bounded so a long key-hold can't flood the I/O pool.
             urgent_thumb_lane: Arc::new(Semaphore::new(8)),
+            disk,
         }
+    }
+
+    /// The persistent thumbnail store, if enabled.
+    pub fn disk(&self) -> Option<&DiskThumbs> {
+        self.disk.as_ref()
     }
 
     /// The generation of the most recent navigation.
@@ -126,6 +135,8 @@ impl Pipeline {
             Lane::Prefetch => self.prefetch_lane.clone(),
         };
 
+        let disk = self.disk.clone();
+
         async move {
             let _permit = semaphore
                 .acquire_owned()
@@ -142,12 +153,24 @@ impl Pipeline {
                 return Err(MediaError::Cancelled);
             }
 
+            let cache_key = cache_key(&source, &path);
             let media = tokio::task::spawn_blocking(move || {
+                let src_size = bytes.len() as u64;
                 let magic = &bytes[..bytes.len().min(16)];
                 let format = registry::global()
                     .find(&path, magic)
                     .ok_or(MediaError::Unsupported)?;
-                format.decode(&bytes, &opts)
+                let media = format.decode(&bytes, &opts)?;
+
+                // Decodes produce a thumbnail nearly for free. Persist it
+                // so the next session opens this folder warm.
+                if let (Some(disk), DecodedMedia::Static(img)) = (&disk, &media)
+                    && let Some(thumb) = &img.thumbnail
+                {
+                    let (container, name) = &cache_key;
+                    disk.store(container, name, thumb, None, src_size);
+                }
+                Ok::<_, MediaError>(media)
             })
             .await
             .map_err(|e| MediaError::Decode(e.to_string()))??;
@@ -157,6 +180,21 @@ impl Pipeline {
             }
             Ok(media)
         }
+    }
+}
+
+/// The (container, entry-name) pair identifying a file in the disk
+/// thumbnail cache: its folder + file name on disk, or the archive path +
+/// full entry name inside an archive.
+pub fn cache_key(source: &Source, path: &std::path::Path) -> (PathBuf, std::ffi::OsString) {
+    match source {
+        Source::Fs => (
+            path.parent()
+                .unwrap_or(std::path::Path::new(""))
+                .to_path_buf(),
+            path.file_name().unwrap_or_default().to_owned(),
+        ),
+        Source::Archive(index) => (index.archive_path.clone(), path.as_os_str().to_owned()),
     }
 }
 
@@ -185,12 +223,27 @@ impl Pipeline {
             ThumbUrgency::Urgent => self.urgent_thumb_lane.clone(),
             ThumbUrgency::Background => self.thumb_lane.clone(),
         };
+        let disk = self.disk.clone();
 
         async move {
             let _permit = semaphore
                 .acquire_owned()
                 .await
                 .map_err(|_| MediaError::Cancelled)?;
+
+            let (container, name) = cache_key(&source, &path);
+
+            // Fastest path: a thumbnail persisted by an earlier session.
+            if let Some(disk) = disk.clone() {
+                let (c, n) = (container.clone(), name.clone());
+                let hit = tokio::task::spawn_blocking(move || disk.load(&c, &n))
+                    .await
+                    .ok()
+                    .flatten();
+                if let Some(thumb) = hit {
+                    return Ok(thumb);
+                }
+            }
 
             // Cheap path: embedded EXIF preview from the file prefix.
             let prefix = source.read_start(&path, thumbs::PREFIX_LEN).await?;
@@ -199,6 +252,7 @@ impl Pipeline {
                     .await
                     .map_err(|e| MediaError::Decode(e.to_string()))?;
             if let Some(thumb) = from_prefix {
+                persist(&disk, &container, &name, &thumb).await;
                 return Ok(thumb);
             }
             if urgency == ThumbUrgency::Urgent {
@@ -207,13 +261,39 @@ impl Pipeline {
 
             // Background fallback: decode the whole file and downscale.
             let bytes = source.read_all(&path).await?;
-            tokio::task::spawn_blocking(move || {
+            let thumb = tokio::task::spawn_blocking(move || {
                 thumbs::thumb_from_bytes(&bytes).ok_or(MediaError::Unsupported)
             })
             .await
-            .map_err(|e| MediaError::Decode(e.to_string()))?
+            .map_err(|e| MediaError::Decode(e.to_string()))??;
+            persist(&disk, &container, &name, &thumb).await;
+            Ok(thumb)
         }
     }
+}
+
+/// Write a thumbnail to the persistent store, off-thread.
+async fn persist(
+    disk: &Option<DiskThumbs>,
+    container: &std::path::Path,
+    name: &std::ffi::OsStr,
+    thumb: &ThumbData,
+) {
+    let Some(disk) = disk.clone() else {
+        return;
+    };
+    let container = container.to_path_buf();
+    let name = name.to_owned();
+    let thumb = ThumbData {
+        width: thumb.width,
+        height: thumb.height,
+        pixels: thumb.pixels.clone(),
+        original_size: thumb.original_size,
+    };
+    let _ = tokio::task::spawn_blocking(move || {
+        disk.store(&container, &name, &thumb, None, 0);
+    })
+    .await;
 }
 
 /// Read up to `n` bytes from the start of a file.
@@ -237,7 +317,7 @@ async fn read_prefix(path: &std::path::Path, n: usize) -> std::io::Result<Vec<u8
 
 impl Default for Pipeline {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }
 
@@ -260,7 +340,7 @@ mod tests {
     async fn load_decodes_a_png_from_disk() {
         let dir = TempDir::new().unwrap();
         let path = write_png(&dir, "a.png", 4, 2);
-        let pipeline = Pipeline::new();
+        let pipeline = Pipeline::new(None);
         let generation = pipeline.generation();
 
         let media = pipeline
@@ -281,7 +361,7 @@ mod tests {
     async fn stale_generation_is_cancelled_before_read() {
         let dir = TempDir::new().unwrap();
         let path = write_png(&dir, "a.png", 4, 2);
-        let pipeline = Pipeline::new();
+        let pipeline = Pipeline::new(None);
         let generation = pipeline.generation();
 
         // Supersede the load before it runs.
@@ -303,7 +383,7 @@ mod tests {
     async fn queued_load_cancels_when_superseded_while_waiting() {
         let dir = TempDir::new().unwrap();
         let path = write_png(&dir, "a.png", 4, 2);
-        let pipeline = Pipeline::new();
+        let pipeline = Pipeline::new(None);
         let generation = pipeline.generation();
 
         // Hold every permit so the load parks at the semaphore.
@@ -330,7 +410,7 @@ mod tests {
     async fn urgent_thumb_fails_fast_without_embedded_preview() {
         let dir = TempDir::new().unwrap();
         let path = write_png(&dir, "a.png", 4, 2);
-        let pipeline = Pipeline::new();
+        let pipeline = Pipeline::new(None);
         let result = pipeline
             .load_thumb(Source::Fs, path, ThumbUrgency::Urgent)
             .await;
@@ -341,7 +421,7 @@ mod tests {
     async fn background_thumb_falls_back_to_full_decode() {
         let dir = TempDir::new().unwrap();
         let path = write_png(&dir, "a.png", 600, 300);
-        let pipeline = Pipeline::new();
+        let pipeline = Pipeline::new(None);
         let thumb = pipeline
             .load_thumb(Source::Fs, path, ThumbUrgency::Background)
             .await
@@ -351,7 +431,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_file_is_a_read_error() {
-        let pipeline = Pipeline::new();
+        let pipeline = Pipeline::new(None);
         let generation = pipeline.generation();
         let result = pipeline
             .load(
@@ -370,7 +450,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("notes.xyz");
         std::fs::write(&path, b"this is not an image at all").unwrap();
-        let pipeline = Pipeline::new();
+        let pipeline = Pipeline::new(None);
         let generation = pipeline.generation();
         let result = pipeline
             .load(

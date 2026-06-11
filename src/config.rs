@@ -80,6 +80,10 @@ pub struct AppConfig {
     /// Render with nearest-neighbor sampling when zoomed past 100%,
     /// crisp pixels for pixel art instead of smoothing.
     pub crisp_pixels: bool,
+    /// Persist thumbnails on disk between sessions (warm folders open
+    /// instantly). Reconciled against deleted files, expired after 90
+    /// unused days, size-capped. Requires the `disk-thumbs` build feature.
+    pub disk_thumbs: bool,
     /// Whether the toolbar is visible.
     pub show_toolbar: bool,
     /// Whether the filmstrip is visible.
@@ -98,6 +102,7 @@ impl Default for AppConfig {
             theme: ThemeChoice::default(),
             zoom_mode: ZoomMode::default(),
             crisp_pixels: false,
+            disk_thumbs: true,
             show_toolbar: true,
             show_filmstrip: true,
             show_slider: true,
@@ -182,6 +187,7 @@ mod tests {
             theme: ThemeChoice::Light,
             zoom_mode: ZoomMode::ScaleToFit,
             crisp_pixels: true,
+            disk_thumbs: false,
             show_toolbar: false,
             show_filmstrip: true,
             show_slider: false,

@@ -735,9 +735,37 @@ fn open_viewer(app: &mut App, nav: Nav, source: Source) -> Task<Message> {
     let window_w = app.window_size.width;
     let pipeline = app.pipeline.clone();
 
+    // Privacy hygiene: purge persisted thumbnails of files that were
+    // deleted from this folder/archive since the last visit. Uses the
+    // listing we already have, with no extra source I/O.
+    let reconcile = match pipeline.disk().cloned() {
+        Some(disk) => {
+            let (container, _) = crate::media::pipeline::cache_key(
+                &source,
+                nav.files()
+                    .first()
+                    .map_or_else(|| std::path::Path::new(""), |p| p.as_path()),
+            );
+            let live: Vec<std::ffi::OsString> = nav
+                .files()
+                .iter()
+                .map(|p| match &source {
+                    Source::Fs => p.file_name().unwrap_or_default().to_owned(),
+                    Source::Archive(_) => p.as_os_str().to_owned(),
+                })
+                .collect();
+            Task::future(async move {
+                let _ =
+                    tokio::task::spawn_blocking(move || disk.reconcile(&container, &live)).await;
+            })
+            .discard()
+        }
+        None => Task::none(),
+    };
+
     let mut viewer = Viewer::new(nav, source, GifPlayer::new(), budget);
     let current = viewer.nav.current().to_path_buf();
-    let mut tasks = vec![probe_size(&mut viewer, current.clone())];
+    let mut tasks = vec![reconcile, probe_size(&mut viewer, current.clone())];
 
     if viewer.is_fs() && gif::is_gif(&current) {
         tasks.push(viewer.gif_player.decode_current(&current).map(Message::Gif));

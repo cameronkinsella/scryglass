@@ -8,6 +8,11 @@
 pub mod archive;
 pub mod cache;
 pub mod decoders;
+#[cfg(feature = "disk-thumbs")]
+pub mod disk_thumbs;
+#[cfg(not(feature = "disk-thumbs"))]
+#[path = "disk_thumbs_stub.rs"]
+pub mod disk_thumbs;
 pub mod pipeline;
 pub mod registry;
 pub mod thumbs;
