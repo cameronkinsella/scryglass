@@ -487,6 +487,11 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             save_config(app)
         }
 
+        Message::TogglePixelatedZoom => {
+            app.config.pixelated_zoom = !app.config.pixelated_zoom;
+            save_config(app)
+        }
+
         // --- Theme ---
         Message::ToggleTheme => {
             app.config.theme = match app.config.theme {

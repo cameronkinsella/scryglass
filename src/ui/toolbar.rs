@@ -5,12 +5,12 @@
 //! with a subtle hover highlight, matching the look of a native menu bar.
 //! All colors come from [`crate::ui::theme`].
 
-use iced::widget::{button, column, container, row, text, toggler};
-use iced::{Element, Length, Padding};
+use iced::widget::{button, column, container, row, rule, text, toggler};
+use iced::{Alignment, Element, Length, Padding};
 
 use crate::app::Message;
 use crate::config::ZoomMode;
-use crate::ui::theme;
+use crate::ui::{icons, theme};
 
 /// Layout visibility state passed into dropdown rendering.
 #[derive(Debug, Clone, Copy)]
@@ -63,13 +63,32 @@ pub fn dropdown<'a>(
     current_zoom_mode: ZoomMode,
     layout_vis: LayoutVisibility,
     light_theme: bool,
+    pixelated_zoom: bool,
 ) -> Option<Element<'a, Message>> {
     let open = open_menu?;
 
+    // A plain action item: label only, aligned with checkable items.
     let item = |label: &str, msg: Message| {
         button(text(label.to_string()).size(13))
             .on_press(msg)
-            .padding([5, 20])
+            .padding([6, 12])
+            .width(Length::Fill)
+            .style(theme::menu_item)
+    };
+
+    // A checkable item: a fixed-width checkmark slot keeps labels aligned
+    // whether or not the entry is selected.
+    let checkable = |label: &str, selected: bool, msg: Message| {
+        let check = icons::check_lg()
+            .size(12)
+            .width(Length::Fixed(18.0))
+            .style(theme::check_indicator(selected));
+        let content = row![check, text(label.to_string()).size(13)]
+            .spacing(4)
+            .align_y(Alignment::Center);
+        button(content)
+            .on_press(msg)
+            .padding([6, 12])
             .width(Length::Fill)
             .style(theme::menu_item)
     };
@@ -82,13 +101,13 @@ pub fn dropdown<'a>(
                     item("Close", Message::CloseFile),
                     item("Quit", Message::Quit),
                 ]
-                .width(150),
+                .width(160),
             )
-            .padding(Padding::from(2))
+            .padding(Padding::from(4))
             .style(theme::panel);
 
             let positioned = container(panel).padding(Padding {
-                top: 0.0,
+                top: 2.0,
                 right: 0.0,
                 bottom: 0.0,
                 left: 6.0,
@@ -99,21 +118,31 @@ pub fn dropdown<'a>(
         OpenMenu::Zoom => {
             let mut items: Vec<Element<'a, Message>> = Vec::new();
             for &mode in ZoomMode::ALL {
-                let prefix = if mode == current_zoom_mode {
-                    "● "
-                } else {
-                    "   "
-                };
-                let label = format!("{prefix}{}", mode.label());
-                items.push(item(&label, Message::SetZoomMode(mode)).into());
+                items.push(
+                    checkable(
+                        mode.label(),
+                        mode == current_zoom_mode,
+                        Message::SetZoomMode(mode),
+                    )
+                    .into(),
+                );
             }
+            items.push(rule::horizontal(1).into());
+            items.push(
+                checkable(
+                    "Pixelated zoom",
+                    pixelated_zoom,
+                    Message::TogglePixelatedZoom,
+                )
+                .into(),
+            );
 
-            let panel = container(column(items).width(180))
-                .padding(Padding::from(2))
+            let panel = container(column(items).spacing(1).width(190))
+                .padding(Padding::from(4))
                 .style(theme::panel);
 
             let positioned = container(panel).padding(Padding {
-                top: 0.0,
+                top: 2.0,
                 right: 0.0,
                 bottom: 0.0,
                 left: 52.0,
@@ -147,7 +176,7 @@ pub fn dropdown<'a>(
 
             // Position under the "Layout" tab.
             let positioned = container(panel).padding(Padding {
-                top: 0.0,
+                top: 2.0,
                 right: 0.0,
                 bottom: 0.0,
                 left: 100.0,

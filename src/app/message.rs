@@ -86,6 +86,8 @@ pub enum Message {
     ToggleToolbar,
     /// Switch between the dark and light theme.
     ToggleTheme,
+    /// Toggle nearest-neighbor sampling when zoomed past 100%.
+    TogglePixelatedZoom,
     /// Show the context menu at the cursor position.
     ShowContextMenu,
     /// Dismiss the context menu.
@@ -121,6 +123,7 @@ pub fn is_menu_message(msg: &Message) -> bool {
             | Message::ToggleFooter
             | Message::ToggleToolbar
             | Message::ToggleTheme
+            | Message::TogglePixelatedZoom
             // Context menu messages:
             | Message::ShowContextMenu
             | Message::DismissContextMenu

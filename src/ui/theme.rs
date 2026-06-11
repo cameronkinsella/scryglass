@@ -152,6 +152,18 @@ pub fn secondary_text(theme: &Theme) -> text::Style {
     }
 }
 
+/// Menu selection checkmark: accent when selected, invisible otherwise
+/// (keeps label alignment identical across items).
+pub fn check_indicator(selected: bool) -> impl Fn(&Theme) -> text::Style {
+    move |theme| text::Style {
+        color: Some(if selected {
+            tokens(theme).accent
+        } else {
+            Color::TRANSPARENT
+        }),
+    }
+}
+
 /// Info toast card.
 pub fn toast_info(theme: &Theme) -> container::Style {
     panel(theme)

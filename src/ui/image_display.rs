@@ -14,7 +14,7 @@
 //! space at the end, so the same math drives full-resolution images,
 //! capped giants, and (later) low-res placeholders identically.
 
-use iced::widget::image::Handle;
+use iced::widget::image::{FilterMethod, Handle};
 use iced::widget::{center, container, image, text};
 use iced::{ContentFit, Element, Length, Rectangle};
 
@@ -107,6 +107,8 @@ fn display_math(
 /// * `zoom`: zoom factor (1.0 = 100% of original pixel size).
 /// * `pan`: pan offset in logical pixels `(dx, dy)`.
 /// * `viewport`: size of the display area in logical pixels `(w, h)`.
+/// * `pixelated`: nearest-neighbor sampling when zoomed past 100%
+///   (crisp pixel art). Downscales always use linear filtering.
 pub fn image_display(
     handle: &Handle,
     texture_size: (u32, u32),
@@ -114,18 +116,27 @@ pub fn image_display(
     zoom: f32,
     pan: (f32, f32),
     viewport: (f32, f32),
+    pixelated: bool,
 ) -> Element<'_, Message> {
+    let filter = if pixelated && zoom > 1.0 {
+        FilterMethod::Nearest
+    } else {
+        FilterMethod::Linear
+    };
+
     let widget: Element<'_, Message> =
         match display_math(zoom, pan, viewport, original_size, texture_size) {
             DisplayMath::Empty => text("").into(),
             DisplayMath::Fit { scale_factor } => image(handle.clone())
                 .content_fit(ContentFit::Contain)
+                .filter_method(filter)
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .scale(scale_factor)
                 .into(),
             DisplayMath::Crop { rect } => image(handle.clone())
                 .content_fit(ContentFit::Contain)
+                .filter_method(filter)
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .crop(rect)

@@ -34,6 +34,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     viewer.zoom,
                     viewer.pan,
                     (app.viewport_size.width, app.viewport_size.height),
+                    app.config.pixelated_zoom,
                 );
 
                 // Wrap image area in mouse_area for scroll, drag, double-click, and right-click.
@@ -99,6 +100,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         app.config.zoom_mode,
         layout_vis,
         app.config.theme == crate::config::ThemeChoice::Light,
+        app.config.pixelated_zoom,
     ) {
         column![dropdown]
             .width(Length::Fill)
