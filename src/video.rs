@@ -102,6 +102,57 @@ enum AudioCmd {
     Play,
 }
 
+/// Deletes an extracted temp file once the last session using it drops.
+/// Shared by `Arc` across seek/loop respawns of the same video.
+pub struct TempFileGuard {
+    path: PathBuf,
+}
+
+impl TempFileGuard {
+    pub fn new(path: PathBuf) -> Arc<Self> {
+        Arc::new(Self { path })
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        // Try inline first since the retry thread dies with the process on
+        // exit, so this is the only attempt guaranteed to run.
+        if std::fs::remove_file(&self.path).is_ok() {
+            return;
+        }
+        // Decoder threads may still hold the file open for a moment on
+        // Windows, so retry off-thread. Anything that survives (crash,
+        // hard kill) is swept by `clean_extraction_dir` at next startup.
+        let path = self.path.clone();
+        std::thread::spawn(move || {
+            for _ in 0..10 {
+                std::thread::sleep(Duration::from_millis(300));
+                if std::fs::remove_file(&path).is_ok() {
+                    return;
+                }
+            }
+        });
+    }
+}
+
+/// Where archive video entries are extracted for playback.
+pub fn extraction_dir() -> PathBuf {
+    std::env::temp_dir().join("scryglass-video")
+}
+
+/// Remove orphaned extractions from crashed or killed sessions.
+/// Files still in use are locked and survive the sweep. Blocking,
+/// run on a worker at startup.
+pub fn clean_extraction_dir() {
+    let Ok(entries) = std::fs::read_dir(extraction_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let _ = std::fs::remove_file(entry.path());
+    }
+}
+
 /// Audio output sample rate. The resampler converts everything to this.
 const AUDIO_RATE: u32 = 48000;
 
@@ -126,6 +177,9 @@ pub struct VideoSession {
     pub volume: f32,
     pub muted: bool,
     pub path: PathBuf,
+    /// Keeps an extracted archive entry's temp file alive across
+    /// seek/loop respawns, deleted when the last holder drops.
+    pub temp: Option<std::sync::Arc<TempFileGuard>>,
 }
 
 impl VideoSession {
@@ -174,7 +228,23 @@ impl VideoSession {
             volume,
             muted,
             path,
+            temp: None,
         }
+    }
+
+    /// A fresh session on the same file at `start`. Used for seeks and
+    /// looping. Carries the temp-file guard so extracted archive entries
+    /// survive the respawn.
+    pub fn reopen_at(&self, start: Duration) -> Self {
+        let mut session = Self::open(
+            self.path.clone(),
+            start,
+            self.volume,
+            self.muted,
+            self.looping,
+        );
+        session.temp = self.temp.clone();
+        session
     }
 
     /// Playback clock relative to the session start.

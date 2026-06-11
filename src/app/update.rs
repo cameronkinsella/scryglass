@@ -1049,15 +1049,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 // queued frames still drain through poll() above.
                 if session.finished() {
                     if session.looping {
-                        let (path, volume, muted) =
-                            (session.path.clone(), session.volume, session.muted);
-                        viewer.video = Some(crate::video::VideoSession::open(
-                            path,
-                            std::time::Duration::ZERO,
-                            volume,
-                            muted,
-                            true,
-                        ));
+                        viewer.video = Some(session.reopen_at(std::time::Duration::ZERO));
                     } else if session.playing {
                         session.pause();
                     }
@@ -1077,6 +1069,42 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 },
                 Err(_) => Message::SpinnerTick,
             })
+        }
+
+        Message::VideoExtracted { entry, result } => {
+            let video_volume = app.config.video_volume;
+            let video_muted = app.config.video_muted;
+            let Some(viewer) = app.viewer_mut() else {
+                return Task::none();
+            };
+            if viewer.video_extracting.as_deref() == Some(&*entry) {
+                viewer.video_extracting = None;
+            }
+            // Navigated away while extracting: discard the temp file.
+            if viewer.nav.current() != entry {
+                if let Ok(temp) = result {
+                    drop(crate::video::TempFileGuard::new(temp));
+                }
+                return Task::none();
+            }
+            match result {
+                Err(e) => {
+                    viewer.pending_since = None;
+                    push_toast(app, ToastKind::Error, format!("Couldn't play video: {e}"))
+                }
+                Ok(temp) => {
+                    let mut session = crate::video::VideoSession::open(
+                        temp.clone(),
+                        std::time::Duration::ZERO,
+                        video_volume,
+                        video_muted,
+                        false,
+                    );
+                    session.temp = Some(crate::video::TempFileGuard::new(temp));
+                    viewer.video = Some(session);
+                    Task::none()
+                }
+            }
         }
 
         Message::VideoFrame { path, image } => {
@@ -1135,19 +1163,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             else {
                 return Task::none();
             };
-            let (path, volume, muted, looping) = (
-                session.path.clone(),
-                session.volume,
-                session.muted,
-                session.looping,
-            );
-            viewer.video = Some(crate::video::VideoSession::open(
-                path,
-                std::time::Duration::from_secs_f64(target.max(0.0)),
-                volume,
-                muted,
-                looping,
-            ));
+            viewer.video =
+                Some(session.reopen_at(std::time::Duration::from_secs_f64(target.max(0.0))));
             Task::none()
         }
 
@@ -1162,19 +1179,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             if let Some(duration) = session.duration() {
                 target = target.min(duration.as_secs_f64() - 0.5);
             }
-            let (path, volume, muted, looping) = (
-                session.path.clone(),
-                session.volume,
-                session.muted,
-                session.looping,
-            );
-            viewer.video = Some(crate::video::VideoSession::open(
-                path,
-                std::time::Duration::from_secs_f64(target.max(0.0)),
-                volume,
-                muted,
-                looping,
-            ));
+            viewer.video =
+                Some(session.reopen_at(std::time::Duration::from_secs_f64(target.max(0.0))));
             Task::none()
         }
 
@@ -1666,15 +1672,12 @@ fn open_viewer(app: &mut App, nav: Nav, source: Source) -> Task<Message> {
     let mut tasks = vec![reconcile, probe_size(&mut viewer, current.clone())];
 
     if crate::video::is_video(&current) {
-        if matches!(viewer.source, Source::Fs) {
-            viewer.video = Some(crate::video::VideoSession::open(
-                current.clone(),
-                std::time::Duration::ZERO,
-                app.config.video_volume,
-                app.config.video_muted,
-                false,
-            ));
-        }
+        tasks.push(start_video(
+            &mut viewer,
+            current,
+            app.config.video_volume,
+            app.config.video_muted,
+        ));
     } else {
         tasks.push(fire_thumb(
             &pipeline,
@@ -1828,6 +1831,7 @@ fn scrub_to(app: &mut App, index: usize) -> Task<Message> {
     viewer.displayed_rotation = 0;
     viewer.video = None;
     viewer.video_seek_drag = None;
+    viewer.video_extracting = None;
 
     let current = viewer.nav.current().to_path_buf();
     if let Some(cached) = viewer.cache.get(&current).cloned() {
@@ -1839,6 +1843,57 @@ fn scrub_to(app: &mut App, index: usize) -> Task<Message> {
         show_placeholder_or_clear(viewer, &current, zoom_mode, viewport);
     }
     Task::none()
+}
+
+/// Begin video playback for the current file: open a session directly
+/// for filesystem files, or extract the archive entry to a temp file
+/// first (FFmpeg needs a real file, the spinner covers the wait).
+fn start_video(viewer: &mut Viewer, current: PathBuf, volume: f32, muted: bool) -> Task<Message> {
+    match &viewer.source {
+        Source::Fs => {
+            viewer.video = Some(crate::video::VideoSession::open(
+                current,
+                std::time::Duration::ZERO,
+                volume,
+                muted,
+                false,
+            ));
+            Task::none()
+        }
+        Source::Archive(index) => {
+            if viewer.video_extracting.as_deref() == Some(&*current) {
+                return Task::none();
+            }
+            viewer.video_extracting = Some(current.clone());
+            fire_video_extract(index.clone(), current)
+        }
+    }
+}
+
+/// Extract an archive video entry to a uniquely-named temp file,
+/// off-thread. The whole entry is written out before playback starts.
+fn fire_video_extract(index: Arc<ArchiveIndex>, entry: PathBuf) -> Task<Message> {
+    Task::perform(
+        async move {
+            let e = entry.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let bytes = index.read(&e).map_err(|err| err.to_string())?;
+                let dir = crate::video::extraction_dir();
+                std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+                let unique = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let name = e.file_name().unwrap_or_default().to_string_lossy();
+                let file = dir.join(format!("{}-{unique}-{name}", std::process::id()));
+                std::fs::write(&file, bytes).map_err(|err| err.to_string())?;
+                Ok(file)
+            })
+            .await
+            .map_err(|err| err.to_string())
+            .and_then(|r| r);
+            (entry, result)
+        },
+        |(entry, result)| Message::VideoExtracted { entry, result },
+    )
 }
 
 /// A pending navigation's target just became displayable, finish the move.
@@ -1885,6 +1940,7 @@ fn complete_navigation(app: &mut App, target_index: usize, bump_generation: bool
     viewer.anim_player.stop();
     viewer.video = None;
     viewer.video_seek_drag = None;
+    viewer.video_extracting = None;
     viewer.drag = None;
 
     // Reset pan on navigation. Zoom is preserved only in LockZoomRatio mode.
@@ -1910,19 +1966,12 @@ fn complete_navigation(app: &mut App, target_index: usize, bump_generation: bool
         // session's tick subscription drives frames from here.
         viewer.pending_since = Some(Instant::now());
         show_placeholder_or_clear(viewer, &current, zoom_mode, viewport);
-        if matches!(viewer.source, Source::Fs) {
-            viewer.video = Some(crate::video::VideoSession::open(
-                current.clone(),
-                std::time::Duration::ZERO,
-                video_volume,
-                video_muted,
-                false,
-            ));
-        } else {
-            // Archive entries would need extraction to a temp file first;
-            // out of scope. The viewport stays quiet rather than wrong.
-            viewer.pending_since = None;
-        }
+        tasks.push(start_video(
+            viewer,
+            current.clone(),
+            video_volume,
+            video_muted,
+        ));
     } else if let Some(anim_task) = viewer.anim_player.try_start_from_cache(&current) {
         // Cached animation: blur stands in until frame 0 allocates.
         viewer.pending_since = Some(Instant::now());

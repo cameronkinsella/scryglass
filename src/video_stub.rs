@@ -15,6 +15,12 @@ pub fn first_frame_thumb(_path: &Path, _max_dim: u32) -> Option<crate::media::Th
     None
 }
 
+pub fn clean_extraction_dir() {}
+
+pub fn extraction_dir() -> PathBuf {
+    std::env::temp_dir().join("scryglass-video")
+}
+
 pub struct VideoFrame {
     pub width: u32,
     pub height: u32,
@@ -23,12 +29,21 @@ pub struct VideoFrame {
     pub timestamp: Duration,
 }
 
+pub struct TempFileGuard;
+
+impl TempFileGuard {
+    pub fn new(_path: PathBuf) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self)
+    }
+}
+
 pub struct VideoSession {
     pub playing: bool,
     pub looping: bool,
     pub volume: f32,
     pub muted: bool,
     pub path: PathBuf,
+    pub temp: Option<std::sync::Arc<TempFileGuard>>,
 }
 
 impl VideoSession {
@@ -39,6 +54,18 @@ impl VideoSession {
             volume,
             muted,
             path,
+            temp: None,
+        }
+    }
+
+    pub fn reopen_at(&self, _start: Duration) -> Self {
+        Self {
+            playing: false,
+            looping: self.looping,
+            volume: self.volume,
+            muted: self.muted,
+            path: self.path.clone(),
+            temp: None,
         }
     }
 

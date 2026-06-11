@@ -167,6 +167,9 @@ pub struct Viewer {
     /// Mid-drag value of the video seek slider (seconds), committed on
     /// release.
     pub video_seek_drag: Option<f64>,
+    /// Archive video entry currently extracting to a temp file, to
+    /// prevent duplicate extractions.
+    pub video_extracting: Option<PathBuf>,
 }
 
 impl Viewer {
@@ -204,6 +207,7 @@ impl Viewer {
             displayed_rotation: 0,
             video: None,
             video_seek_drag: None,
+            video_extracting: None,
         }
     }
 

@@ -141,6 +141,11 @@ pub fn boot() -> (App, Task<Message>) {
         .discard(),
         None => Task::none(),
     };
+    // Sweep video extractions orphaned by a crash or hard kill.
+    let video_cleanup = Task::future(async {
+        let _ = tokio::task::spawn_blocking(crate::video::clean_extraction_dir).await;
+    })
+    .discard();
 
     let mut app = App {
         session: Session::Empty,
@@ -164,7 +169,7 @@ pub fn boot() -> (App, Task<Message>) {
         .map(update::open_path)
         .unwrap_or_else(Task::none);
 
-    (app, Task::batch([housekeeping, open]))
+    (app, Task::batch([housekeeping, video_cleanup, open]))
 }
 
 /// The first CLI argument as a path, if it points to an existing file

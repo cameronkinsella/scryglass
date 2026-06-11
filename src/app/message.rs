@@ -184,6 +184,11 @@ pub enum Message {
     CloseRequested(iced::window::Id),
     /// Pacing tick while a video session is active.
     VideoTick,
+    /// An archive video entry finished extracting to a temp file.
+    VideoExtracted {
+        entry: PathBuf,
+        result: Result<PathBuf, String>,
+    },
     /// A video frame finished its GPU upload.
     VideoFrame {
         path: PathBuf,
@@ -302,6 +307,7 @@ pub fn is_menu_message(msg: &Message) -> bool {
             | Message::ExifLoaded(_, _)
             | Message::ViewRotated { .. }
             | Message::VideoTick
+            | Message::VideoExtracted { .. }
             | Message::VideoFrame { .. }
             | Message::Anim(_)
             | Message::DirectoryScanned(_, _)
@@ -340,6 +346,7 @@ pub fn is_context_menu_message(msg: &Message) -> bool {
             | Message::ExifLoaded(_, _)
             | Message::ViewRotated { .. }
             | Message::VideoTick
+            | Message::VideoExtracted { .. }
             | Message::VideoFrame { .. }
             | Message::Anim(_)
             | Message::DirectoryScanned(_, _)
