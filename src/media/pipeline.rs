@@ -81,6 +81,7 @@ pub struct Pipeline {
     current_lane: Arc<Semaphore>,
     prefetch_lane: Arc<Semaphore>,
     thumb_lane: Arc<Semaphore>,
+    urgent_thumb_lane: Arc<Semaphore>,
 }
 
 impl Pipeline {
@@ -93,6 +94,9 @@ impl Pipeline {
             current_lane: Arc::new(Semaphore::new(2)),
             prefetch_lane: Arc::new(Semaphore::new(prefetch_permits)),
             thumb_lane: Arc::new(Semaphore::new(2)),
+            // Wide enough that scrubbing never waits on the background
+            // queue, bounded so a long key-hold can't flood the I/O pool.
+            urgent_thumb_lane: Arc::new(Semaphore::new(8)),
         }
     }
 
@@ -178,15 +182,15 @@ impl Pipeline {
         urgency: ThumbUrgency,
     ) -> impl Future<Output = Result<ThumbData, MediaError>> + Send + 'static {
         let semaphore = match urgency {
-            ThumbUrgency::Urgent => None,
-            ThumbUrgency::Background => Some(self.thumb_lane.clone()),
+            ThumbUrgency::Urgent => self.urgent_thumb_lane.clone(),
+            ThumbUrgency::Background => self.thumb_lane.clone(),
         };
 
         async move {
-            let _permit = match semaphore {
-                Some(s) => Some(s.acquire_owned().await.map_err(|_| MediaError::Cancelled)?),
-                None => None,
-            };
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .map_err(|_| MediaError::Cancelled)?;
 
             // Cheap path: embedded EXIF preview from the file prefix.
             let prefix = source.read_start(&path, thumbs::PREFIX_LEN).await?;
