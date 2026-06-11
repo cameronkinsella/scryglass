@@ -15,6 +15,7 @@ pub struct VideoFrame {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+    #[allow(dead_code)] // mirrors the real module's field set
     pub timestamp: Duration,
 }
 

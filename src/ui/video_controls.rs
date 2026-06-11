@@ -71,7 +71,7 @@ pub fn video_controls<'a>(state: VideoControls) -> Element<'a, Message> {
     let volume = slider(
         0.0..=1.0,
         if state.muted { 0.0 } else { state.volume },
-        |v| Message::VideoSetVolume(v),
+        Message::VideoSetVolume,
     )
     .step(0.05)
     .width(Length::Fixed(80.0));

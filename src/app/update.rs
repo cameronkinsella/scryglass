@@ -1037,24 +1037,24 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 return Task::none();
             };
 
-            if session.finished() {
-                if session.looping {
-                    let (path, volume, muted) =
-                        (session.path.clone(), session.volume, session.muted);
-                    viewer.video = Some(crate::video::VideoSession::open(
-                        path,
-                        std::time::Duration::ZERO,
-                        volume,
-                        muted,
-                        true,
-                    ));
-                } else if session.playing {
-                    session.pause();
-                }
-                return Task::none();
-            }
-
             let Some(frame) = session.poll() else {
+                // Only a session with nothing left to show is finished, since
+                // queued frames still drain through poll() above.
+                if session.finished() {
+                    if session.looping {
+                        let (path, volume, muted) =
+                            (session.path.clone(), session.volume, session.muted);
+                        viewer.video = Some(crate::video::VideoSession::open(
+                            path,
+                            std::time::Duration::ZERO,
+                            volume,
+                            muted,
+                            true,
+                        ));
+                    } else if session.playing {
+                        session.pause();
+                    }
+                }
                 return Task::none();
             };
             let path = viewer.nav.current().to_path_buf();
