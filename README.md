@@ -13,7 +13,7 @@ A lightweight, blazing-fast image viewer built with [iced](https://github.com/ic
 - **EXIF aware**: orientation is applied, embedded camera thumbnails power instant previews, and `I` opens an info panel with camera metadata
 - **Persistent thumbnails, done right**: folders open warm across sessions, and cached thumbnails of deleted files are purged when their folder reopens, unused entries expire after 90 days, and the store is capped at 512 MB, all judged from local metadata, so sleeping external drives are never touched. Disable via Settings or build without the `disk-thumbs` feature
 - **File management**: delete to recycle bin and rename in place, with a read-only mode that hides and blocks both
-- **Video playback** (`--features video`): a full player linked against FFmpeg's libraries (in-process demux and decode, no external processes): play/pause, seek bar plus J/L ±10s, volume, mute, and loop, with auto-hiding controls. Audio is the playback clock
+- **Video playback** (`--features video`): a full player linked against FFmpeg's libraries (in-process demux and decode, no external processes): play/pause, seek bar plus J/L ±10s, volume, mute, and loop, with auto-hiding controls. Audio is the playback clock. Videos get first-frame filmstrip thumbnails and play from inside archives too (extracted to a self-cleaning temp file)
 - **Sorting**: natural name (default), plain name, date modified, or size, ascending or descending, with metadata fetched off-thread
 - **View rotation**: `R`/`Shift+R` rotate in quarter turns without touching the file
 - **Fullscreen**: `F`/`F11` hides all chrome
