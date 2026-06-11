@@ -731,6 +731,27 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             save_config(app)
         }
 
+        // --- Info panel ---
+        Message::ToggleInfo => {
+            app.config.show_info = !app.config.show_info;
+            recalc_viewport(app);
+            let probe = if app.config.show_info {
+                fire_exif(app)
+            } else {
+                Task::none()
+            };
+            Task::batch([save_config(app), probe])
+        }
+
+        Message::ExifLoaded(path, fields) => {
+            if let Some(viewer) = app.viewer_mut()
+                && viewer.nav.current() == path
+            {
+                viewer.exif = Some((path, fields));
+            }
+            Task::none()
+        }
+
         // --- Theme ---
         Message::ToggleTheme => {
             app.config.theme = match app.config.theme {
@@ -827,6 +848,23 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 /// the viewer must never wait on it.
 fn save_config(app: &App) -> Task<Message> {
     Task::future(app.config.clone().save()).discard()
+}
+
+/// Fetch EXIF fields for the current image (info panel).
+fn fire_exif(app: &mut App) -> Task<Message> {
+    let Some(viewer) = app.viewer_mut() else {
+        return Task::none();
+    };
+    let path = viewer.nav.current().to_path_buf();
+    // Reuse data already loaded for this file, clear it otherwise.
+    if viewer.exif.as_ref().is_some_and(|(p, _)| *p == path) {
+        return Task::none();
+    }
+    viewer.exif = None;
+    let load = crate::media::pipeline::load_info(viewer.source.clone(), path.clone());
+    Task::perform(load, move |fields| {
+        Message::ExifLoaded(path.clone(), fields)
+    })
 }
 
 /// Re-sort the open folder by the configured key off-thread. Metadata
@@ -953,6 +991,9 @@ fn open_viewer(app: &mut App, nav: Nav, source: Source) -> Task<Message> {
     // applies as soon as its metadata is gathered.
     if app.config.sort_key != crate::config::SortKey::NaturalName || app.config.sort_desc {
         tasks.push(fire_resort(app));
+    }
+    if app.config.show_info {
+        tasks.push(fire_exif(app));
     }
 
     Task::batch(tasks)
@@ -1090,6 +1131,7 @@ fn scrub_to(app: &mut App, index: usize) -> Task<Message> {
         viewer.manual_zoom = false;
     }
     viewer.current_file_size = None;
+    viewer.exif = None;
 
     let current = viewer.nav.current().to_path_buf();
     if let Some(cached) = viewer.cache.get(&current).cloned() {
@@ -1193,6 +1235,10 @@ fn complete_navigation(app: &mut App, target_index: usize, bump_generation: bool
             iced::widget::scrollable::AbsoluteOffset { x: center, y: 0.0 },
         ));
         tasks.extend(fire_visible_thumbs(&pipeline, viewer, window_w));
+    }
+
+    if app.config.show_info {
+        tasks.push(fire_exif(app));
     }
 
     Task::batch(tasks)

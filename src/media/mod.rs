@@ -13,6 +13,7 @@ pub mod disk_thumbs;
 #[cfg(not(feature = "disk-thumbs"))]
 #[path = "disk_thumbs_stub.rs"]
 pub mod disk_thumbs;
+pub mod info;
 pub mod pipeline;
 pub mod registry;
 pub mod thumbs;

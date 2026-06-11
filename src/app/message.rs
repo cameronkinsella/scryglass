@@ -91,6 +91,10 @@ pub enum Message {
     ResetZoom,
     /// Toggle borderless fullscreen.
     ToggleFullscreen,
+    /// Toggle the info panel (file details + EXIF).
+    ToggleInfo,
+    /// EXIF probe finished for the given file.
+    ExifLoaded(PathBuf, Vec<(String, String)>),
     /// Escape: leaves fullscreen, otherwise dismisses any open overlay.
     Escape,
     /// Mouse pressed on image area, begin drag.
@@ -162,6 +166,7 @@ pub fn is_menu_message(msg: &Message) -> bool {
             | Message::ToggleToolbar
             | Message::ToggleTheme
             | Message::ToggleCrispPixels
+            | Message::ToggleInfo
             // Context menu messages:
             | Message::ShowContextMenu
             | Message::DismissContextMenu
@@ -181,6 +186,7 @@ pub fn is_menu_message(msg: &Message) -> bool {
             | Message::DismissToast(_)
             | Message::FilmstripScrolled(_)
             | Message::Resorted(_)
+            | Message::ExifLoaded(_, _)
             | Message::Gif(_)
             | Message::DirectoryScanned(_, _)
             | Message::ArchiveScanned(_, _)
@@ -212,6 +218,7 @@ pub fn is_context_menu_message(msg: &Message) -> bool {
             | Message::DismissToast(_)
             | Message::FilmstripScrolled(_)
             | Message::Resorted(_)
+            | Message::ExifLoaded(_, _)
             | Message::Gif(_)
             | Message::DirectoryScanned(_, _)
             | Message::ArchiveScanned(_, _)

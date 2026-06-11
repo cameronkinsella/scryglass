@@ -206,6 +206,11 @@ fn recalc_viewport(app: &mut App) {
         app.viewport_size = app.window_size;
         return;
     }
+    let chrome_width = if app.config.show_info {
+        ui::info_panel::WIDTH
+    } else {
+        0.0
+    };
     let mut chrome_height: f32 = if app.config.show_toolbar {
         TOOLBAR_HEIGHT
     } else {
@@ -221,7 +226,7 @@ fn recalc_viewport(app: &mut App) {
         chrome_height += 25.0; // footer
     }
     app.viewport_size = Size::new(
-        app.window_size.width,
+        (app.window_size.width - chrome_width).max(1.0),
         (app.window_size.height - chrome_height).max(1.0),
     );
 }

@@ -5,6 +5,7 @@ pub mod filmstrip;
 pub mod footer;
 pub mod icons;
 pub mod image_display;
+pub mod info_panel;
 pub mod nav_slider;
 pub mod shortcuts;
 pub mod spinner;

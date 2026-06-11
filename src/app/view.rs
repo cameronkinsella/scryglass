@@ -15,6 +15,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         show_filmstrip: app.config.show_filmstrip,
         show_slider: app.config.show_slider,
         show_footer: app.config.show_footer,
+        show_info: app.config.show_info,
     };
 
     let content = match &app.session {
@@ -86,9 +87,46 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 })
                 .on_double_click(Message::ResetZoom);
 
+            // Info panel sits beside the image (not over it).
+            let image_cell: Element<'_, Message> = if !app.fullscreen && app.config.show_info {
+                let file_name = viewer
+                    .nav
+                    .current()
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let details: Vec<(String, String)> = vec![
+                    (
+                        "Dimensions".to_string(),
+                        viewer
+                            .displayed
+                            .original_size()
+                            .map(|(w, h)| ui::format_dimensions(w, h))
+                            .unwrap_or_else(|| "…".to_string()),
+                    ),
+                    (
+                        "File size".to_string(),
+                        ui::file_size_label(viewer.current_file_size),
+                    ),
+                    ("Position".to_string(), viewer.nav.position_label()),
+                ];
+                let exif = viewer
+                    .exif
+                    .as_ref()
+                    .filter(|(p, _)| p.as_path() == viewer.nav.current())
+                    .map(|(_, fields)| fields.as_slice());
+                iced::widget::row![
+                    interactive,
+                    ui::info_panel::info_panel(&file_name, &details, exif)
+                ]
+                .into()
+            } else {
+                interactive.into()
+            };
+
             // The chrome below renders in every display state. It must
             // never flash away while an image loads.
-            let mut col = column![interactive];
+            let mut col = column![image_cell];
 
             if !app.fullscreen && app.config.show_filmstrip {
                 col = col.push(ui::filmstrip::filmstrip(

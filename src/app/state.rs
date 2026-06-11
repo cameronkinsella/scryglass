@@ -145,6 +145,8 @@ pub struct Viewer {
     pub drag: Option<DragState>,
     /// Filmstrip scroll offset in logical pixels. Drives virtualization.
     pub filmstrip_scroll_x: f32,
+    /// EXIF fields for the info panel, tagged with the file they describe.
+    pub exif: Option<(PathBuf, Vec<(String, String)>)>,
 }
 
 impl Viewer {
@@ -172,6 +174,7 @@ impl Viewer {
             pan: (0.0, 0.0),
             drag: None,
             filmstrip_scroll_x: 0.0,
+            exif: None,
         }
     }
 

@@ -272,6 +272,16 @@ impl Pipeline {
     }
 }
 
+/// Read curated EXIF fields for the info panel from the file prefix.
+pub async fn load_info(source: Source, path: PathBuf) -> Vec<(String, String)> {
+    let Ok(prefix) = source.read_start(&path, thumbs::PREFIX_LEN).await else {
+        return Vec::new();
+    };
+    tokio::task::spawn_blocking(move || super::info::exif_fields(&prefix))
+        .await
+        .unwrap_or_default()
+}
+
 /// Write a thumbnail to the persistent store, off-thread.
 async fn persist(
     disk: &Option<DiskThumbs>,

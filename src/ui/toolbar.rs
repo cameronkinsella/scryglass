@@ -18,6 +18,7 @@ pub struct LayoutVisibility {
     pub show_filmstrip: bool,
     pub show_slider: bool,
     pub show_footer: bool,
+    pub show_info: bool,
 }
 
 /// Which toolbar dropdown is currently open.
@@ -192,6 +193,7 @@ pub fn dropdown<'a>(
                     }),
                     toggle("Slider", layout_vis.show_slider, |_| Message::ToggleSlider),
                     toggle("Footer", layout_vis.show_footer, |_| Message::ToggleFooter),
+                    toggle("Info panel", layout_vis.show_info, |_| Message::ToggleInfo),
                     toggle("Light theme", light_theme, |_| Message::ToggleTheme),
                 ]
                 .spacing(6)

@@ -130,6 +130,8 @@ pub struct AppConfig {
     pub show_slider: bool,
     /// Whether the footer is visible.
     pub show_footer: bool,
+    /// Whether the info panel (file details + EXIF) is visible.
+    pub show_info: bool,
 }
 
 impl Default for AppConfig {
@@ -147,6 +149,7 @@ impl Default for AppConfig {
             show_filmstrip: true,
             show_slider: true,
             show_footer: true,
+            show_info: false,
         }
     }
 }
@@ -234,6 +237,7 @@ mod tests {
             show_filmstrip: true,
             show_slider: false,
             show_footer: true,
+            show_info: true,
         };
         assert_eq!(AppConfig::from_toml(&cfg.to_toml()), cfg);
     }

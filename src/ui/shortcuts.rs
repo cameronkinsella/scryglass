@@ -21,6 +21,7 @@ pub fn map_press(key: &Key, modifiers: Modifiers) -> Option<Message> {
 
         Key::Character(c) => match c.as_str() {
             "f" | "F" if !ctrl => Some(Message::ToggleFullscreen),
+            "i" | "I" if !ctrl => Some(Message::ToggleInfo),
             "+" | "=" => Some(Message::ZoomStep(1)),
             "-" => Some(Message::ZoomStep(-1)),
             "0" if ctrl => Some(Message::ResetZoom),
@@ -83,6 +84,14 @@ mod tests {
         assert!(matches!(
             map_press(&Key::Named(Named::End), Modifiers::default()),
             Some(Message::Last)
+        ));
+    }
+
+    #[test]
+    fn info_panel_key() {
+        assert!(matches!(
+            map_press(&ch("i"), Modifiers::default()),
+            Some(Message::ToggleInfo)
         ));
     }
 
