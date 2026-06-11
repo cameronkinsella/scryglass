@@ -257,7 +257,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
     // Centered spinner only when the viewport has nothing at all to show
     // (the very first load). Once an image is up, the footer's small
-    // spinner takes over so nothing covers the picture.
+    // spinner takes over so nothing covers the picture. With the footer
+    // hidden (or fullscreen), a corner spinner keeps progress visible.
+    let footer_visible = app.config.show_footer && !app.fullscreen;
     let spinner_overlay: Element<'_, Message> = match app.viewer() {
         Some(viewer)
             if matches!(viewer.displayed, DisplayedImage::None)
@@ -270,6 +272,24 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 .map(|since| since.elapsed())
                 .unwrap_or_default();
             center(ui::spinner::spinner(elapsed)).into()
+        }
+        Some(viewer)
+            if !footer_visible
+                && viewer
+                    .pending_since
+                    .is_some_and(|since| since.elapsed() >= SPINNER_DELAY) =>
+        {
+            let elapsed = viewer
+                .pending_since
+                .map(|since| since.elapsed())
+                .unwrap_or_default();
+            iced::widget::container(ui::spinner::spinner_sized(elapsed, 14.0))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::Alignment::End)
+                .align_y(iced::Alignment::End)
+                .padding(12)
+                .into()
         }
         _ => column![].width(Length::Fill).height(Length::Fill).into(),
     };

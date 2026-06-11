@@ -12,6 +12,7 @@ use crate::app::Message;
 /// Map a (non-repeat) key press to a message.
 pub fn map_press(key: &Key, modifiers: Modifiers) -> Option<Message> {
     let ctrl = modifiers.command();
+    let shift = modifiers.shift();
 
     match key {
         Key::Named(Named::Escape) => Some(Message::Escape),
@@ -29,6 +30,7 @@ pub fn map_press(key: &Key, modifiers: Modifiers) -> Option<Message> {
         Key::Character(c) => match c.as_str() {
             "f" | "F" if !ctrl => Some(Message::ToggleFullscreen),
             "i" | "I" if !ctrl => Some(Message::ToggleInfo),
+            "t" | "T" if !ctrl => Some(Message::ToggleToolbar),
             "r" if !ctrl => Some(Message::Rotate(1)),
             "R" if !ctrl => Some(Message::Rotate(3)),
             "?" => Some(Message::ToggleHelp),
@@ -36,6 +38,10 @@ pub fn map_press(key: &Key, modifiers: Modifiers) -> Option<Message> {
             "-" => Some(Message::ZoomStep(-1)),
             "0" if ctrl => Some(Message::ResetZoom),
             "1" if ctrl => Some(Message::ZoomActual),
+            // Shift+Ctrl+C arrives as the shifted character "C".
+            "c" | "C" if ctrl && shift => Some(Message::CopyFilePath),
+            "c" if ctrl => Some(Message::CopyImage),
+            "o" | "O" if ctrl => Some(Message::OpenFile),
             "m" | "M" if !ctrl => Some(Message::VideoToggleMute),
             "j" | "J" if !ctrl => Some(Message::VideoSeekBy(-10.0)),
             "l" | "L" if !ctrl => Some(Message::VideoSeekBy(10.0)),
@@ -134,6 +140,29 @@ mod tests {
             map_press(&Key::Named(Named::Escape), Modifiers::default()),
             Some(Message::Escape)
         ));
+    }
+
+    #[test]
+    fn clipboard_and_open_shortcuts() {
+        assert!(matches!(
+            map_press(&ch("c"), Modifiers::CTRL),
+            Some(Message::CopyImage)
+        ));
+        let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
+        assert!(matches!(
+            map_press(&ch("C"), ctrl_shift),
+            Some(Message::CopyFilePath)
+        ));
+        assert!(matches!(
+            map_press(&ch("o"), Modifiers::CTRL),
+            Some(Message::OpenFile)
+        ));
+        assert!(matches!(
+            map_press(&ch("t"), Modifiers::default()),
+            Some(Message::ToggleToolbar)
+        ));
+        // Bare C must not copy.
+        assert!(map_press(&ch("c"), Modifiers::default()).is_none());
     }
 
     #[test]
