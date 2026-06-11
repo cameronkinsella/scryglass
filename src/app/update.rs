@@ -2047,12 +2047,54 @@ fn fire_thumb(
     if viewer.thumbs.contains(&path)
         || viewer.in_flight_thumbs.contains(&path)
         || viewer.failed_thumbs.contains(&path)
-        || crate::video::is_video(&path)
     {
         return Task::none();
     }
-    viewer.in_flight_thumbs.insert(path.clone());
 
+    if crate::video::is_video(&path) {
+        // First-frame grab via FFmpeg, which needs a real file on disk.
+        if !matches!(viewer.source, Source::Fs) {
+            return Task::none();
+        }
+        viewer.in_flight_thumbs.insert(path.clone());
+        let disk = pipeline.disk();
+        let probe = async move {
+            tokio::task::spawn_blocking(move || {
+                let container = path
+                    .parent()
+                    .unwrap_or(std::path::Path::new(""))
+                    .to_path_buf();
+                let name = path.file_name().unwrap_or_default().to_owned();
+                if let Some(disk) = &disk
+                    && let Some(hit) = disk.load(&container, &name)
+                {
+                    return (path, Ok(hit));
+                }
+                match crate::video::first_frame_thumb(&path, crate::media::THUMB_DIM) {
+                    Some(thumb) => {
+                        if let Some(disk) = &disk {
+                            disk.store(&container, &name, &thumb, None, 0);
+                        }
+                        (path, Ok(thumb))
+                    }
+                    None => (path, Err(MediaError::Unsupported)),
+                }
+            })
+            .await
+            .expect("video thumb task panicked")
+        };
+        return Task::perform(probe, move |(path, result)| Message::ThumbLoaded {
+            path,
+            urgency,
+            result: result.map(|data| Thumb {
+                handle: Handle::from_rgba(data.width, data.height, data.pixels),
+                size: (data.width, data.height),
+                original_size: data.original_size,
+            }),
+        });
+    }
+
+    viewer.in_flight_thumbs.insert(path.clone());
     let load = pipeline.load_thumb(viewer.source.clone(), path.clone(), urgency);
     Task::perform(load, move |result| Message::ThumbLoaded {
         path: path.clone(),

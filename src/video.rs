@@ -25,6 +25,68 @@ pub fn is_video(path: &Path) -> bool {
         .is_some_and(|e| EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
 }
 
+/// Decode the first frame, scaled to fit `max_dim`, for the filmstrip.
+/// Blocking, run on a worker.
+pub fn first_frame_thumb(path: &Path, max_dim: u32) -> Option<crate::media::ThumbData> {
+    ffmpeg::init().ok()?;
+    let mut input = ffmpeg::format::input(path).ok()?;
+    let stream = input.streams().best(ffmpeg::media::Type::Video)?;
+    let index = stream.index();
+    let mut decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
+        .ok()?
+        .decoder()
+        .video()
+        .ok()?;
+
+    let mut frame = ffmpeg::frame::Video::empty();
+    for (packet_stream, packet) in input.packets() {
+        if packet_stream.index() != index {
+            continue;
+        }
+        if decoder.send_packet(&packet).is_err() {
+            continue;
+        }
+        if decoder.receive_frame(&mut frame).is_err() {
+            continue;
+        }
+
+        let (width, height) = (decoder.width(), decoder.height());
+        let scale = (max_dim as f32 / width.max(height) as f32).min(1.0);
+        let thumb_w = ((width as f32 * scale) as u32).max(1);
+        let thumb_h = ((height as f32 * scale) as u32).max(1);
+
+        let mut scaler = ffmpeg::software::scaling::Context::get(
+            decoder.format(),
+            width,
+            height,
+            ffmpeg::format::Pixel::RGBA,
+            thumb_w,
+            thumb_h,
+            ffmpeg::software::scaling::Flags::BILINEAR,
+        )
+        .ok()?;
+        let mut rgba_frame = ffmpeg::frame::Video::empty();
+        scaler.run(&frame, &mut rgba_frame).ok()?;
+
+        let stride = rgba_frame.stride(0);
+        let row_bytes = thumb_w as usize * 4;
+        let data = rgba_frame.data(0);
+        let mut pixels = Vec::with_capacity(row_bytes * thumb_h as usize);
+        for row in 0..thumb_h as usize {
+            let offset = row * stride;
+            pixels.extend_from_slice(&data[offset..offset + row_bytes]);
+        }
+
+        return Some(crate::media::ThumbData {
+            width: thumb_w,
+            height: thumb_h,
+            pixels,
+            original_size: (width, height),
+        });
+    }
+    None
+}
+
 /// A decoded frame ready for GPU upload.
 pub struct VideoFrame {
     pub width: u32,

@@ -11,6 +11,10 @@ pub fn is_video(_path: &Path) -> bool {
     false
 }
 
+pub fn first_frame_thumb(_path: &Path, _max_dim: u32) -> Option<crate::media::ThumbData> {
+    None
+}
+
 pub struct VideoFrame {
     pub width: u32,
     pub height: u32,

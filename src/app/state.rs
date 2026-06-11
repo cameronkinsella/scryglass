@@ -247,7 +247,9 @@ impl Viewer {
                     && !self.in_flight_thumbs.contains(*p)
                     && !self.failed_thumbs.contains(*p)
                     && !self.in_flight.contains(*p)
-                    && !crate::video::is_video(p)
+                    // Video thumbs need a real file (FFmpeg first-frame
+                    // grab), so skip them inside archives.
+                    && (!crate::video::is_video(p) || matches!(self.source, Source::Fs))
             })
             .cloned()
     }
