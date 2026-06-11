@@ -124,6 +124,10 @@ pub struct Viewer {
     /// goes empty and never shows the wrong image. Further navigation
     /// requests are dropped while one is pending.
     pub pending_nav: Option<usize>,
+    /// An active slider drag. The thumb follows the hand freely, the
+    /// display live-follows through loaded files and the fallback bubble
+    /// covers cold ones. Committed on release.
+    pub slider_drag: Option<SliderDrag>,
     /// Which direction key is currently held, and when the hold started.
     pub held_direction: Option<(Direction, Instant)>,
     /// Animated GIF player that handles decode cache and animation.
@@ -159,6 +163,7 @@ impl Viewer {
             displayed_path: None,
             pending_since: Some(Instant::now()),
             pending_nav: None,
+            slider_drag: None,
             held_direction: None,
             gif_player,
             current_file_size: None,
@@ -216,6 +221,17 @@ impl Viewer {
             Source::Archive(index) => index.archive_path.clone(),
         }
     }
+}
+
+/// State of an in-progress slider drag.
+#[derive(Debug, Clone, Copy)]
+pub struct SliderDrag {
+    /// The index under the user's hand.
+    pub target: usize,
+    /// Whether the fallback bubble has been triggered. Sticky: once true,
+    /// it stays for the rest of the drag so it never flickers in and out
+    /// across warm/cold boundaries.
+    pub bubble: bool,
 }
 
 #[derive(Debug, Clone, Copy)]

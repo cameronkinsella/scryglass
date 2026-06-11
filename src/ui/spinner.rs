@@ -35,7 +35,9 @@ impl<Message> canvas::Program<Message> for Arc {
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         let center = frame.center();
-        let radius = bounds.width.min(bounds.height) / 2.0 - 4.0;
+        // Stroke scales with the spinner so the footer-sized one stays legible.
+        let stroke_width = (bounds.width.min(bounds.height) / 11.0).clamp(2.0, 3.5);
+        let radius = bounds.width.min(bounds.height) / 2.0 - stroke_width;
 
         let turns = self.elapsed.as_secs_f32() * SPEED;
         let start = Radians(turns * std::f32::consts::TAU);
@@ -54,7 +56,7 @@ impl<Message> canvas::Program<Message> for Arc {
         frame.stroke(
             &path,
             Stroke::default()
-                .with_width(3.5)
+                .with_width(stroke_width)
                 .with_color(theme::tokens(app_theme).accent),
         );
 
@@ -64,8 +66,13 @@ impl<Message> canvas::Program<Message> for Arc {
 
 /// A spinner whose angle reflects how long the load has been pending.
 pub fn spinner<'a, Message: 'a>(elapsed: Duration) -> Element<'a, Message> {
+    spinner_sized(elapsed, SIZE)
+}
+
+/// A spinner with a caller-chosen diameter (e.g. footer-sized).
+pub fn spinner_sized<'a, Message: 'a>(elapsed: Duration, size: f32) -> Element<'a, Message> {
     Canvas::new(Arc { elapsed })
-        .width(Length::Fixed(SIZE))
-        .height(Length::Fixed(SIZE))
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
         .into()
 }

@@ -1,5 +1,7 @@
 //! Footer widget: image info on the left, directory position on the right.
 
+use std::time::Duration;
+
 use iced::widget::{container, row, space, text};
 use iced::{Alignment, Element, Length};
 
@@ -9,7 +11,8 @@ use crate::ui::theme;
 /// Render the bottom footer bar.
 ///
 /// Left side: image dimensions + file size (with icons).
-/// Right side: zoom percentage + position in directory (with icons).
+/// Right side: an unobtrusive loading spinner while something is pending,
+/// then zoom percentage + position in directory (with icons).
 ///
 /// Each item has a minimum width so positions stay stable across
 /// typical values. Unusually large values will push items apart.
@@ -18,6 +21,7 @@ pub fn footer<'a>(
     file_size: &str,
     zoom: &str,
     position: &str,
+    loading: Option<Duration>,
 ) -> Element<'a, Message> {
     use crate::ui::icons;
 
@@ -46,10 +50,18 @@ pub fn footer<'a>(
     .align_y(Alignment::Center)
     .width(Length::Fixed(70.0));
 
+    // Loading indicator lives down here so it never covers the image.
+    let loading_item: Element<'a, Message> = match loading {
+        Some(elapsed) => crate::ui::spinner::spinner_sized(elapsed, 14.0),
+        None => space::horizontal().width(Length::Fixed(14.0)).into(),
+    };
+
     let bar = row![
         dimensions_item,
         file_size_item,
         space::horizontal(),
+        loading_item,
+        space::horizontal().width(Length::Fixed(14.0)),
         zoom_item,
         position_item,
     ]

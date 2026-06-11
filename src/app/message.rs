@@ -81,8 +81,10 @@ pub enum Message {
     DragEnd,
     /// Window resized.
     WindowResized(Size),
-    /// Slider dragged to an image index.
+    /// Slider drag moved to an image index (also fired on click).
     SliderChanged(usize),
+    /// Slider drag released, commit the target.
+    SliderReleased,
     /// Filmstrip thumbnail clicked.
     FilmstripClicked(usize),
     /// Toggle filmstrip visibility.

@@ -27,7 +27,8 @@ use crate::ui::toolbar::OpenMenu;
 
 use super::message::{is_context_menu_message, is_menu_message};
 use super::state::{
-    CachedImage, Direction, DisplayedImage, DragState, LoadedMedia, Session, Thumb, Viewer,
+    CachedImage, Direction, DisplayedImage, DragState, LoadedMedia, Session, SliderDrag, Thumb,
+    Viewer,
 };
 use super::viewer_math::{clamp_pan, compute_zoom, pan_for_zoom_toward_cursor};
 use super::{App, Message, TOOLBAR_HEIGHT, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, recalc_viewport};
@@ -563,9 +564,47 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::batch(fire_visible_thumbs(&pipeline, viewer, window_w))
         }
 
-        Message::SliderChanged(index) | Message::FilmstripClicked(index) => {
-            navigate(app, NavTarget::Index(index))
+        // --- Slider scrub: thumb follows the hand and display live-follows
+        // through loaded files, the sticky bubble covers cold stretches ---
+        Message::SliderChanged(index) => {
+            let Some(viewer) = app.viewer_mut() else {
+                return Task::none();
+            };
+            let index = index % viewer.nav.len().max(1);
+            let path = viewer.nav.files()[index].to_path_buf();
+            // GIFs only count as scrubbable by their thumb. Playback
+            // starts on release, not mid-drag.
+            let scrubbable = viewer.cache.contains(&path) || viewer.thumbs.contains(&path);
+            let bubble = viewer.slider_drag.map(|d| d.bubble).unwrap_or(false) || !scrubbable;
+            viewer.slider_drag = Some(SliderDrag {
+                target: index,
+                bubble,
+            });
+
+            if scrubbable && index != viewer.nav.cursor() {
+                scrub_to(app, index)
+            } else {
+                Task::none()
+            }
         }
+
+        Message::SliderReleased => {
+            let Some(viewer) = app.viewer_mut() else {
+                return Task::none();
+            };
+            let Some(drag) = viewer.slider_drag.take() else {
+                return Task::none();
+            };
+            if drag.target == viewer.nav.cursor() {
+                // Display already followed here mid-drag, so run the deferred
+                // heavy tail (probe, prefetch, filmstrip centering).
+                complete_navigation(app, drag.target, true)
+            } else {
+                navigate(app, NavTarget::Index(drag.target))
+            }
+        }
+
+        Message::FilmstripClicked(index) => navigate(app, NavTarget::Index(index)),
 
         // --- Toolbar visibility ---
         Message::ToggleToolbar => {
@@ -832,6 +871,38 @@ fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
         tasks.push(fire_load(&pipeline, viewer, target_path, Lane::Current));
     }
     Task::batch(tasks)
+}
+
+/// Mid-drag scrub step onto an already-loaded file: move display, title,
+/// and cursor together with minimal side effects: no generation bump, no
+/// prefetch, no probes, no filmstrip centering. Those run once on release.
+fn scrub_to(app: &mut App, index: usize) -> Task<Message> {
+    let zoom_mode = app.config.zoom_mode;
+    let viewport = app.viewport_size;
+    let Some(viewer) = app.viewer_mut() else {
+        return Task::none();
+    };
+
+    viewer.nav.set_cursor(index);
+    viewer.pending_nav = None;
+    viewer.gif_player.stop();
+    viewer.drag = None;
+    viewer.pan = (0.0, 0.0);
+    if zoom_mode != ZoomMode::LockZoomRatio {
+        viewer.manual_zoom = false;
+    }
+    viewer.current_file_size = None;
+
+    let current = viewer.nav.current().to_path_buf();
+    if let Some(cached) = viewer.cache.get(&current).cloned() {
+        show_loaded(viewer, &current, cached, zoom_mode, viewport);
+    } else {
+        // Scrub targets are guaranteed at least a thumb. The sharp image
+        // loads if the drag ends here.
+        viewer.pending_since = Some(Instant::now());
+        show_placeholder_or_clear(viewer, &current, zoom_mode, viewport);
+    }
+    Task::none()
 }
 
 /// A pending navigation's target just became displayable, finish the move.

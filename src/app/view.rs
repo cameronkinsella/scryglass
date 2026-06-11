@@ -100,10 +100,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 ));
             }
             if app.config.show_slider {
-                col = col.push(ui::nav_slider::nav_slider(
-                    viewer.nav.cursor(),
-                    viewer.nav.len(),
-                ));
+                // The thumb follows the hand during a drag, the cursor otherwise.
+                let value = viewer
+                    .slider_drag
+                    .map(|d| d.target)
+                    .unwrap_or_else(|| viewer.nav.cursor());
+                col = col.push(ui::nav_slider::nav_slider(value, viewer.nav.len()));
             }
             if app.config.show_footer {
                 let dims = viewer
@@ -116,11 +118,16 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 } else {
                     "…".to_string()
                 };
+                let loading = viewer
+                    .pending_since
+                    .map(|since| since.elapsed())
+                    .filter(|elapsed| *elapsed >= SPINNER_DELAY);
                 let footer = ui::footer::footer(
                     &dims,
                     &ui::file_size_label(viewer.current_file_size),
                     &zoom,
                     &viewer.nav.position_label(),
+                    loading,
                 );
                 col = col.push(footer);
             }
@@ -172,13 +179,15 @@ pub fn view(app: &App) -> Element<'_, Message> {
         column![].width(Length::Fill).height(Length::Fill).into()
     };
 
-    // Loading spinner: appears only after a grace period so fast loads
-    // never flash UI.
+    // Centered spinner only when the viewport has nothing at all to show
+    // (the very first load). Once an image is up, the footer's small
+    // spinner takes over so nothing covers the picture.
     let spinner_overlay: Element<'_, Message> = match app.viewer() {
         Some(viewer)
-            if viewer
-                .pending_since
-                .is_some_and(|since| since.elapsed() >= SPINNER_DELAY) =>
+            if matches!(viewer.displayed, DisplayedImage::None)
+                && viewer
+                    .pending_since
+                    .is_some_and(|since| since.elapsed() >= SPINNER_DELAY) =>
         {
             let elapsed = viewer
                 .pending_since
@@ -189,11 +198,28 @@ pub fn view(app: &App) -> Element<'_, Message> {
         _ => column![].width(Length::Fill).height(Length::Fill).into(),
     };
 
+    // Scrub preview bubble: only during a slider drag that has crossed a
+    // file that can't be shown live (sticky for the rest of the drag).
+    let bubble_overlay: Element<'_, Message> = match app.viewer() {
+        Some(viewer) => match viewer.slider_drag {
+            Some(drag) if drag.bubble => ui::nav_slider::scrub_bubble(
+                viewer.nav.files(),
+                drag.target,
+                &viewer.thumbs,
+                app.window_size,
+                app.config.show_footer,
+            ),
+            _ => column![].width(Length::Fill).height(Length::Fill).into(),
+        },
+        None => column![].width(Length::Fill).height(Length::Fill).into(),
+    };
+
     let toasts = ui::toast::toast_stack(&app.toasts);
 
     let stacked = Stack::with_children(vec![
         content,
         spinner_overlay,
+        bubble_overlay,
         toolbar_overlay,
         ctx_overlay,
         toasts,
