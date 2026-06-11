@@ -80,6 +80,8 @@ pub struct App {
     window_size: Size,
     /// Context menu position (window coords). `Some` when visible.
     context_menu_pos: Option<iced::Point>,
+    /// Whether the window is borderless fullscreen (chrome hidden).
+    fullscreen: bool,
     /// Live toast notifications, oldest first.
     toasts: Vec<Toast>,
     /// Monotonic toast ID source.
@@ -132,6 +134,7 @@ pub fn boot() -> (App, Task<Message>) {
         last_cursor_pos: iced::Point::ORIGIN,
         window_size: Size::new(800.0, 600.0),
         context_menu_pos: None,
+        fullscreen: false,
         toasts: Vec::new(),
         next_toast_id: 0,
     };
@@ -198,6 +201,11 @@ pub fn title(app: &App) -> String {
 
 /// Recalculate the viewport size based on window size and visible chrome.
 fn recalc_viewport(app: &mut App) {
+    if app.fullscreen {
+        // Fullscreen hides all chrome: the image owns the whole window.
+        app.viewport_size = app.window_size;
+        return;
+    }
     let mut chrome_height: f32 = if app.config.show_toolbar {
         TOOLBAR_HEIGHT
     } else {
@@ -253,12 +261,6 @@ fn is_backward_key(key: &Key) -> bool {
 
 fn handle_event(event: Event, _status: event::Status, _id: window::Id) -> Option<Message> {
     match &event {
-        // --- Keyboard: Escape dismisses open menus ---
-        Event::Keyboard(keyboard::Event::KeyPressed {
-            key: Key::Named(Named::Escape),
-            ..
-        }) => Some(Message::DismissOverlay),
-
         // --- Keyboard: initial press ---
         Event::Keyboard(keyboard::Event::KeyPressed {
             key, repeat: false, ..
@@ -267,6 +269,14 @@ fn handle_event(event: Event, _status: event::Status, _id: window::Id) -> Option
         Event::Keyboard(keyboard::Event::KeyPressed {
             key, repeat: false, ..
         }) if is_backward_key(key) => Some(Message::Prev),
+
+        // --- Keyboard: everything else goes through the shortcut table ---
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key,
+            modifiers,
+            repeat: false,
+            ..
+        }) => ui::shortcuts::map_press(key, *modifiers),
 
         // --- Keyboard: OS key-repeat ---
         Event::Keyboard(keyboard::Event::KeyPressed {

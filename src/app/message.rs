@@ -43,6 +43,10 @@ pub enum Message {
     Next,
     /// Navigate backward (initial press).
     Prev,
+    /// Jump to the first image.
+    First,
+    /// Jump to the last image.
+    Last,
     /// Navigate forward (OS key-repeat).
     NextRepeat,
     /// Navigate backward (OS key-repeat).
@@ -71,8 +75,16 @@ pub enum Message {
     SetZoomMode(ZoomMode),
     /// Scroll wheel zoom, delta lines Y.
     ScrollZoom(f32),
+    /// Keyboard zoom step about the viewport center (+1 in, -1 out).
+    ZoomStep(i8),
+    /// Set zoom to exactly 100%.
+    ZoomActual,
     /// Double-click: reset zoom to auto/opening state.
     ResetZoom,
+    /// Toggle borderless fullscreen.
+    ToggleFullscreen,
+    /// Escape: leaves fullscreen, otherwise dismisses any open overlay.
+    Escape,
     /// Mouse pressed on image area, begin drag.
     DragStart,
     /// Mouse moved during drag.

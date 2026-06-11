@@ -90,7 +90,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             // never flash away while an image loads.
             let mut col = column![interactive];
 
-            if app.config.show_filmstrip {
+            if !app.fullscreen && app.config.show_filmstrip {
                 col = col.push(ui::filmstrip::filmstrip(
                     viewer.nav.files(),
                     viewer.nav.cursor(),
@@ -99,7 +99,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     app.window_size.width,
                 ));
             }
-            if app.config.show_slider {
+            if !app.fullscreen && app.config.show_slider {
                 // The thumb follows the hand during a drag, the cursor otherwise.
                 let value = viewer
                     .slider_drag
@@ -107,7 +107,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     .unwrap_or_else(|| viewer.nav.cursor());
                 col = col.push(ui::nav_slider::nav_slider(value, viewer.nav.len()));
             }
-            if app.config.show_footer {
+            if !app.fullscreen && app.config.show_footer {
                 let dims = viewer
                     .displayed
                     .original_size()
@@ -161,7 +161,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // The context menu is positioned inside the stacked area (below toolbar),
     // but pos is in window coordinates, so subtract toolbar height.
     let ctx_overlay: Element<'_, Message> = if let Some(pos) = app.context_menu_pos {
-        let toolbar_offset = if app.config.show_toolbar {
+        let toolbar_offset = if app.config.show_toolbar && !app.fullscreen {
             TOOLBAR_HEIGHT
         } else {
             0.0
@@ -227,7 +227,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
     let mut page = column![].width(Length::Fill).height(Length::Fill);
 
-    if app.config.show_toolbar {
+    if !app.fullscreen && app.config.show_toolbar {
         page = page.push(ui::toolbar::menu_bar(app.open_menu));
     }
     page = page.push(stacked);

@@ -292,6 +292,37 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             navigate(app, NavTarget::Delta(Direction::Backward))
         }
 
+        Message::First => navigate(app, NavTarget::Index(0)),
+
+        Message::Last => {
+            let Some(viewer) = app.viewer() else {
+                return Task::none();
+            };
+            let last = viewer.nav.len().saturating_sub(1);
+            navigate(app, NavTarget::Index(last))
+        }
+
+        // --- Fullscreen ---
+        Message::ToggleFullscreen => {
+            app.fullscreen = !app.fullscreen;
+            recalc_viewport(app);
+            let mode = if app.fullscreen {
+                iced::window::Mode::Fullscreen
+            } else {
+                iced::window::Mode::Windowed
+            };
+            iced::window::latest().and_then(move |id| iced::window::set_mode(id, mode))
+        }
+
+        Message::Escape => {
+            if app.fullscreen {
+                return update(app, Message::ToggleFullscreen);
+            }
+            app.open_menu = None;
+            app.context_menu_pos = None;
+            Task::none()
+        }
+
         // --- Key released: stop continuous scrolling ---
         Message::NextReleased => {
             if let Some(viewer) = app.viewer_mut()
@@ -443,6 +474,44 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 let img_w = w as f32 * viewer.zoom;
                 let img_h = h as f32 * viewer.zoom;
                 viewer.pan = clamp_pan(viewer.pan, img_w, img_h, viewport);
+            }
+            Task::none()
+        }
+
+        // --- Keyboard zoom: steps about the viewport center ---
+        Message::ZoomStep(direction) => {
+            let viewport = app.viewport_size;
+            let Some(viewer) = app.viewer_mut() else {
+                return Task::none();
+            };
+
+            let old_zoom = viewer.zoom;
+            let factor = if direction > 0 {
+                ZOOM_STEP
+            } else {
+                1.0 / ZOOM_STEP
+            };
+            viewer.zoom = (old_zoom * factor).clamp(ZOOM_MIN, ZOOM_MAX);
+            viewer.manual_zoom = true;
+            viewer.pan = pan_for_zoom_toward_cursor(viewer.pan, viewer.zoom / old_zoom, (0.0, 0.0));
+
+            if let Some((w, h)) = viewer.displayed.original_size() {
+                let img_w = w as f32 * viewer.zoom;
+                let img_h = h as f32 * viewer.zoom;
+                viewer.pan = clamp_pan(viewer.pan, img_w, img_h, viewport);
+            }
+            Task::none()
+        }
+
+        Message::ZoomActual => {
+            let viewport = app.viewport_size;
+            let Some(viewer) = app.viewer_mut() else {
+                return Task::none();
+            };
+            viewer.zoom = 1.0;
+            viewer.manual_zoom = true;
+            if let Some((w, h)) = viewer.displayed.original_size() {
+                viewer.pan = clamp_pan(viewer.pan, w as f32, h as f32, viewport);
             }
             Task::none()
         }
