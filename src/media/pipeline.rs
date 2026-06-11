@@ -83,8 +83,9 @@ pub struct Pipeline {
     prefetch_lane: Arc<Semaphore>,
     thumb_lane: Arc<Semaphore>,
     urgent_thumb_lane: Arc<Semaphore>,
-    /// Persistent thumbnail store, `None` when disabled by build or config.
-    disk: Option<DiskThumbs>,
+    /// Persistent thumbnail store, `None` when disabled by build or
+    /// config. Swappable at runtime (settings toggle).
+    disk: Arc<std::sync::RwLock<Option<DiskThumbs>>>,
 }
 
 impl Pipeline {
@@ -100,13 +101,20 @@ impl Pipeline {
             // Wide enough that scrubbing never waits on the background
             // queue, bounded so a long key-hold can't flood the I/O pool.
             urgent_thumb_lane: Arc::new(Semaphore::new(8)),
-            disk,
+            disk: Arc::new(std::sync::RwLock::new(disk)),
         }
     }
 
-    /// The persistent thumbnail store, if enabled.
-    pub fn disk(&self) -> Option<&DiskThumbs> {
-        self.disk.as_ref()
+    /// A snapshot of the persistent thumbnail store, if enabled.
+    pub fn disk(&self) -> Option<DiskThumbs> {
+        self.disk.read().ok()?.clone()
+    }
+
+    /// Swap the persistent store in or out (settings toggle).
+    pub fn set_disk(&self, disk: Option<DiskThumbs>) {
+        if let Ok(mut slot) = self.disk.write() {
+            *slot = disk;
+        }
     }
 
     /// The generation of the most recent navigation.
@@ -135,7 +143,7 @@ impl Pipeline {
             Lane::Prefetch => self.prefetch_lane.clone(),
         };
 
-        let disk = self.disk.clone();
+        let disk = self.disk();
 
         async move {
             let _permit = semaphore
@@ -225,7 +233,7 @@ impl Pipeline {
             ThumbUrgency::Urgent => self.urgent_thumb_lane.clone(),
             ThumbUrgency::Background => self.thumb_lane.clone(),
         };
-        let disk = self.disk.clone();
+        let disk = self.disk();
 
         async move {
             let _permit = semaphore

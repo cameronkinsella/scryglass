@@ -68,9 +68,6 @@ pub fn settings<'a>(config: &AppConfig, disk_cache_size: Option<u64>) -> Element
         switch("Persistent thumbnails", config.disk_thumbs, |_| {
             Message::ToggleDiskThumbs
         }),
-        text("Takes effect after restart")
-            .size(11)
-            .style(theme::secondary_text),
     ]
     .spacing(10)
     .padding(18)

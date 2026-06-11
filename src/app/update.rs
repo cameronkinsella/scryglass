@@ -977,7 +977,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
 
         Message::ClearDiskThumbs => {
-            let Some(disk) = app.pipeline.disk().cloned() else {
+            let Some(disk) = app.pipeline.disk() else {
                 return Task::none();
             };
             app.disk_cache_size = None;
@@ -1020,7 +1020,14 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
         Message::ToggleDiskThumbs => {
             app.config.disk_thumbs = !app.config.disk_thumbs;
-            save_config(app)
+            // Swap the store in the running pipeline. In-flight loads
+            // keep the snapshot they captured, new ones see the change.
+            app.pipeline
+                .set_disk(crate::media::disk_thumbs::DiskThumbs::create(
+                    app.config.disk_thumbs,
+                ));
+            app.disk_cache_size = None;
+            Task::batch([save_config(app), probe_disk_cache_size(&app.pipeline)])
         }
 
         Message::CopyImageFinished(result) => match result {
@@ -1490,7 +1497,7 @@ fn copy_bitmap(handle: &Handle) -> Result<(), String> {
 
 /// Measure the disk thumbnail store, off-thread.
 fn probe_disk_cache_size(pipeline: &Pipeline) -> Task<Message> {
-    let Some(disk) = pipeline.disk().cloned() else {
+    let Some(disk) = pipeline.disk() else {
         return Task::done(Message::DiskCacheSize(0));
     };
     Task::perform(
@@ -1506,7 +1513,7 @@ fn probe_disk_cache_size(pipeline: &Pipeline) -> Task<Message> {
 /// Drop a deleted/renamed file's entry from the persistent thumbnail
 /// store so the thumbnail can't outlive the file.
 fn purge_disk_thumb(pipeline: &Pipeline, path: &std::path::Path) -> Task<Message> {
-    let Some(disk) = pipeline.disk().cloned() else {
+    let Some(disk) = pipeline.disk() else {
         return Task::none();
     };
     let container = path
@@ -1629,7 +1636,7 @@ fn open_viewer(app: &mut App, nav: Nav, source: Source) -> Task<Message> {
     // Privacy hygiene: purge persisted thumbnails of files that were
     // deleted from this folder/archive since the last visit. Uses the
     // listing we already have, with no extra source I/O.
-    let reconcile = match pipeline.disk().cloned() {
+    let reconcile = match pipeline.disk() {
         Some(disk) => {
             let (container, _) = crate::media::pipeline::cache_key(
                 &source,
