@@ -170,6 +170,10 @@ pub struct VideoSession {
     /// Wall-clock fallback for silent files: time playing since last resume.
     started: Option<Instant>,
     accumulated: Duration,
+    /// Whether any frame has been shown. The clock stays at zero until
+    /// then, so the slider doesn't creep ahead during decoder warmup and
+    /// snap back when the audio clock takes over.
+    first_frame_shown: bool,
     /// One decoded frame waiting for its presentation time.
     pending: Option<VideoFrame>,
     pub playing: bool,
@@ -220,8 +224,9 @@ impl VideoSession {
             video_done,
             stop,
             base: start,
-            started: Some(Instant::now()),
+            started: None,
             accumulated: Duration::ZERO,
+            first_frame_shown: false,
             pending: None,
             playing: true,
             looping,
@@ -234,7 +239,8 @@ impl VideoSession {
 
     /// A fresh session on the same file at `start`. Used for seeks and
     /// looping. Carries the temp-file guard so extracted archive entries
-    /// survive the respawn.
+    /// survive the respawn, and the known duration so the seek slider
+    /// never collapses while the new demuxer spins up.
     pub fn reopen_at(&self, start: Duration) -> Self {
         let mut session = Self::open(
             self.path.clone(),
@@ -243,6 +249,9 @@ impl VideoSession {
             self.muted,
             self.looping,
         );
+        session
+            .duration_us
+            .store(self.duration_us.load(Ordering::Relaxed), Ordering::Relaxed);
         session.temp = self.temp.clone();
         session
     }
@@ -251,6 +260,9 @@ impl VideoSession {
     fn clock(&self) -> Duration {
         if self.has_audio.load(Ordering::Relaxed) {
             Duration::from_micros(self.audio_clock_us.load(Ordering::Relaxed))
+        } else if !self.first_frame_shown {
+            // Decoder warmup: hold at the start instead of free-running.
+            Duration::ZERO
         } else {
             self.accumulated + self.started.map(|s| s.elapsed()).unwrap_or(Duration::ZERO)
         }
@@ -290,6 +302,11 @@ impl VideoSession {
                 }
                 Err(_) => break,
             }
+        }
+        // The wall-clock fallback starts with the first visible frame.
+        if due.is_some() && !self.first_frame_shown {
+            self.first_frame_shown = true;
+            self.started = Some(Instant::now());
         }
         due
     }
