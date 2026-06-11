@@ -27,7 +27,9 @@ unrar = { version = "0.5.8", optional = true }
 jxl-oxide = { version = "0.12.6", optional = true }
 resvg = { version = "0.47.0", default-features = false, features = ["text"], optional = true }
 rawler = { version = "0.7.2", optional = true }
-libheif-rs = { version = "2.7.0", optional = true }
+# v1_17 API level: oldest supported libheif, so the same code builds
+# against Ubuntu's packaged 1.17 and vcpkg's current release alike.
+libheif-rs = { version = "2.7.0", default-features = false, features = ["v1_17"], optional = true }
 trash = "5.2.6"
 rodio = { version = "0.20", default-features = false, optional = true }
 ffmpeg-next = { version = "8", default-features = false, features = ["codec", "format", "software-resampling", "software-scaling"], optional = true }

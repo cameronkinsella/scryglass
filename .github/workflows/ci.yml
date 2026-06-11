@@ -51,8 +51,10 @@ jobs:
           sudo apt-get update && sudo apt-get install -y
           libgtk-3-dev libasound2-dev clang pkg-config
           libavcodec-dev libavformat-dev libavutil-dev
-          libswscale-dev libswresample-dev
+          libswscale-dev libswresample-dev libheif-dev
       - name: Minimal build (no default features)
         run: cargo check --no-default-features
       - name: Video build (links FFmpeg libraries)
         run: cargo check --features video
+      - name: HEIF tests (links system libheif)
+        run: cargo test --features heif
