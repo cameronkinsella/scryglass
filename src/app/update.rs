@@ -803,6 +803,7 @@ fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
 
     if viewer.is_fs() && gif::is_gif(&current) {
         viewer.pending_since = Some(Instant::now());
+        show_placeholder_or_clear(viewer, &current, zoom_mode, viewport);
         if let Some(gif_task) = viewer.gif_player.try_start_from_cache(&current) {
             tasks.push(gif_task.map(Message::Gif));
         } else {
@@ -813,12 +814,11 @@ fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
         show_loaded(viewer, &current, cached, zoom_mode, viewport);
     } else {
         viewer.pending_since = Some(Instant::now());
-        // Blurred placeholder, instantly from the thumb cache or within
-        // milliseconds from the file's embedded EXIF thumbnail. The image
-        // area tracks the cursor even when full decodes can't keep up.
-        if let Some(thumb) = viewer.thumbs.get(&current).cloned() {
-            show_placeholder(viewer, &current, thumb, zoom_mode, viewport);
-        } else {
+        // Blurred placeholder from the thumb cache, or an empty viewport.
+        // The image area must NEVER show a previous image here. It is
+        // locked in sync with the title and slider, and an honest blank
+        // beats a wrong picture.
+        if !show_placeholder_or_clear(viewer, &current, zoom_mode, viewport) {
             tasks.push(fire_thumb(
                 &pipeline,
                 viewer,
@@ -901,6 +901,25 @@ fn show_placeholder(
     viewer.pan = (0.0, 0.0);
     viewer.displayed = DisplayedImage::Placeholder(thumb);
     viewer.displayed_path = Some(path.to_path_buf());
+}
+
+/// Show the cached thumbnail for `path` if there is one, otherwise clear
+/// the image area. Returns true when a placeholder was shown. Either way
+/// the image area now refers to `path`, never to a previous image.
+fn show_placeholder_or_clear(
+    viewer: &mut Viewer,
+    path: &std::path::Path,
+    zoom_mode: ZoomMode,
+    viewport: Size,
+) -> bool {
+    if let Some(thumb) = viewer.thumbs.get(path).cloned() {
+        show_placeholder(viewer, path, thumb, zoom_mode, viewport);
+        true
+    } else {
+        viewer.displayed = DisplayedImage::None;
+        viewer.displayed_path = None;
+        false
+    }
 }
 
 /// Fire a thumbnail job for `path` unless one is cached, in flight, or

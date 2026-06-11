@@ -16,7 +16,7 @@ use crate::ui::theme;
 pub fn footer<'a>(
     dimensions: &str,
     file_size: &str,
-    zoom_pct: u32,
+    zoom: &str,
     position: &str,
 ) -> Element<'a, Message> {
     use crate::ui::icons;
@@ -35,12 +35,9 @@ pub fn footer<'a>(
     .align_y(Alignment::Center)
     .width(Length::Fixed(90.0));
 
-    let zoom_item = row![
-        icons::zoom_in().size(13),
-        text(format!(" {zoom_pct}%")).size(13),
-    ]
-    .align_y(Alignment::Center)
-    .width(Length::Fixed(70.0));
+    let zoom_item = row![icons::zoom_in().size(13), text(format!(" {zoom}")).size(13),]
+        .align_y(Alignment::Center)
+        .width(Length::Fixed(70.0));
 
     let position_item = row![
         icons::images().size(13),

@@ -19,95 +19,114 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
     let content = match &app.session {
         Session::Empty => ui::image_display::drop_prompt(),
-        Session::Viewing(viewer) => match &viewer.displayed {
-            DisplayedImage::Full { .. } | DisplayedImage::Placeholder(_) => {
-                // Full images and blurred placeholders render through the
-                // same path: zoom/pan run on the true dimensions either way.
-                let (handle, texture_size, original_size, pixelated) = match &viewer.displayed {
-                    DisplayedImage::Full {
-                        allocation,
-                        original_size,
-                    } => {
-                        let texture = allocation.size();
-                        (
-                            allocation.handle(),
-                            (texture.width, texture.height),
-                            *original_size,
-                            app.config.crisp_pixels,
-                        )
-                    }
-                    DisplayedImage::Placeholder(thumb) => {
-                        // Placeholders always smooth: the bilinear upscale
-                        // IS the blur.
-                        (&thumb.handle, thumb.size, thumb.original_size, false)
-                    }
-                    DisplayedImage::None => unreachable!(),
-                };
-                let zoom_pct = (viewer.zoom * 100.0).round() as u32;
+        Session::Viewing(viewer) => {
+            // Invariant: the image area only ever shows the file in the
+            // title bar. When nothing is ready for that file it is empty.
+            // Title, slider, and image must never diverge.
+            debug_assert!(
+                matches!(viewer.displayed, DisplayedImage::None)
+                    || viewer.displayed_path.as_deref() == Some(viewer.nav.current()),
+                "image area diverged from the navigation cursor"
+            );
 
-                let image_view = ui::image_display::image_display(
-                    handle,
-                    texture_size,
+            // Full images and blurred placeholders render through the same
+            // path: zoom/pan run on the true dimensions either way. With
+            // nothing ready yet, the viewport stays honestly empty (the
+            // spinner overlay appears after its grace period).
+            let image_view: Element<'_, Message> = match &viewer.displayed {
+                DisplayedImage::None => ui::image_display::empty_viewport(),
+                DisplayedImage::Full {
+                    allocation,
                     original_size,
-                    viewer.zoom,
-                    viewer.pan,
-                    (app.viewport_size.width, app.viewport_size.height),
-                    pixelated,
-                );
+                } => {
+                    let texture = allocation.size();
+                    ui::image_display::image_display(
+                        allocation.handle(),
+                        (texture.width, texture.height),
+                        *original_size,
+                        viewer.zoom,
+                        viewer.pan,
+                        (app.viewport_size.width, app.viewport_size.height),
+                        app.config.crisp_pixels,
+                    )
+                }
+                DisplayedImage::Placeholder(thumb) => {
+                    // Placeholders always smooth: the bilinear upscale IS
+                    // the blur.
+                    ui::image_display::image_display(
+                        &thumb.handle,
+                        thumb.size,
+                        thumb.original_size,
+                        viewer.zoom,
+                        viewer.pan,
+                        (app.viewport_size.width, app.viewport_size.height),
+                        false,
+                    )
+                }
+            };
 
-                // Wrap image area in mouse_area for scroll, drag, double-click, and right-click.
-                let interactive = mouse_area(image_view)
-                    .on_press(Message::DragStart)
-                    .on_right_press(Message::ShowContextMenu)
-                    .on_scroll(|delta| {
-                        let y = match delta {
-                            mouse::ScrollDelta::Lines { y, .. } => y,
-                            mouse::ScrollDelta::Pixels { y, .. } => {
-                                if y > 0.0 {
-                                    1.0
-                                } else if y < 0.0 {
-                                    -1.0
-                                } else {
-                                    0.0
-                                }
+            // Wrap image area in mouse_area for scroll, drag, double-click, and right-click.
+            let interactive = mouse_area(image_view)
+                .on_press(Message::DragStart)
+                .on_right_press(Message::ShowContextMenu)
+                .on_scroll(|delta| {
+                    let y = match delta {
+                        mouse::ScrollDelta::Lines { y, .. } => y,
+                        mouse::ScrollDelta::Pixels { y, .. } => {
+                            if y > 0.0 {
+                                1.0
+                            } else if y < 0.0 {
+                                -1.0
+                            } else {
+                                0.0
                             }
-                        };
-                        Message::ScrollZoom(y)
-                    })
-                    .on_double_click(Message::ResetZoom);
+                        }
+                    };
+                    Message::ScrollZoom(y)
+                })
+                .on_double_click(Message::ResetZoom);
 
-                // Build the bottom section: filmstrip, slider, footer (each optional).
-                let mut col = column![interactive];
+            // The chrome below renders in every display state. It must
+            // never flash away while an image loads.
+            let mut col = column![interactive];
 
-                if app.config.show_filmstrip {
-                    col = col.push(ui::filmstrip::filmstrip(
-                        viewer.nav.files(),
-                        viewer.nav.cursor(),
-                        &viewer.thumbs,
-                        viewer.filmstrip_scroll_x,
-                        app.window_size.width,
-                    ));
-                }
-                if app.config.show_slider {
-                    col = col.push(ui::nav_slider::nav_slider(
-                        viewer.nav.cursor(),
-                        viewer.nav.len(),
-                    ));
-                }
-                if app.config.show_footer {
-                    let footer = ui::footer::footer(
-                        &ui::format_dimensions(original_size.0, original_size.1),
-                        &ui::file_size_label(viewer.current_file_size),
-                        zoom_pct,
-                        &viewer.nav.position_label(),
-                    );
-                    col = col.push(footer);
-                }
-
-                col.into()
+            if app.config.show_filmstrip {
+                col = col.push(ui::filmstrip::filmstrip(
+                    viewer.nav.files(),
+                    viewer.nav.cursor(),
+                    &viewer.thumbs,
+                    viewer.filmstrip_scroll_x,
+                    app.window_size.width,
+                ));
             }
-            DisplayedImage::None => ui::image_display::loading_prompt(),
-        },
+            if app.config.show_slider {
+                col = col.push(ui::nav_slider::nav_slider(
+                    viewer.nav.cursor(),
+                    viewer.nav.len(),
+                ));
+            }
+            if app.config.show_footer {
+                let dims = viewer
+                    .displayed
+                    .original_size()
+                    .map(|(w, h)| ui::format_dimensions(w, h))
+                    .unwrap_or_else(|| "…".to_string());
+                let zoom = if viewer.displayed.original_size().is_some() {
+                    format!("{}%", (viewer.zoom * 100.0).round() as u32)
+                } else {
+                    "…".to_string()
+                };
+                let footer = ui::footer::footer(
+                    &dims,
+                    &ui::file_size_label(viewer.current_file_size),
+                    &zoom,
+                    &viewer.nav.position_label(),
+                );
+                col = col.push(footer);
+            }
+
+            col.into()
+        }
     };
 
     // Main layout: toolbar on top (if visible), then content fills remaining space.
@@ -154,9 +173,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     };
 
     // Loading spinner: appears only after a grace period so fast loads
-    // never flash UI. When the pixels on screen still belong to a previous
-    // image (no placeholder available yet), a dim scrim makes that obvious
-    // instead of letting the image area silently lag the title and slider.
+    // never flash UI.
     let spinner_overlay: Element<'_, Message> = match app.viewer() {
         Some(viewer)
             if viewer
@@ -167,12 +184,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 .pending_since
                 .map(|since| since.elapsed())
                 .unwrap_or_default();
-            let overlay = center(ui::spinner::spinner(elapsed));
-            if viewer.display_is_stale() {
-                overlay.style(ui::theme::stale_scrim).into()
-            } else {
-                overlay.into()
-            }
+            center(ui::spinner::spinner(elapsed)).into()
         }
         _ => column![].width(Length::Fill).height(Length::Fill).into(),
     };

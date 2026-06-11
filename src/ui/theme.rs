@@ -238,15 +238,6 @@ pub fn menu_tab_active(theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
-/// Dimming layer over a stale image while its replacement loads. Makes
-/// it obvious the shown pixels aren't the file under the cursor yet.
-pub fn stale_scrim(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(with_alpha(Color::BLACK, 0.55))),
-        ..container::Style::default()
-    }
-}
-
 /// Empty filmstrip cell awaiting its thumbnail.
 pub fn thumb_placeholder(theme: &Theme) -> container::Style {
     let t = tokens(theme);

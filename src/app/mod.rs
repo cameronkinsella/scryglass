@@ -167,17 +167,18 @@ pub fn title(app: &App) -> String {
     }
 
     let position = viewer.nav.position_label();
-    let zoom_pct = (viewer.zoom * 100.0).round() as u32;
 
-    let dims = viewer
-        .displayed
-        .original_size()
-        .map(|(w, h)| ui::format_dimensions(w, h))
-        .unwrap_or_default();
+    let (dims, zoom) = match viewer.displayed.original_size() {
+        Some((w, h)) => (
+            ui::format_dimensions(w, h),
+            format!("{}%", (viewer.zoom * 100.0).round() as u32),
+        ),
+        None => ("…".to_string(), "…".to_string()),
+    };
 
     let size = ui::file_size_label(viewer.current_file_size);
 
-    format!("{filename}  |  {position}  |  {zoom_pct}%  |  {dims}  |  {size}")
+    format!("{filename}  |  {position}  |  {zoom}  |  {dims}  |  {size}")
 }
 
 /// Recalculate the viewport size based on window size and visible chrome.

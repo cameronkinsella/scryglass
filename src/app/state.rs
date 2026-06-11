@@ -176,12 +176,6 @@ impl Viewer {
         matches!(self.source, Source::Fs)
     }
 
-    /// True when the image area is not showing the file under the cursor
-    /// (e.g. a previous image held during a slow load).
-    pub fn display_is_stale(&self) -> bool {
-        self.displayed_path.as_deref() != Some(self.nav.current())
-    }
-
     /// The next file the background thumbnailer should work on: scans
     /// forward from the cursor (wrapping) for a file with no thumbnail,
     /// none in flight, and no full load underway (those yield a thumbnail
@@ -260,13 +254,9 @@ mod tests {
     }
 
     #[test]
-    fn display_is_stale_until_current_is_shown() {
-        let mut viewer = test_viewer(&["a.png", "b.png"], 0);
-        assert!(viewer.display_is_stale());
-        viewer.displayed_path = Some(PathBuf::from("a.png"));
-        assert!(!viewer.display_is_stale());
-        viewer.nav.next();
-        assert!(viewer.display_is_stale());
-        assert_eq!(viewer.displayed_path.as_deref(), Some(Path::new("a.png")));
+    fn fresh_viewer_displays_nothing() {
+        let viewer = test_viewer(&["a.png", "b.png"], 0);
+        assert!(matches!(viewer.displayed, DisplayedImage::None));
+        assert_eq!(viewer.displayed_path.as_deref(), None::<&Path>);
     }
 }
