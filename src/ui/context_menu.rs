@@ -31,7 +31,7 @@ pub fn clamp_menu_pos(pos: Point, menu_size: Size, bounds: Size) -> Point {
 /// `pos` is the cursor position relative to the overlay origin.
 /// `show_toolbar` is the current toolbar visibility state.
 pub fn context_menu<'a>(pos: iced::Point, show_toolbar: bool) -> Element<'a, Message> {
-    use iced_fonts::bootstrap;
+    use crate::ui::icons;
 
     let item = |icon_fn: fn() -> iced::widget::Text<'a>,
                 label: &str,
@@ -65,25 +65,17 @@ pub fn context_menu<'a>(pos: iced::Point, show_toolbar: bool) -> Element<'a, Mes
         column![
             toolbar_row,
             rule::horizontal(1),
-            item(bootstrap::image, "Copy image", Message::CopyImage),
-            item(
-                bootstrap::clipboard,
-                "Copy file path",
-                Message::CopyFilePath
-            ),
-            item(
-                bootstrap::file_earmark,
-                "Copy filename",
-                Message::CopyFilename
-            ),
+            item(icons::image, "Copy image", Message::CopyImage),
+            item(icons::clipboard, "Copy file path", Message::CopyFilePath),
+            item(icons::file_earmark, "Copy filename", Message::CopyFilename),
             rule::horizontal(1),
             item(
-                bootstrap::folder,
+                icons::folder,
                 "Open image location",
                 Message::OpenImageLocation
             ),
             item(
-                bootstrap::info_circle,
+                icons::info_circle,
                 "Image properties",
                 Message::ImageProperties
             ),

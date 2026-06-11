@@ -3,6 +3,7 @@
 pub mod context_menu;
 pub mod filmstrip;
 pub mod footer;
+pub mod icons;
 pub mod image_display;
 pub mod nav_slider;
 pub mod spinner;

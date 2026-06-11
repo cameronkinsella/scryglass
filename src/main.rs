@@ -12,11 +12,13 @@ fn main() -> anyhow::Result<()> {
         .title(app::title)
         .theme(app::theme)
         .subscription(app::subscription)
-        .font(iced_fonts::BOOTSTRAP_FONT_BYTES)
+        // .settings() replaces the whole settings struct, so it must come
+        // before .font(), because fonts accumulate inside settings.
         .settings(iced::Settings {
             vsync: false,
             ..Default::default()
         })
+        .font(iced_fonts::BOOTSTRAP_FONT_BYTES)
         .run()?;
     Ok(())
 }

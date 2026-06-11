@@ -19,31 +19,31 @@ pub fn footer<'a>(
     zoom_pct: u32,
     position: &str,
 ) -> Element<'a, Message> {
-    use iced_fonts::bootstrap;
+    use crate::ui::icons;
 
     let dimensions_item = row![
-        bootstrap::aspect_ratio().size(13),
+        icons::aspect_ratio().size(13),
         text(format!(" {dimensions}")).size(13),
     ]
     .align_y(Alignment::Center)
     .width(Length::Fixed(145.0));
 
     let file_size_item = row![
-        bootstrap::hdd().size(13),
+        icons::hdd().size(13),
         text(format!(" {file_size}")).size(13),
     ]
     .align_y(Alignment::Center)
     .width(Length::Fixed(90.0));
 
     let zoom_item = row![
-        bootstrap::zoom_in().size(13),
+        icons::zoom_in().size(13),
         text(format!(" {zoom_pct}%")).size(13),
     ]
     .align_y(Alignment::Center)
     .width(Length::Fixed(70.0));
 
     let position_item = row![
-        bootstrap::images().size(13),
+        icons::images().size(13),
         text(format!(" {position}")).size(13),
     ]
     .align_y(Alignment::Center)
