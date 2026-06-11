@@ -59,6 +59,12 @@ impl<T> ImageCache<T> {
         self.entries.get(path).map(|e| &e.value)
     }
 
+    /// Change the byte budget (settings). Eviction applies on the next
+    /// `evict_over_budget` call.
+    pub fn set_budget(&mut self, budget_bytes: usize) {
+        self.budget = budget_bytes;
+    }
+
     /// Remove an entry (file deleted or renamed), returning its value.
     pub fn remove(&mut self, path: &Path) -> Option<T> {
         let entry = self.entries.remove(path)?;

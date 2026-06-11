@@ -651,6 +651,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         // --- Window resized ---
         Message::WindowResized(size) => {
             app.window_size = size;
+            // Remember the size for the next session (persisted on close).
+            app.config.window_width = size.width;
+            app.config.window_height = size.height;
             recalc_viewport(app);
             let zoom_mode = app.config.zoom_mode;
             let viewport = app.viewport_size;
@@ -951,12 +954,84 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::ModalSubmit => match &app.modal {
             Some(Modal::ConfirmDelete(_)) => update(app, Message::ConfirmDeleteNow),
             Some(Modal::Rename { .. }) => update(app, Message::CommitRename),
+            Some(Modal::Settings) => update(app, Message::ModalCancel),
             None => Task::none(),
         },
 
         Message::ModalCancel => {
             app.modal = None;
             Task::none()
+        }
+
+        // --- Settings ---
+        Message::OpenSettings => {
+            app.open_menu = None;
+            app.modal = Some(Modal::Settings);
+            app.disk_cache_size = None;
+            probe_disk_cache_size(&app.pipeline)
+        }
+
+        Message::DiskCacheSize(bytes) => {
+            app.disk_cache_size = Some(bytes);
+            Task::none()
+        }
+
+        Message::ClearDiskThumbs => {
+            let Some(disk) = app.pipeline.disk().cloned() else {
+                return Task::none();
+            };
+            app.disk_cache_size = None;
+            let pipeline = app.pipeline.clone();
+            Task::batch([
+                Task::future(async move {
+                    let _ = tokio::task::spawn_blocking(move || disk.clear()).await;
+                })
+                .then(move |_| probe_disk_cache_size(&pipeline)),
+                push_toast(app, ToastKind::Info, "Thumbnail store cleared".into()),
+            ])
+        }
+
+        Message::SetPrefetchDepth(depth) => {
+            app.config.prefetch_depth = depth.clamp(1, 10);
+            save_config(app)
+        }
+
+        Message::SetCacheBudget(megabytes) => {
+            app.config.cache_budget_mb = megabytes.clamp(128, 4096);
+            let budget = app.config.cache_budget_mb * 1024 * 1024;
+            let depth = app.config.prefetch_depth;
+            if let Some(viewer) = app.viewer_mut() {
+                viewer.cache.set_budget(budget);
+                let pinned = viewer.pinned_paths(depth);
+                viewer.cache.evict_over_budget(&pinned);
+            }
+            save_config(app)
+        }
+
+        Message::ToggleReadOnly => {
+            app.config.read_only = !app.config.read_only;
+            save_config(app)
+        }
+
+        Message::ToggleConfirmDelete => {
+            app.config.confirm_delete = !app.config.confirm_delete;
+            save_config(app)
+        }
+
+        Message::ToggleDiskThumbs => {
+            app.config.disk_thumbs = !app.config.disk_thumbs;
+            save_config(app)
+        }
+
+        Message::CopyImageFinished(result) => match result {
+            Ok(()) => push_toast(app, ToastKind::Info, "Image copied".into()),
+            Err(e) => push_toast(app, ToastKind::Error, format!("Couldn't copy: {e}")),
+        },
+
+        // --- Window close: persist config (window size included) first ---
+        Message::CloseRequested(id) => {
+            let config = app.config.clone();
+            Task::future(config.save()).then(move |_| iced::window::close(id))
         }
 
         // --- Info panel ---
@@ -1005,14 +1080,36 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             let Some(viewer) = app.viewer() else {
                 return Task::none();
             };
+            // Copy the displayed pixels as a real bitmap. It works for any
+            // source (archives included) and pastes into image editors.
+            let DisplayedImage::Full { allocation, .. } = &viewer.displayed else {
+                return push_toast(app, ToastKind::Info, "Image is still loading".into());
+            };
+            let handle = allocation.handle().clone();
+            Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || copy_bitmap(&handle))
+                        .await
+                        .map_err(|e| e.to_string())
+                        .and_then(|r| r)
+                },
+                Message::CopyImageFinished,
+            )
+        }
+
+        Message::CopyFile => {
+            app.context_menu_pos = None;
+            let Some(viewer) = app.viewer() else {
+                return Task::none();
+            };
             let path = viewer.current_disk_path();
             let copy = Task::future(async move {
-                crate::platform::copy_image_to_clipboard(&path);
+                crate::platform::copy_file_to_clipboard(&path);
             })
             .discard();
             Task::batch([
                 copy,
-                push_toast(app, ToastKind::Info, "Image copied".to_string()),
+                push_toast(app, ToastKind::Info, "File copied".to_string()),
             ])
         }
 
@@ -1184,6 +1281,42 @@ fn fire_delete(app: &mut App, path: PathBuf) -> Task<Message> {
             (path, result)
         },
         |(path, result)| Message::DeleteFinished(path, result),
+    )
+}
+
+/// Put the displayed image on the clipboard as bitmap data.
+fn copy_bitmap(handle: &Handle) -> Result<(), String> {
+    let Handle::Rgba {
+        width,
+        height,
+        pixels,
+        ..
+    } = handle
+    else {
+        return Err("no pixel data available".into());
+    };
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard
+        .set_image(arboard::ImageData {
+            width: *width as usize,
+            height: *height as usize,
+            bytes: std::borrow::Cow::Borrowed(pixels),
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// Measure the disk thumbnail store, off-thread.
+fn probe_disk_cache_size(pipeline: &Pipeline) -> Task<Message> {
+    let Some(disk) = pipeline.disk().cloned() else {
+        return Task::done(Message::DiskCacheSize(0));
+    };
+    Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || disk.total_size())
+                .await
+                .unwrap_or(0)
+        },
+        Message::DiskCacheSize,
     )
 }
 

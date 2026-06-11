@@ -36,6 +36,9 @@ impl DiskThumbs {
 
     pub fn housekeep(&self) {}
 
-    #[allow(dead_code)]
     pub fn clear(&self) {}
+
+    pub fn total_size(&self) -> u64 {
+        0
+    }
 }

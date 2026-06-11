@@ -129,6 +129,9 @@ pub struct AppConfig {
     pub read_only: bool,
     /// Ask before moving a file to the recycle bin.
     pub confirm_delete: bool,
+    /// Last window size, restored at startup.
+    pub window_width: f32,
+    pub window_height: f32,
     /// Whether the toolbar is visible.
     pub show_toolbar: bool,
     /// Whether the filmstrip is visible.
@@ -156,6 +159,8 @@ impl Default for AppConfig {
             disk_thumbs: true,
             read_only: false,
             confirm_delete: true,
+            window_width: 1024.0,
+            window_height: 768.0,
             show_toolbar: true,
             show_filmstrip: true,
             show_slider: true,
@@ -247,6 +252,8 @@ mod tests {
             disk_thumbs: false,
             read_only: true,
             confirm_delete: false,
+            window_width: 640.0,
+            window_height: 480.0,
             show_toolbar: false,
             show_filmstrip: true,
             show_slider: false,

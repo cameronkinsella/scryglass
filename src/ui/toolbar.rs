@@ -105,6 +105,9 @@ pub fn dropdown<'a>(
                 column![
                     item("Open…", Message::OpenFile),
                     item("Close", Message::CloseFile),
+                    rule::horizontal(1),
+                    item("Settings…", Message::OpenSettings),
+                    rule::horizontal(1),
                     item("Quit", Message::Quit),
                 ]
                 .width(160),

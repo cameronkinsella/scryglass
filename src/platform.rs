@@ -9,13 +9,9 @@ use std::path::Path;
 // Copy image to clipboard
 // ---------------------------------------------------------------------------
 
-/// Copy an image file to the system clipboard.
-///
-/// Uses `arboard` which supports Windows, macOS, and Linux (X11/Wayland).
-/// The file is placed on the clipboard as a file list entry, so it can be
-/// pasted into applications that accept file drops (image editors, chat
-/// apps, file managers, etc.).
-pub fn copy_image_to_clipboard(path: &Path) {
+/// Copy a file to the system clipboard as a file-list entry, so it can
+/// be pasted into file managers and applications that accept file drops.
+pub fn copy_file_to_clipboard(path: &Path) {
     let Ok(mut clipboard) = arboard::Clipboard::new() else {
         return;
     };

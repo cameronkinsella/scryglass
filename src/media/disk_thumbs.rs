@@ -196,10 +196,24 @@ impl DiskThumbs {
     }
 
     /// Remove the entire cache (settings "Clear" button).
-    #[allow(dead_code)] // not wired into the UI yet
     pub fn clear(&self) {
         let _ = fs::remove_dir_all(&self.root);
         let _ = fs::create_dir_all(&self.root);
+    }
+
+    /// Total bytes used on disk (settings display). Blocking, run on a
+    /// worker. Local cache directory only.
+    pub fn total_size(&self) -> u64 {
+        let Ok(buckets) = fs::read_dir(&self.root) else {
+            return 0;
+        };
+        buckets
+            .flatten()
+            .filter_map(|bucket| fs::read_dir(bucket.path()).ok())
+            .flat_map(|files| files.flatten())
+            .filter_map(|file| file.metadata().ok())
+            .map(|meta| meta.len())
+            .sum()
     }
 }
 

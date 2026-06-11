@@ -10,6 +10,7 @@ pub mod icons;
 pub mod image_display;
 pub mod info_panel;
 pub mod nav_slider;
+pub mod settings;
 pub mod shortcuts;
 pub mod spinner;
 pub mod theme;

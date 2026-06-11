@@ -284,6 +284,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             ui::dialogs::confirm_delete(&name)
         }
         Some(super::Modal::Rename { input }) => ui::dialogs::rename_dialog(input),
+        Some(super::Modal::Settings) => ui::settings::settings(&app.config, app.disk_cache_size),
         None => column![].width(Length::Fill).height(Length::Fill).into(),
     };
 

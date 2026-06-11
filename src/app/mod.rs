@@ -87,6 +87,8 @@ pub struct App {
     /// A blocking dialog over the viewer, if one is open. Keyboard-driven
     /// viewer interactions are inert while this is `Some`.
     modal: Option<Modal>,
+    /// Probed size of the disk thumbnail store (settings display).
+    disk_cache_size: Option<u64>,
     /// Live toast notifications, oldest first.
     toasts: Vec<Toast>,
     /// Monotonic toast ID source.
@@ -117,6 +119,8 @@ pub enum Modal {
     ConfirmDelete(PathBuf),
     /// Rename the file in place.
     Rename { input: String },
+    /// The settings card.
+    Settings,
 }
 
 /// Boot function: creates the initial state. Called once by iced.
@@ -150,6 +154,7 @@ pub fn boot() -> (App, Task<Message>) {
         fullscreen: false,
         help_open: false,
         modal: None,
+        disk_cache_size: None,
         toasts: Vec::new(),
         next_toast_id: 0,
     };
@@ -249,7 +254,11 @@ fn recalc_viewport(app: &mut App) {
 /// Subscription: keyboard/mouse/file-drop events, GIF animation ticks,
 /// and a redraw driver while the loading spinner is visible.
 pub fn subscription(app: &App) -> Subscription<Message> {
-    let mut subs = vec![event::listen_with(handle_event)];
+    let mut subs = vec![
+        event::listen_with(handle_event),
+        // Close requests route through update() so config saves first.
+        iced::window::close_requests().map(Message::CloseRequested),
+    ];
 
     if let Some(viewer) = app.viewer() {
         if viewer.pending_since.is_some() {

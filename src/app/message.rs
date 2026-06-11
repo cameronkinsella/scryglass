@@ -162,8 +162,30 @@ pub enum Message {
     ModalSubmit,
     /// Close the open modal without acting.
     ModalCancel,
+    /// Open the settings dialog.
+    OpenSettings,
+    /// Disk thumbnail cache size probe finished.
+    DiskCacheSize(u64),
+    /// Wipe the disk thumbnail cache.
+    ClearDiskThumbs,
+    /// Settings: prefetch depth changed.
+    SetPrefetchDepth(usize),
+    /// Settings: image cache budget changed (MB).
+    SetCacheBudget(usize),
+    /// Settings: toggle pure-viewer mode.
+    ToggleReadOnly,
+    /// Settings: toggle the delete confirmation.
+    ToggleConfirmDelete,
+    /// Settings: toggle the persistent thumbnail store (applies on restart).
+    ToggleDiskThumbs,
+    /// Bitmap clipboard copy finished.
+    CopyImageFinished(Result<(), String>),
+    /// The OS asked to close the window, save config first.
+    CloseRequested(iced::window::Id),
     /// Copy the current image to clipboard (as bitmap).
     CopyImage,
+    /// Copy the current file to clipboard (as a file-list entry).
+    CopyFile,
     /// Copy the full file path to clipboard.
     CopyFilePath,
     /// Copy just the filename to clipboard.
@@ -223,10 +245,20 @@ pub fn is_menu_message(msg: &Message) -> bool {
             | Message::ToggleCrispPixels
             | Message::ToggleInfo
             | Message::ToggleCheckerboard
+            | Message::OpenSettings
+            // Settings dialog interactions keep the dialog open:
+            | Message::SetPrefetchDepth(_)
+            | Message::SetCacheBudget(_)
+            | Message::ToggleReadOnly
+            | Message::ToggleConfirmDelete
+            | Message::ToggleDiskThumbs
+            | Message::ClearDiskThumbs
+            | Message::DiskCacheSize(_)
             // Context menu messages:
             | Message::ShowContextMenu
             | Message::DismissContextMenu
             | Message::CopyImage
+            | Message::CopyFile
             | Message::CopyFilePath
             | Message::CopyFilename
             | Message::OpenImageLocation
@@ -262,6 +294,7 @@ pub fn is_context_menu_message(msg: &Message) -> bool {
         Message::ShowContextMenu
             | Message::DismissContextMenu
             | Message::CopyImage
+            | Message::CopyFile
             | Message::CopyFilePath
             | Message::CopyFilename
             | Message::OpenImageLocation

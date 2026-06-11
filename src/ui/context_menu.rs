@@ -13,7 +13,7 @@ use crate::ui::theme;
 /// clamping. A small estimation error only shifts the menu by a few pixels.
 pub const MENU_SIZE: Size = Size {
     width: 224.0,
-    height: 254.0,
+    height: 282.0,
 };
 
 /// Clamp a desired menu position so the panel stays inside `bounds`.
@@ -69,6 +69,7 @@ pub fn context_menu<'a>(
         toolbar_row,
         rule::horizontal(1),
         item(icons::image, "Copy image", Message::CopyImage),
+        item(icons::file_earmark, "Copy file", Message::CopyFile),
         item(icons::clipboard, "Copy file path", Message::CopyFilePath),
         item(icons::file_earmark, "Copy filename", Message::CopyFilename),
         rule::horizontal(1),
