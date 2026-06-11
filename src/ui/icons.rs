@@ -29,5 +29,7 @@ icons!(
     image,
     images,
     info_circle,
+    pencil_square,
+    trash,
     zoom_in,
 );

@@ -18,6 +18,9 @@ pub fn map_press(key: &Key, modifiers: Modifiers) -> Option<Message> {
         Key::Named(Named::Home) => Some(Message::First),
         Key::Named(Named::End) => Some(Message::Last),
         Key::Named(Named::F11) => Some(Message::ToggleFullscreen),
+        Key::Named(Named::Delete) => Some(Message::RequestDelete),
+        Key::Named(Named::F2) => Some(Message::RequestRename),
+        Key::Named(Named::Enter) => Some(Message::ModalSubmit),
 
         Key::Character(c) => match c.as_str() {
             "f" | "F" if !ctrl => Some(Message::ToggleFullscreen),

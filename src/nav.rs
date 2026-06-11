@@ -134,6 +134,29 @@ impl Nav {
         self.cursor = files.iter().position(|p| *p == current).unwrap_or(0);
         self.files = files;
     }
+
+    /// Remove a file from the list (it was deleted). The cursor stays at
+    /// the same position, which now points at the next file (or the new
+    /// last file). Returns false when the list became empty.
+    pub fn remove(&mut self, path: &Path) -> bool {
+        if let Some(index) = self.files.iter().position(|p| p == path) {
+            self.files.remove(index);
+            if index < self.cursor {
+                self.cursor -= 1;
+            }
+            if !self.files.is_empty() {
+                self.cursor = self.cursor.min(self.files.len() - 1);
+            }
+        }
+        !self.files.is_empty()
+    }
+
+    /// Update a file's path in place (it was renamed).
+    pub fn rename(&mut self, old: &Path, new: PathBuf) {
+        if let Some(index) = self.files.iter().position(|p| p == old) {
+            self.files[index] = new;
+        }
+    }
 }
 
 /// Metadata needed to sort a file list.
@@ -418,6 +441,53 @@ mod tests {
     }
 
     // --- replace_files / sort_paths tests ---
+
+    #[test]
+    fn remove_current_advances_to_next() {
+        let files = vec![
+            PathBuf::from("a.png"),
+            PathBuf::from("b.png"),
+            PathBuf::from("c.png"),
+        ];
+        let mut nav = Nav::new(files, Path::new("b.png")).unwrap();
+        assert!(nav.remove(Path::new("b.png")));
+        assert_eq!(nav.current(), Path::new("c.png"));
+    }
+
+    #[test]
+    fn remove_last_file_steps_back() {
+        let files = vec![PathBuf::from("a.png"), PathBuf::from("b.png")];
+        let mut nav = Nav::new(files, Path::new("b.png")).unwrap();
+        assert!(nav.remove(Path::new("b.png")));
+        assert_eq!(nav.current(), Path::new("a.png"));
+    }
+
+    #[test]
+    fn remove_only_file_reports_empty() {
+        let files = vec![PathBuf::from("a.png")];
+        let mut nav = Nav::new(files, Path::new("a.png")).unwrap();
+        assert!(!nav.remove(Path::new("a.png")));
+    }
+
+    #[test]
+    fn remove_before_cursor_keeps_current() {
+        let files = vec![
+            PathBuf::from("a.png"),
+            PathBuf::from("b.png"),
+            PathBuf::from("c.png"),
+        ];
+        let mut nav = Nav::new(files, Path::new("c.png")).unwrap();
+        assert!(nav.remove(Path::new("a.png")));
+        assert_eq!(nav.current(), Path::new("c.png"));
+    }
+
+    #[test]
+    fn rename_updates_path_in_place() {
+        let files = vec![PathBuf::from("a.png"), PathBuf::from("b.png")];
+        let mut nav = Nav::new(files, Path::new("a.png")).unwrap();
+        nav.rename(Path::new("a.png"), PathBuf::from("z.png"));
+        assert_eq!(nav.current(), Path::new("z.png"));
+    }
 
     #[test]
     fn replace_files_keeps_cursor_on_current() {

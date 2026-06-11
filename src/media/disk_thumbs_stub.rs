@@ -32,6 +32,8 @@ impl DiskThumbs {
 
     pub fn reconcile(&self, _container: &Path, _live_names: &[OsString]) {}
 
+    pub fn remove(&self, _container: &Path, _name: &OsStr) {}
+
     pub fn housekeep(&self) {}
 
     #[allow(dead_code)]

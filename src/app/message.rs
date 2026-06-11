@@ -144,6 +144,24 @@ pub enum Message {
     ShowContextMenu,
     /// Dismiss the context menu.
     DismissContextMenu,
+    /// Delete the current file (asks for confirmation unless disabled).
+    RequestDelete,
+    /// Confirmed: move the current file to the recycle bin.
+    ConfirmDeleteNow,
+    /// Trash operation finished.
+    DeleteFinished(PathBuf, Result<(), String>),
+    /// Open the rename dialog for the current file.
+    RequestRename,
+    /// Rename dialog text changed.
+    RenameInput(String),
+    /// Validate and execute the rename.
+    CommitRename,
+    /// Filesystem rename finished.
+    RenameFinished(PathBuf, PathBuf, Result<(), String>),
+    /// Enter pressed while a modal is open, submit it.
+    ModalSubmit,
+    /// Close the open modal without acting.
+    ModalCancel,
     /// Copy the current image to clipboard (as bitmap).
     CopyImage,
     /// Copy the full file path to clipboard.
@@ -154,6 +172,30 @@ pub enum Message {
     OpenImageLocation,
     /// Open the native file properties dialog on the Details tab.
     ImageProperties,
+}
+
+/// Keyboard-driven viewer interactions that must go inert while a modal
+/// dialog is open because the global event subscription would otherwise leak
+/// keystrokes typed into a text input (e.g. "a"/"d") into navigation.
+pub fn is_viewer_interaction(msg: &Message) -> bool {
+    matches!(
+        msg,
+        Message::Next
+            | Message::Prev
+            | Message::NextRepeat
+            | Message::PrevRepeat
+            | Message::First
+            | Message::Last
+            | Message::ZoomStep(_)
+            | Message::ZoomActual
+            | Message::ResetZoom
+            | Message::Rotate(_)
+            | Message::ToggleFullscreen
+            | Message::ToggleInfo
+            | Message::ToggleHelp
+            | Message::RequestDelete
+            | Message::RequestRename
+    )
 }
 
 /// Returns true if the message is related to menu interaction
@@ -189,6 +231,8 @@ pub fn is_menu_message(msg: &Message) -> bool {
             | Message::CopyFilename
             | Message::OpenImageLocation
             | Message::ImageProperties
+            | Message::RequestDelete
+            | Message::RequestRename
             // Passive events that shouldn't dismiss menus:
             | Message::DragMove(_)
             | Message::DragEnd
@@ -222,6 +266,8 @@ pub fn is_context_menu_message(msg: &Message) -> bool {
             | Message::CopyFilename
             | Message::OpenImageLocation
             | Message::ImageProperties
+            | Message::RequestDelete
+            | Message::RequestRename
             | Message::ToggleToolbar
             // Passive events:
             | Message::DragMove(_)

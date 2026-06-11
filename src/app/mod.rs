@@ -84,6 +84,9 @@ pub struct App {
     fullscreen: bool,
     /// Whether the shortcut help overlay is open.
     help_open: bool,
+    /// A blocking dialog over the viewer, if one is open. Keyboard-driven
+    /// viewer interactions are inert while this is `Some`.
+    modal: Option<Modal>,
     /// Live toast notifications, oldest first.
     toasts: Vec<Toast>,
     /// Monotonic toast ID source.
@@ -106,6 +109,14 @@ impl App {
             Session::Empty => None,
         }
     }
+}
+
+/// A blocking dialog over the viewer.
+pub enum Modal {
+    /// Confirm moving the file to the recycle bin.
+    ConfirmDelete(PathBuf),
+    /// Rename the file in place.
+    Rename { input: String },
 }
 
 /// Boot function: creates the initial state. Called once by iced.
@@ -138,6 +149,7 @@ pub fn boot() -> (App, Task<Message>) {
         context_menu_pos: None,
         fullscreen: false,
         help_open: false,
+        modal: None,
         toasts: Vec::new(),
         next_toast_id: 0,
     };

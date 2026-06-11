@@ -3,6 +3,7 @@
 use iced::widget::{Stack, center, column, mouse_area};
 use iced::{Element, Length, mouse};
 
+use crate::media::pipeline::Source;
 use crate::ui;
 use crate::ui::toolbar::LayoutVisibility;
 
@@ -224,7 +225,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
         );
         let clamped =
             ui::context_menu::clamp_menu_pos(adjusted_pos, ui::context_menu::MENU_SIZE, bounds);
-        ui::context_menu::context_menu(clamped, app.config.show_toolbar)
+        let can_modify =
+            !app.config.read_only && app.viewer().is_some_and(|v| matches!(v.source, Source::Fs));
+        ui::context_menu::context_menu(clamped, app.config.show_toolbar, can_modify)
     } else {
         column![].width(Length::Fill).height(Length::Fill).into()
     };
@@ -272,6 +275,18 @@ pub fn view(app: &App) -> Element<'_, Message> {
         column![].width(Length::Fill).height(Length::Fill).into()
     };
 
+    let modal_overlay: Element<'_, Message> = match &app.modal {
+        Some(super::Modal::ConfirmDelete(path)) => {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            ui::dialogs::confirm_delete(&name)
+        }
+        Some(super::Modal::Rename { input }) => ui::dialogs::rename_dialog(input),
+        None => column![].width(Length::Fill).height(Length::Fill).into(),
+    };
+
     let stacked = Stack::with_children(vec![
         content,
         spinner_overlay,
@@ -279,6 +294,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         toolbar_overlay,
         ctx_overlay,
         help_overlay,
+        modal_overlay,
         toasts,
     ]);
 

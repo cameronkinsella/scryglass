@@ -2,6 +2,7 @@
 
 pub mod checkerboard;
 pub mod context_menu;
+pub mod dialogs;
 pub mod filmstrip;
 pub mod footer;
 pub mod help;

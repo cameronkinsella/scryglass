@@ -17,6 +17,8 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("F or F11", "Fullscreen"),
     ("I", "Info panel"),
     ("R / Shift+R", "Rotate view"),
+    ("Delete", "Move to Recycle Bin"),
+    ("F2", "Rename"),
     ("Right-click", "Context menu"),
     ("?", "This help"),
     ("Esc", "Close help / leave fullscreen / dismiss menus"),

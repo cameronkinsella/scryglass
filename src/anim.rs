@@ -165,4 +165,9 @@ impl AnimPlayer {
     pub fn prune_cache(&mut self, keep: &HashSet<PathBuf>) {
         self.cache.retain(|path, _| keep.contains(path));
     }
+
+    /// Drop a single cached decode (file deleted or renamed).
+    pub fn remove(&mut self, path: &Path) {
+        self.cache.remove(path);
+    }
 }

@@ -124,6 +124,11 @@ pub struct AppConfig {
     /// instantly). Reconciled against deleted files, expired after 90
     /// unused days, size-capped. Requires the `disk-thumbs` build feature.
     pub disk_thumbs: bool,
+    /// Pure-viewer mode: all file modification (delete, rename) is
+    /// hidden and blocked.
+    pub read_only: bool,
+    /// Ask before moving a file to the recycle bin.
+    pub confirm_delete: bool,
     /// Whether the toolbar is visible.
     pub show_toolbar: bool,
     /// Whether the filmstrip is visible.
@@ -149,6 +154,8 @@ impl Default for AppConfig {
             sort_desc: false,
             crisp_pixels: false,
             disk_thumbs: true,
+            read_only: false,
+            confirm_delete: true,
             show_toolbar: true,
             show_filmstrip: true,
             show_slider: true,
@@ -238,6 +245,8 @@ mod tests {
             sort_desc: true,
             crisp_pixels: true,
             disk_thumbs: false,
+            read_only: true,
+            confirm_delete: false,
             show_toolbar: false,
             show_filmstrip: true,
             show_slider: false,

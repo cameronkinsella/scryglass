@@ -189,6 +189,12 @@ impl DiskThumbs {
         }
     }
 
+    /// Remove a single entry. The source file was deleted or renamed
+    /// in-app, so its thumbnail must not outlive it.
+    pub fn remove(&self, container: &Path, name: &OsStr) {
+        let _ = fs::remove_file(self.entry_path(container, name));
+    }
+
     /// Remove the entire cache (settings "Clear" button).
     #[allow(dead_code)] // not wired into the UI yet
     pub fn clear(&self) {

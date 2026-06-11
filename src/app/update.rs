@@ -25,7 +25,8 @@ use crate::ui;
 use crate::ui::toast::{Toast, ToastKind};
 use crate::ui::toolbar::OpenMenu;
 
-use super::message::{is_context_menu_message, is_menu_message};
+use super::Modal;
+use super::message::{is_context_menu_message, is_menu_message, is_viewer_interaction};
 use super::state::{
     CachedImage, Direction, DisplayedImage, DragState, LoadedMedia, Session, SliderDrag, Thumb,
     Viewer,
@@ -49,6 +50,12 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
     // Auto-dismiss context menu on any non-context-menu interaction.
     if app.context_menu_pos.is_some() && !is_context_menu_message(&message) {
         app.context_menu_pos = None;
+    }
+
+    // A modal dialog owns the keyboard: viewer interactions go inert so
+    // text typed into an input never navigates or deletes.
+    if app.modal.is_some() && is_viewer_interaction(&message) {
+        return Task::none();
     }
 
     match message {
@@ -332,6 +339,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
 
         Message::Escape => {
+            if app.modal.is_some() {
+                app.modal = None;
+                return Task::none();
+            }
             if app.help_open {
                 app.help_open = false;
                 return Task::none();
@@ -805,6 +816,149 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
 
+        // --- File operations (filesystem sources only) ---
+        Message::RequestDelete => {
+            let target = match file_op_target(app) {
+                Ok(target) => target,
+                Err(refusal) => return refusal,
+            };
+            if app.config.confirm_delete {
+                app.modal = Some(Modal::ConfirmDelete(target));
+                Task::none()
+            } else {
+                fire_delete(app, target)
+            }
+        }
+
+        Message::ConfirmDeleteNow => {
+            let Some(Modal::ConfirmDelete(path)) = app.modal.take() else {
+                return Task::none();
+            };
+            fire_delete(app, path)
+        }
+
+        Message::DeleteFinished(path, result) => match result {
+            Err(e) => push_toast(app, ToastKind::Error, format!("Couldn't delete: {e}")),
+            Ok(()) => {
+                let purge = purge_disk_thumb(&app.pipeline, &path);
+                let Some(viewer) = app.viewer_mut() else {
+                    return purge;
+                };
+                viewer.cache.remove(&path);
+                viewer.thumbs.remove(&path);
+                viewer.anim_player.remove(&path);
+                viewer.failed_thumbs.remove(&path);
+
+                if !viewer.nav.remove(&path) {
+                    app.session = Session::Empty;
+                    let toast = push_toast(app, ToastKind::Info, "Moved to Recycle Bin".into());
+                    return Task::batch([purge, toast]);
+                }
+                let cursor = viewer.nav.cursor();
+                let nav = complete_navigation(app, cursor, true);
+                let toast = push_toast(app, ToastKind::Info, "Moved to Recycle Bin".into());
+                Task::batch([purge, nav, toast])
+            }
+        },
+
+        Message::RequestRename => {
+            let target = match file_op_target(app) {
+                Ok(target) => target,
+                Err(refusal) => return refusal,
+            };
+            let input = target
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            app.modal = Some(Modal::Rename { input });
+            Task::batch([
+                iced::widget::operation::focus(ui::dialogs::rename_input_id()),
+                iced::widget::operation::select_all(ui::dialogs::rename_input_id()),
+            ])
+        }
+
+        Message::RenameInput(text) => {
+            if let Some(Modal::Rename { input }) = &mut app.modal {
+                *input = text;
+            }
+            Task::none()
+        }
+
+        Message::CommitRename => {
+            let Some(Modal::Rename { input }) = &app.modal else {
+                return Task::none();
+            };
+            let name = match validate_rename(input) {
+                Ok(name) => name,
+                // Invalid input: explain and keep the dialog open.
+                Err(e) => return push_toast(app, ToastKind::Error, e),
+            };
+            let Some(viewer) = app.viewer() else {
+                return Task::none();
+            };
+            let old = viewer.nav.current().to_path_buf();
+            let new = old.parent().unwrap_or(std::path::Path::new("")).join(name);
+            app.modal = None;
+            if new == old {
+                return Task::none();
+            }
+
+            Task::perform(
+                async move {
+                    if tokio::fs::try_exists(&new).await.unwrap_or(false) {
+                        let err = "a file with that name already exists".to_string();
+                        return (old, new, Err(err));
+                    }
+                    let result = tokio::fs::rename(&old, &new)
+                        .await
+                        .map_err(|e| e.to_string());
+                    (old, new, result)
+                },
+                |(old, new, result)| Message::RenameFinished(old, new, result),
+            )
+        }
+
+        Message::RenameFinished(old, new, result) => match result {
+            Err(e) => push_toast(app, ToastKind::Error, format!("Couldn't rename: {e}")),
+            Ok(()) => {
+                let purge = purge_disk_thumb(&app.pipeline, &old);
+                let Some(viewer) = app.viewer_mut() else {
+                    return purge;
+                };
+                viewer.nav.rename(&old, new.clone());
+                // Carry cached textures over to the new key.
+                if let Some(image) = viewer.cache.remove(&old) {
+                    let cost = image.byte_cost();
+                    viewer.cache.insert(new.clone(), image, cost);
+                }
+                if let Some(thumb) = viewer.thumbs.remove(&old) {
+                    let cost = thumb.byte_cost();
+                    viewer.thumbs.insert(new.clone(), thumb, cost);
+                }
+                viewer.anim_player.remove(&old);
+                if viewer.displayed_path.as_deref() == Some(&*old) {
+                    viewer.displayed_path = Some(new.clone());
+                }
+                if let Some((p, _)) = &mut viewer.exif
+                    && *p == old
+                {
+                    *p = new;
+                }
+                purge
+            }
+        },
+
+        Message::ModalSubmit => match &app.modal {
+            Some(Modal::ConfirmDelete(_)) => update(app, Message::ConfirmDeleteNow),
+            Some(Modal::Rename { .. }) => update(app, Message::CommitRename),
+            None => Task::none(),
+        },
+
+        Message::ModalCancel => {
+            app.modal = None;
+            Task::none()
+        }
+
         // --- Info panel ---
         Message::ToggleInfo => {
             app.config.show_info = !app.config.show_info;
@@ -988,6 +1142,86 @@ fn rotate_pixels(handle: &Handle, turns: u8) -> Option<(u32, u32, Vec<u8>)> {
     let out = rotated.into_rgba8();
     let (w, h) = out.dimensions();
     Some((w, h, out.into_raw()))
+}
+
+/// The current file, if file operations are allowed on it: requires a
+/// filesystem source and read-only mode off. Refusals return the toast
+/// task explaining why.
+fn file_op_target(app: &mut App) -> Result<PathBuf, Task<Message>> {
+    let Some(viewer) = app.viewer() else {
+        return Err(Task::none());
+    };
+    if !viewer.is_fs() {
+        return Err(push_toast(
+            app,
+            ToastKind::Info,
+            "Archive entries can't be modified".into(),
+        ));
+    }
+    if app.config.read_only {
+        return Err(push_toast(
+            app,
+            ToastKind::Info,
+            "Read-only mode is on".into(),
+        ));
+    }
+    Ok(app
+        .viewer()
+        .map(|v| v.nav.current().to_path_buf())
+        .unwrap_or_default())
+}
+
+/// Move a file to the recycle bin, off-thread.
+fn fire_delete(app: &mut App, path: PathBuf) -> Task<Message> {
+    app.modal = None;
+    Task::perform(
+        async move {
+            let p = path.clone();
+            let result = tokio::task::spawn_blocking(move || trash::delete(&p))
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r.map_err(|e| e.to_string()));
+            (path, result)
+        },
+        |(path, result)| Message::DeleteFinished(path, result),
+    )
+}
+
+/// Drop a deleted/renamed file's entry from the persistent thumbnail
+/// store so the thumbnail can't outlive the file.
+fn purge_disk_thumb(pipeline: &Pipeline, path: &std::path::Path) -> Task<Message> {
+    let Some(disk) = pipeline.disk().cloned() else {
+        return Task::none();
+    };
+    let container = path
+        .parent()
+        .unwrap_or(std::path::Path::new(""))
+        .to_path_buf();
+    let name = path.file_name().unwrap_or_default().to_owned();
+    Task::future(async move {
+        let _ = tokio::task::spawn_blocking(move || disk.remove(&container, &name)).await;
+    })
+    .discard()
+}
+
+/// Validate a rename input: non-empty, no path/invalid characters, and a
+/// supported image extension (anything else would vanish from the list).
+fn validate_rename(input: &str) -> Result<String, String> {
+    let name = input.trim();
+    if name.is_empty() {
+        return Err("Name can't be empty".into());
+    }
+    if name.contains(['<', '>', ':', '"', '/', '\\', '|', '?', '*']) {
+        return Err("Name contains invalid characters".into());
+    }
+    let supported = std::path::Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(crate::config::AppConfig::is_supported_extension);
+    if !supported {
+        return Err("Name must keep a supported image extension".into());
+    }
+    Ok(name.to_string())
 }
 
 /// Fetch EXIF fields for the current image (info panel).
@@ -1586,4 +1820,25 @@ fn probe_file_size(path: PathBuf) -> Task<Message> {
         },
         |(path, size)| Message::FileSizeProbed(path, size),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_rename;
+
+    #[test]
+    fn validate_rename_rejects_bad_input() {
+        assert!(validate_rename("").is_err());
+        assert!(validate_rename("   ").is_err());
+        assert!(validate_rename("a/b.png").is_err());
+        assert!(validate_rename("a?.png").is_err());
+        assert!(validate_rename("noextension").is_err());
+        assert!(validate_rename("file.txt").is_err());
+    }
+
+    #[test]
+    fn validate_rename_accepts_supported_names() {
+        assert_eq!(validate_rename(" photo.png ").unwrap(), "photo.png");
+        assert_eq!(validate_rename("IMG_1234.JPG").unwrap(), "IMG_1234.JPG");
+    }
 }

@@ -59,6 +59,13 @@ impl<T> ImageCache<T> {
         self.entries.get(path).map(|e| &e.value)
     }
 
+    /// Remove an entry (file deleted or renamed), returning its value.
+    pub fn remove(&mut self, path: &Path) -> Option<T> {
+        let entry = self.entries.remove(path)?;
+        self.used_bytes = self.used_bytes.saturating_sub(entry.bytes);
+        Some(entry.value)
+    }
+
     /// Insert (or replace) a value costing `bytes`.
     pub fn insert(&mut self, path: PathBuf, value: T, bytes: usize) {
         self.clock += 1;
@@ -103,6 +110,15 @@ mod tests {
 
     fn pins(paths: &[&str]) -> HashSet<PathBuf> {
         paths.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn remove_returns_value_and_frees_bytes() {
+        let mut cache: ImageCache<u8> = ImageCache::new(100);
+        cache.insert("a.png".into(), 7, 40);
+        assert_eq!(cache.remove(Path::new("a.png")), Some(7));
+        assert_eq!(cache.used_bytes(), 0);
+        assert_eq!(cache.remove(Path::new("a.png")), None);
     }
 
     #[test]

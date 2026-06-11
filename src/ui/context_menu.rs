@@ -13,7 +13,7 @@ use crate::ui::theme;
 /// clamping. A small estimation error only shifts the menu by a few pixels.
 pub const MENU_SIZE: Size = Size {
     width: 224.0,
-    height: 188.0,
+    height: 254.0,
 };
 
 /// Clamp a desired menu position so the panel stays inside `bounds`.
@@ -30,7 +30,11 @@ pub fn clamp_menu_pos(pos: Point, menu_size: Size, bounds: Size) -> Point {
 ///
 /// `pos` is the cursor position relative to the overlay origin.
 /// `show_toolbar` is the current toolbar visibility state.
-pub fn context_menu<'a>(pos: iced::Point, show_toolbar: bool) -> Element<'a, Message> {
+pub fn context_menu<'a>(
+    pos: iced::Point,
+    show_toolbar: bool,
+    can_modify: bool,
+) -> Element<'a, Message> {
     use crate::ui::icons;
 
     let item = |icon_fn: fn() -> iced::widget::Text<'a>,
@@ -61,29 +65,37 @@ pub fn context_menu<'a>(pos: iced::Point, show_toolbar: bool) -> Element<'a, Mes
 
     let toolbar_row = container(toolbar_toggle).padding([4, 12]);
 
-    let panel = container(
-        column![
-            toolbar_row,
-            rule::horizontal(1),
-            item(icons::image, "Copy image", Message::CopyImage),
-            item(icons::clipboard, "Copy file path", Message::CopyFilePath),
-            item(icons::file_earmark, "Copy filename", Message::CopyFilename),
-            rule::horizontal(1),
-            item(
-                icons::folder,
-                "Open image location",
-                Message::OpenImageLocation
-            ),
-            item(
-                icons::info_circle,
-                "Image properties",
-                Message::ImageProperties
-            ),
-        ]
-        .width(220),
-    )
-    .padding(Padding::from(2))
-    .style(theme::panel);
+    let mut entries = column![
+        toolbar_row,
+        rule::horizontal(1),
+        item(icons::image, "Copy image", Message::CopyImage),
+        item(icons::clipboard, "Copy file path", Message::CopyFilePath),
+        item(icons::file_earmark, "Copy filename", Message::CopyFilename),
+        rule::horizontal(1),
+        item(
+            icons::folder,
+            "Open image location",
+            Message::OpenImageLocation
+        ),
+        item(
+            icons::info_circle,
+            "Image properties",
+            Message::ImageProperties
+        ),
+    ]
+    .width(220);
+
+    // File modification, hidden entirely in read-only mode or archives.
+    if can_modify {
+        entries = entries
+            .push(rule::horizontal(1))
+            .push(item(icons::pencil_square, "Rename", Message::RequestRename))
+            .push(item(icons::trash, "Delete", Message::RequestDelete));
+    }
+
+    let panel = container(entries)
+        .padding(Padding::from(2))
+        .style(theme::panel);
 
     // Position the panel at the cursor location.
     container(panel)
