@@ -82,6 +82,8 @@ pub struct App {
     context_menu_pos: Option<iced::Point>,
     /// Whether the window is borderless fullscreen (chrome hidden).
     fullscreen: bool,
+    /// Whether the shortcut help overlay is open.
+    help_open: bool,
     /// Live toast notifications, oldest first.
     toasts: Vec<Toast>,
     /// Monotonic toast ID source.
@@ -135,6 +137,7 @@ pub fn boot() -> (App, Task<Message>) {
         window_size: Size::new(800.0, 600.0),
         context_menu_pos: None,
         fullscreen: false,
+        help_open: false,
         toasts: Vec::new(),
         next_toast_id: 0,
     };
@@ -275,13 +278,15 @@ fn handle_event(event: Event, _status: event::Status, _id: window::Id) -> Option
             key, repeat: false, ..
         }) if is_backward_key(key) => Some(Message::Prev),
 
-        // --- Keyboard: everything else goes through the shortcut table ---
+        // --- Keyboard: everything else goes through the shortcut table.
+        // `modified_key` includes shift effects, so "?" and "R" arrive
+        // as themselves rather than "/" and "r".
         Event::Keyboard(keyboard::Event::KeyPressed {
-            key,
+            modified_key,
             modifiers,
             repeat: false,
             ..
-        }) => ui::shortcuts::map_press(key, *modifiers),
+        }) => ui::shortcuts::map_press(modified_key, *modifiers),
 
         // --- Keyboard: OS key-repeat ---
         Event::Keyboard(keyboard::Event::KeyPressed {

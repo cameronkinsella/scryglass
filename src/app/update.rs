@@ -315,6 +315,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
 
         Message::Escape => {
+            if app.help_open {
+                app.help_open = false;
+                return Task::none();
+            }
             if app.fullscreen {
                 return update(app, Message::ToggleFullscreen);
             }
@@ -731,6 +735,59 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             save_config(app)
         }
 
+        // --- View rotation (non-destructive, resets on navigation) ---
+        Message::Rotate(turns) => {
+            let Some(viewer) = app.viewer_mut() else {
+                return Task::none();
+            };
+            // Rotation operates on the displayed full texture. Placeholders
+            // sharpen first, then rotate.
+            if !matches!(viewer.displayed, DisplayedImage::Full { .. }) {
+                return Task::none();
+            }
+            viewer.rotation = (viewer.rotation + turns) % 4;
+            fire_rotate(viewer)
+        }
+
+        Message::ViewRotated { path, baked, image } => {
+            let zoom_mode = app.config.zoom_mode;
+            let viewport = app.viewport_size;
+            let Some(viewer) = app.viewer_mut() else {
+                return Task::none();
+            };
+            // Ignore results for an image we've navigated away from
+            // (rotation resets on navigation anyway).
+            if viewer.nav.current() != path
+                || !matches!(viewer.displayed, DisplayedImage::Full { .. })
+            {
+                return Task::none();
+            }
+
+            let (w, h) = image.original_size;
+            viewer.displayed = DisplayedImage::Full {
+                allocation: image.allocation,
+                original_size: image.original_size,
+            };
+            viewer.displayed_rotation = baked;
+            viewer.pan = (0.0, 0.0);
+            if !viewer.manual_zoom || zoom_mode != ZoomMode::LockZoomRatio {
+                viewer.zoom = compute_zoom(zoom_mode, w, h, viewport);
+            }
+
+            // Catch up if more rotations were requested mid-flight.
+            fire_rotate(viewer)
+        }
+
+        Message::ToggleCheckerboard => {
+            app.config.show_checkerboard = !app.config.show_checkerboard;
+            save_config(app)
+        }
+
+        Message::ToggleHelp => {
+            app.help_open = !app.help_open;
+            Task::none()
+        }
+
         // --- Info panel ---
         Message::ToggleInfo => {
             app.config.show_info = !app.config.show_info;
@@ -848,6 +905,72 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 /// the viewer must never wait on it.
 fn save_config(app: &App) -> Task<Message> {
     Task::future(app.config.clone().save()).discard()
+}
+
+/// Rotate the displayed texture to match the desired view rotation.
+/// Rotation happens on the pixels (off-thread) so every bit of zoom, pan,
+/// and crop math keeps working on the rotated dimensions unchanged. The
+/// cache keeps the unrotated original.
+fn fire_rotate(viewer: &mut Viewer) -> Task<Message> {
+    if viewer.rotation == viewer.displayed_rotation {
+        return Task::none();
+    }
+    let DisplayedImage::Full { allocation, .. } = &viewer.displayed else {
+        return Task::none();
+    };
+    let delta = (4 + viewer.rotation - viewer.displayed_rotation) % 4;
+    let baked = viewer.rotation;
+    let handle = allocation.handle().clone();
+    let path = viewer.nav.current().to_path_buf();
+
+    Task::perform(
+        async move { tokio::task::spawn_blocking(move || rotate_pixels(&handle, delta)).await },
+        |r| r.ok().flatten(),
+    )
+    .then(move |rotated| {
+        let Some((width, height, pixels)) = rotated else {
+            return Task::none();
+        };
+        let p = path.clone();
+        cache::allocate_handle(Handle::from_rgba(width, height, pixels)).map(move |upload| {
+            match upload {
+                Ok(allocation) => Message::ViewRotated {
+                    path: p.clone(),
+                    baked,
+                    image: CachedImage {
+                        allocation,
+                        original_size: (width, height),
+                    },
+                },
+                // Upload failures leave the previous texture in place.
+                Err(_) => Message::SpinnerTick,
+            }
+        })
+    })
+}
+
+/// Rotate RGBA pixels behind a handle by quarter turns clockwise.
+fn rotate_pixels(handle: &Handle, turns: u8) -> Option<(u32, u32, Vec<u8>)> {
+    let Handle::Rgba {
+        width,
+        height,
+        pixels,
+        ..
+    } = handle
+    else {
+        return None;
+    };
+    let buffer = image::RgbaImage::from_raw(*width, *height, pixels.to_vec())?;
+    let img = image::DynamicImage::ImageRgba8(buffer);
+    let rotated = match turns % 4 {
+        1 => img.rotate90(),
+        2 => img.rotate180(),
+        3 => img.rotate270(),
+        _ => img,
+    };
+    let out = rotated.into_rgba8();
+    let (w, h) = out.dimensions();
+    Some((w, h, out.into_raw()))
 }
 
 /// Fetch EXIF fields for the current image (info panel).
@@ -1132,6 +1255,8 @@ fn scrub_to(app: &mut App, index: usize) -> Task<Message> {
     }
     viewer.current_file_size = None;
     viewer.exif = None;
+    viewer.rotation = 0;
+    viewer.displayed_rotation = 0;
 
     let current = viewer.nav.current().to_path_buf();
     if let Some(cached) = viewer.cache.get(&current).cloned() {
@@ -1194,6 +1319,8 @@ fn complete_navigation(app: &mut App, target_index: usize, bump_generation: bool
     }
 
     viewer.current_file_size = None;
+    viewer.rotation = 0;
+    viewer.displayed_rotation = 0;
 
     // The GIF decode cache prunes by window, the image cache by byte budget.
     let keep = viewer.pinned_paths(depth);

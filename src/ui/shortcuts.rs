@@ -22,6 +22,9 @@ pub fn map_press(key: &Key, modifiers: Modifiers) -> Option<Message> {
         Key::Character(c) => match c.as_str() {
             "f" | "F" if !ctrl => Some(Message::ToggleFullscreen),
             "i" | "I" if !ctrl => Some(Message::ToggleInfo),
+            "r" if !ctrl => Some(Message::Rotate(1)),
+            "R" if !ctrl => Some(Message::Rotate(3)),
+            "?" => Some(Message::ToggleHelp),
             "+" | "=" => Some(Message::ZoomStep(1)),
             "-" => Some(Message::ZoomStep(-1)),
             "0" if ctrl => Some(Message::ResetZoom),
@@ -84,6 +87,26 @@ mod tests {
         assert!(matches!(
             map_press(&Key::Named(Named::End), Modifiers::default()),
             Some(Message::Last)
+        ));
+    }
+
+    #[test]
+    fn rotation_distinguishes_shift() {
+        assert!(matches!(
+            map_press(&ch("r"), Modifiers::default()),
+            Some(Message::Rotate(1))
+        ));
+        assert!(matches!(
+            map_press(&ch("R"), Modifiers::SHIFT),
+            Some(Message::Rotate(3))
+        ));
+    }
+
+    #[test]
+    fn help_key() {
+        assert!(matches!(
+            map_press(&ch("?"), Modifiers::SHIFT),
+            Some(Message::ToggleHelp)
         ));
     }
 

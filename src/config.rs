@@ -132,6 +132,8 @@ pub struct AppConfig {
     pub show_footer: bool,
     /// Whether the info panel (file details + EXIF) is visible.
     pub show_info: bool,
+    /// Draw a checkerboard behind images (reveals transparency).
+    pub show_checkerboard: bool,
 }
 
 impl Default for AppConfig {
@@ -150,6 +152,7 @@ impl Default for AppConfig {
             show_slider: true,
             show_footer: true,
             show_info: false,
+            show_checkerboard: false,
         }
     }
 }
@@ -238,6 +241,7 @@ mod tests {
             show_slider: false,
             show_footer: true,
             show_info: true,
+            show_checkerboard: true,
         };
         assert_eq!(AppConfig::from_toml(&cfg.to_toml()), cfg);
     }

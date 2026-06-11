@@ -147,6 +147,12 @@ pub struct Viewer {
     pub filmstrip_scroll_x: f32,
     /// EXIF fields for the info panel, tagged with the file they describe.
     pub exif: Option<(PathBuf, Vec<(String, String)>)>,
+    /// Desired view rotation in quarter turns clockwise (0-3).
+    /// Non-destructive, reset when navigating to another image.
+    pub rotation: u8,
+    /// Rotation currently baked into the displayed texture. When this
+    /// trails `rotation`, a rotate task is producing the next texture.
+    pub displayed_rotation: u8,
 }
 
 impl Viewer {
@@ -175,6 +181,8 @@ impl Viewer {
             drag: None,
             filmstrip_scroll_x: 0.0,
             exif: None,
+            rotation: 0,
+            displayed_rotation: 0,
         }
     }
 

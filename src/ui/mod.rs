@@ -1,8 +1,10 @@
 //! UI widgets: toolbar, image display, footer, filmstrip, slider, and context menu.
 
+pub mod checkerboard;
 pub mod context_menu;
 pub mod filmstrip;
 pub mod footer;
+pub mod help;
 pub mod icons;
 pub mod image_display;
 pub mod info_panel;

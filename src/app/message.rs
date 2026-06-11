@@ -12,7 +12,7 @@ use crate::media::MediaError;
 use crate::media::archive::ArchiveIndex;
 use crate::media::pipeline::ThumbUrgency;
 
-use super::state::{LoadedMedia, Thumb};
+use super::state::{CachedImage, LoadedMedia, Thumb};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -93,6 +93,19 @@ pub enum Message {
     ToggleFullscreen,
     /// Toggle the info panel (file details + EXIF).
     ToggleInfo,
+    /// Rotate the view by quarter turns clockwise (non-destructive).
+    Rotate(u8),
+    /// A rotated texture for the current image is ready.
+    ViewRotated {
+        path: PathBuf,
+        /// Total turns baked into this texture.
+        baked: u8,
+        image: CachedImage,
+    },
+    /// Toggle the checkerboard backdrop behind transparent images.
+    ToggleCheckerboard,
+    /// Toggle the keyboard shortcut help overlay.
+    ToggleHelp,
     /// EXIF probe finished for the given file.
     ExifLoaded(PathBuf, Vec<(String, String)>),
     /// Escape: leaves fullscreen, otherwise dismisses any open overlay.
@@ -167,6 +180,7 @@ pub fn is_menu_message(msg: &Message) -> bool {
             | Message::ToggleTheme
             | Message::ToggleCrispPixels
             | Message::ToggleInfo
+            | Message::ToggleCheckerboard
             // Context menu messages:
             | Message::ShowContextMenu
             | Message::DismissContextMenu
@@ -187,6 +201,7 @@ pub fn is_menu_message(msg: &Message) -> bool {
             | Message::FilmstripScrolled(_)
             | Message::Resorted(_)
             | Message::ExifLoaded(_, _)
+            | Message::ViewRotated { .. }
             | Message::Gif(_)
             | Message::DirectoryScanned(_, _)
             | Message::ArchiveScanned(_, _)
@@ -219,6 +234,7 @@ pub fn is_context_menu_message(msg: &Message) -> bool {
             | Message::FilmstripScrolled(_)
             | Message::Resorted(_)
             | Message::ExifLoaded(_, _)
+            | Message::ViewRotated { .. }
             | Message::Gif(_)
             | Message::DirectoryScanned(_, _)
             | Message::ArchiveScanned(_, _)

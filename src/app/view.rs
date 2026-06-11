@@ -16,6 +16,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         show_slider: app.config.show_slider,
         show_footer: app.config.show_footer,
         show_info: app.config.show_info,
+        show_checkerboard: app.config.show_checkerboard,
     };
 
     let content = match &app.session {
@@ -64,6 +65,15 @@ pub fn view(app: &App) -> Element<'_, Message> {
                         false,
                     )
                 }
+            };
+
+            // Optional checkerboard behind the image reveals transparency.
+            let image_view: Element<'_, Message> = if app.config.show_checkerboard
+                && !matches!(viewer.displayed, DisplayedImage::None)
+            {
+                Stack::with_children(vec![ui::checkerboard::checkerboard(), image_view]).into()
+            } else {
+                image_view
             };
 
             // Wrap image area in mouse_area for scroll, drag, double-click, and right-click.
@@ -256,12 +266,19 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
     let toasts = ui::toast::toast_stack(&app.toasts);
 
+    let help_overlay: Element<'_, Message> = if app.help_open {
+        ui::help::help_overlay()
+    } else {
+        column![].width(Length::Fill).height(Length::Fill).into()
+    };
+
     let stacked = Stack::with_children(vec![
         content,
         spinner_overlay,
         bubble_overlay,
         toolbar_overlay,
         ctx_overlay,
+        help_overlay,
         toasts,
     ]);
 
