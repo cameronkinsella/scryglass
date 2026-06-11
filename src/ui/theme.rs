@@ -152,6 +152,24 @@ pub fn secondary_text(theme: &Theme) -> text::Style {
     }
 }
 
+/// Info toast card.
+pub fn toast_info(theme: &Theme) -> container::Style {
+    panel(theme)
+}
+
+/// Error toast card, a panel with a danger accent border.
+pub fn toast_error(theme: &Theme) -> container::Style {
+    let t = tokens(theme);
+    container::Style {
+        border: Border {
+            color: t.danger,
+            width: 1.0,
+            radius: 6.0.into(),
+        },
+        ..panel(theme)
+    }
+}
+
 /// Menu/context item: flat, full-width, subtle accent wash on hover.
 pub fn menu_item(theme: &Theme, status: button::Status) -> button::Style {
     let t = tokens(theme);

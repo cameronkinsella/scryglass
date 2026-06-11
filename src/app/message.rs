@@ -22,6 +22,10 @@ pub enum Message {
     },
     /// Async file-size probe completed for the given path.
     FileSizeProbed(PathBuf, u64),
+    /// Redraw driver for the loading spinner while a load is pending.
+    SpinnerTick,
+    /// A toast's display time elapsed.
+    DismissToast(u64),
     /// Wrapped GIF player message.
     Gif(GifMessage),
     /// Navigate forward (initial press).
@@ -131,6 +135,8 @@ pub fn is_menu_message(msg: &Message) -> bool {
             | Message::WindowResized(_)
             | Message::MediaLoaded { .. }
             | Message::FileSizeProbed(_, _)
+            | Message::SpinnerTick
+            | Message::DismissToast(_)
             | Message::Gif(_)
             | Message::DirectoryScanned(_, _)
             | Message::FileDialogResult(_)
@@ -156,6 +162,8 @@ pub fn is_context_menu_message(msg: &Message) -> bool {
             | Message::WindowResized(_)
             | Message::MediaLoaded { .. }
             | Message::FileSizeProbed(_, _)
+            | Message::SpinnerTick
+            | Message::DismissToast(_)
             | Message::Gif(_)
             | Message::DirectoryScanned(_, _)
             | Message::FileDialogResult(_)

@@ -37,6 +37,7 @@ use crate::config::AppConfig;
 use crate::gif::GifMessage;
 use crate::media::pipeline::Pipeline;
 use crate::ui;
+use crate::ui::toast::Toast;
 use crate::ui::toolbar::OpenMenu;
 
 use state::{Session, Viewer};
@@ -56,6 +57,10 @@ const ZOOM_MAX: f32 = 50.0;
 /// Height of the toolbar in logical pixels.
 const TOOLBAR_HEIGHT: f32 = 30.0;
 
+/// Grace period before the loading spinner appears, so fast loads finish
+/// without any flash of UI.
+const SPINNER_DELAY: Duration = Duration::from_millis(150);
+
 /// Application state: the single source of truth.
 pub struct App {
     session: Session,
@@ -74,6 +79,10 @@ pub struct App {
     window_size: Size,
     /// Context menu position (window coords). `Some` when visible.
     context_menu_pos: Option<iced::Point>,
+    /// Live toast notifications, oldest first.
+    toasts: Vec<Toast>,
+    /// Monotonic toast ID source.
+    next_toast_id: u64,
 }
 
 impl App {
@@ -108,6 +117,8 @@ pub fn boot() -> (App, Task<Message>) {
         last_cursor_pos: iced::Point::ORIGIN,
         window_size: Size::new(800.0, 600.0),
         context_menu_pos: None,
+        toasts: Vec::new(),
+        next_toast_id: 0,
     };
     recalc_viewport(&mut app);
 
@@ -191,20 +202,25 @@ fn recalc_viewport(app: &mut App) {
     );
 }
 
-/// Subscription: listens for keyboard/mouse/file-drop events, plus GIF animation ticks.
+/// Subscription: keyboard/mouse/file-drop events, GIF animation ticks,
+/// and a redraw driver while the loading spinner is visible.
 pub fn subscription(app: &App) -> Subscription<Message> {
-    let events = event::listen_with(handle_event);
+    let mut subs = vec![event::listen_with(handle_event)];
 
-    if let Some(viewer) = app.viewer()
-        && viewer.pending_since.is_none()
-        && viewer.gif_player.is_animating()
-        && let Some(delay) = viewer.gif_player.current_delay()
-    {
-        let tick = iced::time::every(delay).map(|_| Message::Gif(GifMessage::Tick));
-        return Subscription::batch([events, tick]);
+    if let Some(viewer) = app.viewer() {
+        if viewer.pending_since.is_some() {
+            subs.push(iced::time::every(Duration::from_millis(33)).map(|_| Message::SpinnerTick));
+        }
+
+        if viewer.pending_since.is_none()
+            && viewer.gif_player.is_animating()
+            && let Some(delay) = viewer.gif_player.current_delay()
+        {
+            subs.push(iced::time::every(delay).map(|_| Message::Gif(GifMessage::Tick)));
+        }
     }
 
-    events
+    Subscription::batch(subs)
 }
 
 /// Returns true if the key is a forward navigation key (ArrowRight or D).

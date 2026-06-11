@@ -19,6 +19,7 @@ use crate::media::registry::DecodeOpts;
 use crate::media::{DecodedMedia, MediaError};
 use crate::nav::{self, Nav};
 use crate::ui;
+use crate::ui::toast::{Toast, ToastKind};
 use crate::ui::toolbar::OpenMenu;
 
 use super::message::{is_context_menu_message, is_menu_message};
@@ -67,10 +68,12 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 app.session = Session::Viewing(Box::new(viewer));
                 Task::batch(tasks)
             }
-            Err(_) => Task::none(),
+            Err(e) => push_toast(app, ToastKind::Error, format!("Couldn't open: {e}")),
         },
 
-        Message::DirectoryScanned(_start_file, Err(_err)) => Task::none(),
+        Message::DirectoryScanned(_start_file, Err(err)) => {
+            push_toast(app, ToastKind::Error, format!("Couldn't open: {err}"))
+        }
 
         Message::MediaLoaded { path, result } => {
             let zoom_mode = app.config.zoom_mode;
@@ -107,12 +110,17 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                         Task::none()
                     }
                 }
-                Err(_err) => {
-                    if viewer.nav.current() == path {
-                        // Stop the spinner, the previous image stays visible.
-                        viewer.pending_since = None;
+                Err(err) => {
+                    if viewer.nav.current() != path {
+                        return Task::none();
                     }
-                    Task::none()
+                    // Stop the spinner, the previous image stays visible.
+                    viewer.pending_since = None;
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    push_toast(app, ToastKind::Error, format!("{name}: {err}"))
                 }
             }
         }
@@ -123,6 +131,14 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             {
                 viewer.current_file_size = Some(size);
             }
+            Task::none()
+        }
+
+        // Forces a redraw so the spinner animates (angle derives from time).
+        Message::SpinnerTick => Task::none(),
+
+        Message::DismissToast(id) => {
+            app.toasts.retain(|t| t.id != id);
             Task::none()
         }
 
@@ -497,10 +513,14 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 return Task::none();
             };
             let path = viewer.nav.current().to_path_buf();
-            Task::perform(
-                async move { crate::platform::copy_image_to_clipboard(&path) },
-                |_| Message::DismissOverlay, // no-op follow-up
-            )
+            let copy = Task::future(async move {
+                crate::platform::copy_image_to_clipboard(&path);
+            })
+            .discard();
+            Task::batch([
+                copy,
+                push_toast(app, ToastKind::Info, "Image copied".to_string()),
+            ])
         }
 
         Message::CopyFilePath => {
@@ -509,7 +529,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 return Task::none();
             };
             let path_str = viewer.nav.current().to_string_lossy().to_string();
-            iced::clipboard::write(path_str)
+            Task::batch([
+                iced::clipboard::write(path_str),
+                push_toast(app, ToastKind::Info, "Path copied".to_string()),
+            ])
         }
 
         Message::CopyFilename => {
@@ -523,7 +546,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
-            iced::clipboard::write(name)
+            Task::batch([
+                iced::clipboard::write(name),
+                push_toast(app, ToastKind::Info, "Filename copied".to_string()),
+            ])
         }
 
         Message::OpenImageLocation => {
@@ -550,6 +576,17 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 /// the viewer must never wait on it.
 fn save_config(app: &App) -> Task<Message> {
     Task::future(app.config.clone().save()).discard()
+}
+
+/// Show a transient notification that dismisses itself after a few seconds.
+fn push_toast(app: &mut App, kind: ToastKind, text: String) -> Task<Message> {
+    let id = app.next_toast_id;
+    app.next_toast_id += 1;
+    app.toasts.push(Toast { id, kind, text });
+    Task::perform(
+        tokio::time::sleep(std::time::Duration::from_secs(4)),
+        move |_| Message::DismissToast(id),
+    )
 }
 
 /// Shared logic for opening a path (from drop, dialog, or CLI argument).

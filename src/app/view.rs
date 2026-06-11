@@ -1,13 +1,13 @@
 //! View function: assembles toolbar, content area, overlays, and footer.
 
-use iced::widget::{Stack, column, mouse_area};
+use iced::widget::{Stack, center, column, mouse_area};
 use iced::{Element, Length, mouse};
 
 use crate::ui;
 use crate::ui::toolbar::LayoutVisibility;
 
 use super::state::{DisplayedImage, Session};
-use super::{App, Message, TOOLBAR_HEIGHT};
+use super::{App, Message, SPINNER_DELAY, TOOLBAR_HEIGHT};
 
 /// View function: assembles toolbar, content area, and footer.
 pub fn view(app: &App) -> Element<'_, Message> {
@@ -130,7 +130,32 @@ pub fn view(app: &App) -> Element<'_, Message> {
         column![].width(Length::Fill).height(Length::Fill).into()
     };
 
-    let stacked = Stack::with_children(vec![content, toolbar_overlay, ctx_overlay]);
+    // Loading spinner: appears only after a grace period so fast loads
+    // never flash UI.
+    let spinner_overlay: Element<'_, Message> = match app.viewer() {
+        Some(viewer)
+            if viewer
+                .pending_since
+                .is_some_and(|since| since.elapsed() >= SPINNER_DELAY) =>
+        {
+            let elapsed = viewer
+                .pending_since
+                .map(|since| since.elapsed())
+                .unwrap_or_default();
+            center(ui::spinner::spinner(elapsed)).into()
+        }
+        _ => column![].width(Length::Fill).height(Length::Fill).into(),
+    };
+
+    let toasts = ui::toast::toast_stack(&app.toasts);
+
+    let stacked = Stack::with_children(vec![
+        content,
+        spinner_overlay,
+        toolbar_overlay,
+        ctx_overlay,
+        toasts,
+    ]);
 
     let mut page = column![].width(Length::Fill).height(Length::Fill);
 

@@ -5,7 +5,9 @@ pub mod filmstrip;
 pub mod footer;
 pub mod image_display;
 pub mod nav_slider;
+pub mod spinner;
 pub mod theme;
+pub mod toast;
 pub mod toolbar;
 
 /// Format image dimensions for display (e.g. "256 × 512 pixels").
