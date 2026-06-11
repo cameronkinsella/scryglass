@@ -161,6 +161,12 @@ pub struct Viewer {
     /// Rotation currently baked into the displayed texture. When this
     /// trails `rotation`, a rotate task is producing the next texture.
     pub displayed_rotation: u8,
+    /// Active video playback session (feature `video`). Dropping it
+    /// stops the decode processes.
+    pub video: Option<crate::video::VideoSession>,
+    /// Mid-drag value of the video seek slider (seconds), committed on
+    /// release.
+    pub video_seek_drag: Option<f64>,
 }
 
 impl Viewer {
@@ -196,6 +202,8 @@ impl Viewer {
             exif: None,
             rotation: 0,
             displayed_rotation: 0,
+            video: None,
+            video_seek_drag: None,
         }
     }
 
@@ -216,7 +224,12 @@ impl Viewer {
     /// Whether anything can be put on screen for `path` right now:
     /// a decoded image, a thumbnail (blur), or a cached GIF.
     pub fn displayable(&self, path: &std::path::Path) -> bool {
-        self.cache.contains(path) || self.thumbs.contains(path) || self.anim_player.has_cached(path)
+        self.cache.contains(path)
+            || self.thumbs.contains(path)
+            || self.anim_player.has_cached(path)
+            // Videos display as soon as their first frame decodes, so
+            // navigation never waits on them.
+            || crate::video::is_video(path)
     }
 
     /// The next file the background thumbnailer should work on: scans
@@ -234,6 +247,7 @@ impl Viewer {
                     && !self.in_flight_thumbs.contains(*p)
                     && !self.failed_thumbs.contains(*p)
                     && !self.in_flight.contains(*p)
+                    && !crate::video::is_video(p)
             })
             .cloned()
     }

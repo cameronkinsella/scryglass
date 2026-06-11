@@ -21,6 +21,10 @@ pub fn map_press(key: &Key, modifiers: Modifiers) -> Option<Message> {
         Key::Named(Named::Delete) => Some(Message::RequestDelete),
         Key::Named(Named::F2) => Some(Message::RequestRename),
         Key::Named(Named::Enter) => Some(Message::ModalSubmit),
+        // Video transport (no-ops when nothing is playing).
+        Key::Named(Named::Space) => Some(Message::VideoPlayPause),
+        Key::Named(Named::ArrowUp) => Some(Message::VideoNudgeVolume(0.1)),
+        Key::Named(Named::ArrowDown) => Some(Message::VideoNudgeVolume(-0.1)),
 
         Key::Character(c) => match c.as_str() {
             "f" | "F" if !ctrl => Some(Message::ToggleFullscreen),
@@ -32,6 +36,9 @@ pub fn map_press(key: &Key, modifiers: Modifiers) -> Option<Message> {
             "-" => Some(Message::ZoomStep(-1)),
             "0" if ctrl => Some(Message::ResetZoom),
             "1" if ctrl => Some(Message::ZoomActual),
+            "m" | "M" if !ctrl => Some(Message::VideoToggleMute),
+            "j" | "J" if !ctrl => Some(Message::VideoSeekBy(-10.0)),
+            "l" | "L" if !ctrl => Some(Message::VideoSeekBy(10.0)),
             _ => None,
         },
         _ => None,

@@ -271,6 +271,12 @@ pub fn subscription(app: &App) -> Subscription<Message> {
         {
             subs.push(iced::time::every(delay).map(|_| Message::Anim(AnimMessage::Tick)));
         }
+
+        // Video pacing: pull frames due for display ~60×/s while a
+        // session is active (paused sessions still need control redraws).
+        if viewer.video.is_some() {
+            subs.push(iced::time::every(Duration::from_millis(16)).map(|_| Message::VideoTick));
+        }
     }
 
     Subscription::batch(subs)

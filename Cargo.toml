@@ -29,6 +29,8 @@ resvg = { version = "0.47.0", default-features = false, features = ["text"], opt
 rawler = { version = "0.7.2", optional = true }
 libheif-rs = { version = "2.7.0", optional = true }
 trash = "5.2.6"
+ffmpeg-sidecar = { version = "2.5.2", optional = true }
+rodio = { version = "0.20", default-features = false, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_UI_Shell", "Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Registry"] }
@@ -53,3 +55,6 @@ svg = ["dep:resvg"]
 raw = ["dep:rawler"]
 # HEIC/HEIF needs the system libheif C library, so it's opt-in.
 heif = ["dep:libheif-rs"]
+# Video playback via a spawned ffmpeg binary (no C linkage). Needs
+# ffmpeg on PATH at runtime. Opt-in.
+video = ["dep:ffmpeg-sidecar", "dep:rodio"]

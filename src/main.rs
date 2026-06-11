@@ -6,6 +6,11 @@ mod media;
 mod nav;
 mod platform;
 mod ui;
+#[cfg(feature = "video")]
+mod video;
+#[cfg(not(feature = "video"))]
+#[path = "video_stub.rs"]
+mod video;
 
 fn main() -> anyhow::Result<()> {
     // Restore the last window size. The close handler persists it.

@@ -77,6 +77,29 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 image_view
             };
 
+            // Video transport controls: visible while paused or when the
+            // cursor is near the bottom of the window, hidden otherwise so
+            // the picture stays clean.
+            let image_view: Element<'_, Message> = match &viewer.video {
+                Some(session)
+                    if !session.playing
+                        || app.last_cursor_pos.y > app.window_size.height * 0.72 =>
+                {
+                    let controls =
+                        ui::video_controls::video_controls(ui::video_controls::VideoControls {
+                            playing: session.playing,
+                            position: session.position(),
+                            duration: session.duration(),
+                            seek_drag: viewer.video_seek_drag,
+                            volume: session.volume,
+                            muted: session.muted,
+                            looping: session.looping,
+                        });
+                    Stack::with_children(vec![image_view, controls]).into()
+                }
+                _ => image_view,
+            };
+
             // Wrap image area in mouse_area for scroll, drag, double-click, and right-click.
             let interactive = mouse_area(image_view)
                 .on_press(Message::DragStart)

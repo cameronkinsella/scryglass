@@ -13,8 +13,12 @@ use serde::{Deserialize, Serialize};
 /// Supported image file extensions (lowercase, no dot), collected from
 /// the decoder registry so feature flags add/remove formats everywhere
 /// (directory scan, archives, file dialog) at once.
-static SUPPORTED_EXTENSIONS: LazyLock<Vec<&'static str>> =
-    LazyLock::new(|| crate::media::registry::global().extensions().collect());
+static SUPPORTED_EXTENSIONS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    crate::media::registry::global()
+        .extensions()
+        .chain(crate::video::EXTENSIONS.iter().copied())
+        .collect()
+});
 
 /// Which color theme the UI uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -132,6 +136,9 @@ pub struct AppConfig {
     /// Last window size, restored at startup.
     pub window_width: f32,
     pub window_height: f32,
+    /// Video playback volume (0-1) and mute, persisted across sessions.
+    pub video_volume: f32,
+    pub video_muted: bool,
     /// Whether the toolbar is visible.
     pub show_toolbar: bool,
     /// Whether the filmstrip is visible.
@@ -161,6 +168,8 @@ impl Default for AppConfig {
             confirm_delete: true,
             window_width: 1024.0,
             window_height: 768.0,
+            video_volume: 1.0,
+            video_muted: false,
             show_toolbar: true,
             show_filmstrip: true,
             show_slider: true,
@@ -254,6 +263,8 @@ mod tests {
             confirm_delete: false,
             window_width: 640.0,
             window_height: 480.0,
+            video_volume: 0.5,
+            video_muted: true,
             show_toolbar: false,
             show_filmstrip: true,
             show_slider: false,
@@ -331,7 +342,11 @@ mod tests {
         assert!(!AppConfig::is_supported_extension("txt"));
         assert!(!AppConfig::is_supported_extension("rs"));
         assert!(!AppConfig::is_supported_extension("exe"));
-        assert!(!AppConfig::is_supported_extension("mp4"));
+        // Videos only join the list with the `video` feature.
+        assert_eq!(
+            AppConfig::is_supported_extension("mp4"),
+            cfg!(feature = "video")
+        );
     }
 
     #[test]

@@ -182,6 +182,29 @@ pub enum Message {
     CopyImageFinished(Result<(), String>),
     /// The OS asked to close the window, save config first.
     CloseRequested(iced::window::Id),
+    /// Pacing tick while a video session is active.
+    VideoTick,
+    /// A video frame finished its GPU upload.
+    VideoFrame {
+        path: PathBuf,
+        image: CachedImage,
+    },
+    /// Toggle video play/pause (Space).
+    VideoPlayPause,
+    /// Seek slider dragged to a position (seconds), committed on release.
+    VideoSeekDrag(f64),
+    /// Commit the dragged seek position.
+    VideoSeekRelease,
+    /// Seek by a relative amount (J/L keys).
+    VideoSeekBy(f64),
+    /// Set video volume (0-1).
+    VideoSetVolume(f32),
+    /// Nudge video volume by a delta (arrow keys).
+    VideoNudgeVolume(f32),
+    /// Toggle video mute.
+    VideoToggleMute,
+    /// Toggle looping playback.
+    VideoToggleLoop,
     /// Copy the current image to clipboard (as bitmap).
     CopyImage,
     /// Copy the current file to clipboard (as a file-list entry).
@@ -278,6 +301,8 @@ pub fn is_menu_message(msg: &Message) -> bool {
             | Message::Resorted(_)
             | Message::ExifLoaded(_, _)
             | Message::ViewRotated { .. }
+            | Message::VideoTick
+            | Message::VideoFrame { .. }
             | Message::Anim(_)
             | Message::DirectoryScanned(_, _)
             | Message::ArchiveScanned(_, _)
@@ -314,6 +339,8 @@ pub fn is_context_menu_message(msg: &Message) -> bool {
             | Message::Resorted(_)
             | Message::ExifLoaded(_, _)
             | Message::ViewRotated { .. }
+            | Message::VideoTick
+            | Message::VideoFrame { .. }
             | Message::Anim(_)
             | Message::DirectoryScanned(_, _)
             | Message::ArchiveScanned(_, _)

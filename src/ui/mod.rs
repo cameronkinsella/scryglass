@@ -16,6 +16,7 @@ pub mod spinner;
 pub mod theme;
 pub mod toast;
 pub mod toolbar;
+pub mod video_controls;
 
 /// Format image dimensions for display (e.g. "256 × 512 pixels").
 pub fn format_dimensions(width: u32, height: u32) -> String {

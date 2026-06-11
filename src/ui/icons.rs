@@ -20,6 +20,7 @@ macro_rules! icons {
 }
 
 icons!(
+    arrow_repeat,
     aspect_ratio,
     check_lg,
     clipboard,
@@ -29,7 +30,11 @@ icons!(
     image,
     images,
     info_circle,
+    pause_fill,
     pencil_square,
+    play_fill,
     trash,
+    volume_mute,
+    volume_up,
     zoom_in,
 );

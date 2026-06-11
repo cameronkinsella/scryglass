@@ -1028,6 +1028,189 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Err(e) => push_toast(app, ToastKind::Error, format!("Couldn't copy: {e}")),
         },
 
+        // --- Video playback ---
+        Message::VideoTick => {
+            let Some(viewer) = app.viewer_mut() else {
+                return Task::none();
+            };
+            let Some(session) = viewer.video.as_mut() else {
+                return Task::none();
+            };
+
+            if session.finished() {
+                if session.looping {
+                    let (path, volume, muted) =
+                        (session.path.clone(), session.volume, session.muted);
+                    viewer.video = Some(crate::video::VideoSession::open(
+                        path,
+                        std::time::Duration::ZERO,
+                        volume,
+                        muted,
+                        true,
+                    ));
+                } else if session.playing {
+                    session.pause();
+                }
+                return Task::none();
+            }
+
+            let Some(frame) = session.poll() else {
+                return Task::none();
+            };
+            let path = viewer.nav.current().to_path_buf();
+            let (width, height) = (frame.width, frame.height);
+            let handle = Handle::from_rgba(width, height, frame.rgba);
+            cache::allocate_handle(handle).map(move |upload| match upload {
+                Ok(allocation) => Message::VideoFrame {
+                    path: path.clone(),
+                    image: CachedImage {
+                        allocation,
+                        original_size: (width, height),
+                    },
+                },
+                Err(_) => Message::SpinnerTick,
+            })
+        }
+
+        Message::VideoFrame { path, image } => {
+            let zoom_mode = app.config.zoom_mode;
+            let viewport = app.viewport_size;
+            let Some(viewer) = app.viewer_mut() else {
+                return Task::none();
+            };
+            if viewer.nav.current() != path || viewer.video.is_none() {
+                return Task::none();
+            }
+            let first =
+                matches!(viewer.displayed, DisplayedImage::None) || viewer.pending_since.is_some();
+            let (w, h) = image.original_size;
+            if first && (!viewer.manual_zoom || zoom_mode != ZoomMode::LockZoomRatio) {
+                viewer.zoom = compute_zoom(zoom_mode, w, h, viewport);
+                viewer.pan = (0.0, 0.0);
+            }
+            viewer.displayed = DisplayedImage::Full {
+                allocation: image.allocation,
+                original_size: image.original_size,
+            };
+            viewer.displayed_path = Some(path);
+            viewer.pending_since = None;
+            Task::none()
+        }
+
+        Message::VideoPlayPause => {
+            if let Some(viewer) = app.viewer_mut()
+                && let Some(session) = viewer.video.as_mut()
+            {
+                if session.playing {
+                    session.pause();
+                } else {
+                    session.play();
+                }
+            }
+            Task::none()
+        }
+
+        Message::VideoSeekDrag(secs) => {
+            if let Some(viewer) = app.viewer_mut()
+                && viewer.video.is_some()
+            {
+                viewer.video_seek_drag = Some(secs);
+            }
+            Task::none()
+        }
+
+        Message::VideoSeekRelease => {
+            let Some(viewer) = app.viewer_mut() else {
+                return Task::none();
+            };
+            let (Some(target), Some(session)) =
+                (viewer.video_seek_drag.take(), viewer.video.as_ref())
+            else {
+                return Task::none();
+            };
+            let (path, volume, muted, looping) = (
+                session.path.clone(),
+                session.volume,
+                session.muted,
+                session.looping,
+            );
+            viewer.video = Some(crate::video::VideoSession::open(
+                path,
+                std::time::Duration::from_secs_f64(target.max(0.0)),
+                volume,
+                muted,
+                looping,
+            ));
+            Task::none()
+        }
+
+        Message::VideoSeekBy(delta) => {
+            let Some(viewer) = app.viewer_mut() else {
+                return Task::none();
+            };
+            let Some(session) = viewer.video.as_ref() else {
+                return Task::none();
+            };
+            let mut target = session.position().as_secs_f64() + delta;
+            if let Some(duration) = session.duration() {
+                target = target.min(duration.as_secs_f64() - 0.5);
+            }
+            let (path, volume, muted, looping) = (
+                session.path.clone(),
+                session.volume,
+                session.muted,
+                session.looping,
+            );
+            viewer.video = Some(crate::video::VideoSession::open(
+                path,
+                std::time::Duration::from_secs_f64(target.max(0.0)),
+                volume,
+                muted,
+                looping,
+            ));
+            Task::none()
+        }
+
+        Message::VideoSetVolume(volume) => {
+            app.config.video_volume = volume.clamp(0.0, 1.0);
+            app.config.video_muted = false;
+            if let Some(viewer) = app.viewer_mut()
+                && let Some(session) = viewer.video.as_mut()
+            {
+                session.set_volume(volume);
+            }
+            save_config(app)
+        }
+
+        Message::VideoNudgeVolume(delta) => {
+            let volume = (app.config.video_volume + delta).clamp(0.0, 1.0);
+            update(app, Message::VideoSetVolume(volume))
+        }
+
+        Message::VideoToggleMute => {
+            let Some(viewer) = app.viewer_mut() else {
+                return Task::none();
+            };
+            let Some(session) = viewer.video.as_mut() else {
+                return Task::none();
+            };
+            session.toggle_mute();
+            app.config.video_muted = app
+                .viewer()
+                .and_then(|v| v.video.as_ref())
+                .is_some_and(|s| s.muted);
+            save_config(app)
+        }
+
+        Message::VideoToggleLoop => {
+            if let Some(viewer) = app.viewer_mut()
+                && let Some(session) = viewer.video.as_mut()
+            {
+                session.looping = !session.looping;
+            }
+            Task::none()
+        }
+
         // --- Window close: persist config (window size included) first ---
         Message::CloseRequested(id) => {
             let config = app.config.clone();
@@ -1475,13 +1658,25 @@ fn open_viewer(app: &mut App, nav: Nav, source: Source) -> Task<Message> {
     let current = viewer.nav.current().to_path_buf();
     let mut tasks = vec![reconcile, probe_size(&mut viewer, current.clone())];
 
-    tasks.push(fire_thumb(
-        &pipeline,
-        &mut viewer,
-        current.clone(),
-        ThumbUrgency::Urgent,
-    ));
-    tasks.push(fire_load(&pipeline, &mut viewer, current, Lane::Current));
+    if crate::video::is_video(&current) {
+        if matches!(viewer.source, Source::Fs) {
+            viewer.video = Some(crate::video::VideoSession::open(
+                current.clone(),
+                std::time::Duration::ZERO,
+                app.config.video_volume,
+                app.config.video_muted,
+                false,
+            ));
+        }
+    } else {
+        tasks.push(fire_thumb(
+            &pipeline,
+            &mut viewer,
+            current.clone(),
+            ThumbUrgency::Urgent,
+        ));
+        tasks.push(fire_load(&pipeline, &mut viewer, current, Lane::Current));
+    }
     tasks.extend(fire_prefetch(&pipeline, &mut viewer, depth));
     tasks.extend(fire_visible_thumbs(&pipeline, &mut viewer, window_w));
     // Background-thumbnail the whole directory so the filmstrip and
@@ -1624,6 +1819,8 @@ fn scrub_to(app: &mut App, index: usize) -> Task<Message> {
     viewer.exif = None;
     viewer.rotation = 0;
     viewer.displayed_rotation = 0;
+    viewer.video = None;
+    viewer.video_seek_drag = None;
 
     let current = viewer.nav.current().to_path_buf();
     if let Some(cached) = viewer.cache.get(&current).cloned() {
@@ -1663,6 +1860,8 @@ fn complete_navigation(app: &mut App, target_index: usize, bump_generation: bool
     let viewport = app.viewport_size;
     let window_w = app.window_size.width;
     let show_filmstrip = app.config.show_filmstrip;
+    let video_volume = app.config.video_volume;
+    let video_muted = app.config.video_muted;
     let pipeline = app.pipeline.clone();
     let Some(viewer) = app.viewer_mut() else {
         return Task::none();
@@ -1677,6 +1876,8 @@ fn complete_navigation(app: &mut App, target_index: usize, bump_generation: bool
     }
 
     viewer.anim_player.stop();
+    viewer.video = None;
+    viewer.video_seek_drag = None;
     viewer.drag = None;
 
     // Reset pan on navigation. Zoom is preserved only in LockZoomRatio mode.
@@ -1697,7 +1898,25 @@ fn complete_navigation(app: &mut App, target_index: usize, bump_generation: bool
     let current = viewer.nav.current().to_path_buf();
     let mut tasks = vec![probe_size(viewer, current.clone())];
 
-    if let Some(anim_task) = viewer.anim_player.try_start_from_cache(&current) {
+    if crate::video::is_video(&current) {
+        // Video: blur-free spinner until the first frame arrives. The
+        // session's tick subscription drives frames from here.
+        viewer.pending_since = Some(Instant::now());
+        show_placeholder_or_clear(viewer, &current, zoom_mode, viewport);
+        if matches!(viewer.source, Source::Fs) {
+            viewer.video = Some(crate::video::VideoSession::open(
+                current.clone(),
+                std::time::Duration::ZERO,
+                video_volume,
+                video_muted,
+                false,
+            ));
+        } else {
+            // Archive entries would need extraction to a temp file first;
+            // out of scope. The viewport stays quiet rather than wrong.
+            viewer.pending_since = None;
+        }
+    } else if let Some(anim_task) = viewer.anim_player.try_start_from_cache(&current) {
         // Cached animation: blur stands in until frame 0 allocates.
         viewer.pending_since = Some(Instant::now());
         show_placeholder_or_clear(viewer, &current, zoom_mode, viewport);
@@ -1821,6 +2040,7 @@ fn fire_thumb(
     if viewer.thumbs.contains(&path)
         || viewer.in_flight_thumbs.contains(&path)
         || viewer.failed_thumbs.contains(&path)
+        || crate::video::is_video(&path)
     {
         return Task::none();
     }
@@ -1858,6 +2078,9 @@ fn fire_load(pipeline: &Pipeline, viewer: &mut Viewer, path: PathBuf, lane: Lane
     if viewer.cache.contains(&path)
         || viewer.anim_player.has_cached(&path)
         || viewer.in_flight.contains(&path)
+        // Videos never go through the image pipeline. Reading a multi-GB
+        // file into memory to fail decoding would be a disaster.
+        || crate::video::is_video(&path)
     {
         return Task::none();
     }
