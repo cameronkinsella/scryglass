@@ -83,6 +83,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     col = col.push(ui::filmstrip::filmstrip(
                         viewer.nav.files(),
                         viewer.nav.cursor(),
+                        &viewer.thumbs,
+                        viewer.filmstrip_scroll_x,
+                        app.window_size.width,
                     ));
                 }
                 if app.config.show_slider {

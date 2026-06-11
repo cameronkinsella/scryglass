@@ -67,6 +67,11 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     tasks.push(fire_load(&pipeline, &mut viewer, current, Lane::Current));
                 }
                 tasks.extend(fire_prefetch(&pipeline, &mut viewer, depth));
+                tasks.extend(fire_visible_thumbs(
+                    &pipeline,
+                    &mut viewer,
+                    app.window_size.width,
+                ));
 
                 app.session = Session::Viewing(Box::new(viewer));
                 Task::batch(tasks)
@@ -515,6 +520,16 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             iced::widget::operation::scroll_by(ui::filmstrip::filmstrip_id(), offset)
         }
 
+        Message::FilmstripScrolled(x) => {
+            let window_w = app.window_size.width;
+            let pipeline = app.pipeline.clone();
+            let Some(viewer) = app.viewer_mut() else {
+                return Task::none();
+            };
+            viewer.filmstrip_scroll_x = x;
+            Task::batch(fire_visible_thumbs(&pipeline, viewer, window_w))
+        }
+
         Message::SliderChanged(index) | Message::FilmstripClicked(index) => {
             navigate(app, NavTarget::Index(index))
         }
@@ -672,6 +687,8 @@ fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
     let depth = app.config.prefetch_depth;
     let zoom_mode = app.config.zoom_mode;
     let viewport = app.viewport_size;
+    let window_w = app.window_size.width;
+    let show_filmstrip = app.config.show_filmstrip;
     let pipeline = app.pipeline.clone();
     let Some(viewer) = app.viewer_mut() else {
         return Task::none();
@@ -741,7 +758,37 @@ fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
     let pinned = viewer.pinned_paths(depth);
     viewer.cache.evict_over_budget(&pinned);
 
+    if show_filmstrip {
+        // Keep the filmstrip centered on the cursor and its thumbs warm.
+        let center = ui::filmstrip::centering_offset(viewer.nav.cursor(), window_w);
+        viewer.filmstrip_scroll_x = center;
+        tasks.push(iced::widget::operation::scroll_to(
+            ui::filmstrip::filmstrip_id(),
+            iced::widget::scrollable::AbsoluteOffset { x: center, y: 0.0 },
+        ));
+        tasks.extend(fire_visible_thumbs(&pipeline, viewer, window_w));
+    }
+
     Task::batch(tasks)
+}
+
+/// Fire thumbnail probes for every filmstrip cell currently in view.
+fn fire_visible_thumbs(
+    pipeline: &Pipeline,
+    viewer: &mut Viewer,
+    viewport_w: f32,
+) -> Vec<Task<Message>> {
+    let range =
+        ui::filmstrip::visible_range(viewer.filmstrip_scroll_x, viewport_w, viewer.nav.len());
+    let paths: Vec<PathBuf> = viewer.nav.files()[range]
+        .iter()
+        .filter(|p| !gif::is_gif(p))
+        .cloned()
+        .collect();
+    paths
+        .into_iter()
+        .map(|p| fire_thumb(pipeline, viewer, p))
+        .collect()
 }
 
 /// Put a loaded image on screen, computing zoom from its true dimensions.

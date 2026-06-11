@@ -124,6 +124,8 @@ pub struct Viewer {
     pub pan: (f32, f32),
     /// Mouse drag state for panning.
     pub drag: Option<DragState>,
+    /// Filmstrip scroll offset in logical pixels. Drives virtualization.
+    pub filmstrip_scroll_x: f32,
 }
 
 impl Viewer {
@@ -145,6 +147,7 @@ impl Viewer {
             manual_zoom: false,
             pan: (0.0, 0.0),
             drag: None,
+            filmstrip_scroll_x: 0.0,
         }
     }
 

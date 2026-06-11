@@ -54,6 +54,11 @@ impl<T> ImageCache<T> {
         Some(&entry.value)
     }
 
+    /// Fetch without touching recency, for read-only view code.
+    pub fn peek(&self, path: &Path) -> Option<&T> {
+        self.entries.get(path).map(|e| &e.value)
+    }
+
     /// Insert (or replace) a value costing `bytes`.
     pub fn insert(&mut self, path: PathBuf, value: T, bytes: usize) {
         self.clock += 1;

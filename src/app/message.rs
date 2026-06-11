@@ -87,6 +87,8 @@ pub enum Message {
     ToggleFooter,
     /// Vertical scroll over filmstrip, convert to horizontal scroll.
     FilmstripScroll(f32),
+    /// The filmstrip's scroll offset changed (user or programmatic).
+    FilmstripScrolled(f32),
     /// Toggle toolbar visibility.
     ToggleToolbar,
     /// Switch between the dark and light theme.
@@ -146,6 +148,7 @@ pub fn is_menu_message(msg: &Message) -> bool {
             | Message::FileSizeProbed(_, _)
             | Message::SpinnerTick
             | Message::DismissToast(_)
+            | Message::FilmstripScrolled(_)
             | Message::Gif(_)
             | Message::DirectoryScanned(_, _)
             | Message::FileDialogResult(_)
@@ -174,6 +177,7 @@ pub fn is_context_menu_message(msg: &Message) -> bool {
             | Message::FileSizeProbed(_, _)
             | Message::SpinnerTick
             | Message::DismissToast(_)
+            | Message::FilmstripScrolled(_)
             | Message::Gif(_)
             | Message::DirectoryScanned(_, _)
             | Message::FileDialogResult(_)

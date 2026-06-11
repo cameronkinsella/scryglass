@@ -238,6 +238,19 @@ pub fn menu_tab_active(theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// Empty filmstrip cell awaiting its thumbnail.
+pub fn thumb_placeholder(theme: &Theme) -> container::Style {
+    let t = tokens(theme);
+    container::Style {
+        background: Some(Background::Color(with_alpha(t.text_primary, 0.06))),
+        border: Border {
+            radius: 3.0.into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
 /// Filmstrip thumbnail for the current image, accent border.
 pub fn thumb_current(theme: &Theme, status: button::Status) -> button::Style {
     let t = tokens(theme);

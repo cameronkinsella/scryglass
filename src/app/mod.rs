@@ -16,7 +16,7 @@
 //! driven by OS key-repeat events.
 
 mod message;
-mod state;
+pub mod state;
 mod update;
 mod view;
 mod viewer_math;
