@@ -118,6 +118,12 @@ pub struct Viewer {
     /// When the current image's load started, if it isn't displayed yet.
     /// Drives the loading spinner (shown only after a grace period).
     pub pending_since: Option<Instant>,
+    /// A navigation waiting for its target to become displayable. The
+    /// cursor (and with it title, slider, filmstrip) does not move until
+    /// the target has at least a blurred placeholder, so the screen never
+    /// goes empty and never shows the wrong image. Further navigation
+    /// requests are dropped while one is pending.
+    pub pending_nav: Option<usize>,
     /// Which direction key is currently held, and when the hold started.
     pub held_direction: Option<(Direction, Instant)>,
     /// Animated GIF player that handles decode cache and animation.
@@ -152,6 +158,7 @@ impl Viewer {
             failed_thumbs: HashSet::new(),
             displayed_path: None,
             pending_since: Some(Instant::now()),
+            pending_nav: None,
             held_direction: None,
             gif_player,
             current_file_size: None,
@@ -174,6 +181,12 @@ impl Viewer {
     /// True when this session navigates real files (not archive entries).
     pub fn is_fs(&self) -> bool {
         matches!(self.source, Source::Fs)
+    }
+
+    /// Whether anything can be put on screen for `path` right now:
+    /// a decoded image, a thumbnail (blur), or a cached GIF.
+    pub fn displayable(&self, path: &std::path::Path) -> bool {
+        self.cache.contains(path) || self.thumbs.contains(path) || self.gif_player.has_cached(path)
     }
 
     /// The next file the background thumbnailer should work on: scans

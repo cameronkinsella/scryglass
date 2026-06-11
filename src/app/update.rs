@@ -115,12 +115,15 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     let pinned = viewer.pinned_paths(depth);
                     viewer.cache.evict_over_budget(&pinned);
                     viewer.thumbs.evict_over_budget(&pinned);
-                    Task::none()
+                    resolve_pending_nav(app)
                 }
                 Err(MediaError::Cancelled) => {
                     // Cancelled loads that are still wanted get re-fired with
                     // the live generation.
-                    if viewer.nav.current() == path {
+                    let pending_path = viewer
+                        .pending_nav
+                        .map(|i| viewer.nav.files()[i].to_path_buf());
+                    if viewer.nav.current() == path || pending_path.as_deref() == Some(&*path) {
                         fire_load(&pipeline, viewer, path, Lane::Current)
                     } else if viewer.pinned_paths(depth).contains(&path) {
                         fire_load(&pipeline, viewer, path, Lane::Prefetch)
@@ -129,11 +132,19 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     }
                 }
                 Err(err) => {
-                    if viewer.nav.current() != path {
+                    let pending_path = viewer
+                        .pending_nav
+                        .map(|i| viewer.nav.files()[i].to_path_buf());
+                    let is_current = viewer.nav.current() == path;
+                    let is_pending = pending_path.as_deref() == Some(&*path);
+                    if !is_current && !is_pending {
                         return Task::none();
                     }
-                    // Stop the spinner, the previous image stays visible.
+                    // Stop the spinner, a failed pending move stays put.
                     viewer.pending_since = None;
+                    if is_pending {
+                        viewer.pending_nav = None;
+                    }
                     let name = path
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
@@ -162,7 +173,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     let cost = thumb.byte_cost();
                     viewer.thumbs.insert(path.clone(), thumb.clone(), cost);
                     // Show as placeholder if this is the image being waited on.
-                    if viewer.nav.current() == path && viewer.pending_since.is_some() {
+                    if viewer.nav.current() == path
+                        && viewer.pending_since.is_some()
+                        && viewer.pending_nav.is_none()
+                    {
                         show_placeholder(viewer, &path, thumb, zoom_mode, viewport);
                     }
                 }
@@ -176,8 +190,11 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 }
             }
 
-            // Keep the background thumbnailer chain going.
-            Task::batch(fire_thumbnailer(&pipeline, viewer, 1))
+            // Keep the background thumbnailer chain going, and complete a
+            // pending move if this thumb was what it waited for.
+            let mut tasks = fire_thumbnailer(&pipeline, viewer, 1);
+            tasks.push(resolve_pending_nav(app));
+            Task::batch(tasks)
         }
 
         Message::FileSizeProbed(path, size) => {
@@ -224,7 +241,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 viewer.pending_since = None;
             }
 
-            task.map(Message::Gif)
+            // A pending move onto a GIF resolves once its decode lands.
+            Task::batch([task.map(Message::Gif), resolve_pending_nav(app)])
         }
 
         // --- Initial press: always navigate + record hold start ---
@@ -755,6 +773,88 @@ pub fn open_path(path: PathBuf) -> Task<Message> {
 /// Move the cursor (one step or to an absolute index), then update the
 /// display from cache and fire loads. Never waits on anything.
 fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
+    let pipeline = app.pipeline.clone();
+    let Some(viewer) = app.viewer_mut() else {
+        return Task::none();
+    };
+
+    // Key navigation while a move is pending is dropped: the screen
+    // advances at the rate blurs become available, never out of sync.
+    // Absolute jumps (slider, filmstrip) replace the pending target
+    // instead. Latest wins.
+    if viewer.pending_nav.is_some() && matches!(target, NavTarget::Delta(_)) {
+        return Task::none();
+    }
+
+    let len = viewer.nav.len();
+    let cursor = viewer.nav.cursor();
+    let target_index = match target {
+        NavTarget::Delta(Direction::Forward) => (cursor + 1) % len,
+        NavTarget::Delta(Direction::Backward) => (cursor + len - 1) % len,
+        NavTarget::Index(index) => {
+            let index = index % len;
+            if index == cursor {
+                viewer.pending_nav = None;
+                return Task::none();
+            }
+            index
+        }
+    };
+    let target_path = viewer.nav.files()[target_index].to_path_buf();
+
+    // Something is on hand to show (full image, blur, or cached GIF):
+    // move immediately.
+    if viewer.displayable(&target_path) {
+        return complete_navigation(app, target_index, true);
+    }
+
+    // Nothing displayable yet. Hold position (current image stays on
+    // screen, spinner appears after the grace period) and move the moment
+    // the target has at least a blur.
+    viewer.pending_nav = Some(target_index);
+    viewer.pending_since = Some(Instant::now());
+
+    let mut tasks = Vec::new();
+    if viewer.is_fs() && gif::is_gif(&target_path) {
+        tasks.push(
+            viewer
+                .gif_player
+                .prefetch_decode(&target_path)
+                .map(Message::Gif),
+        );
+    } else {
+        tasks.push(fire_thumb(
+            &pipeline,
+            viewer,
+            target_path.clone(),
+            ThumbUrgency::Urgent,
+        ));
+        tasks.push(fire_load(&pipeline, viewer, target_path, Lane::Current));
+    }
+    Task::batch(tasks)
+}
+
+/// A pending navigation's target just became displayable, finish the move.
+fn resolve_pending_nav(app: &mut App) -> Task<Message> {
+    let Some(viewer) = app.viewer_mut() else {
+        return Task::none();
+    };
+    let Some(target_index) = viewer.pending_nav else {
+        return Task::none();
+    };
+    let target_path = viewer.nav.files()[target_index].to_path_buf();
+    if viewer.displayable(&target_path) {
+        // No generation bump: the in-flight load for this very image must
+        // survive the move (a bump would cancel it and double the decode).
+        complete_navigation(app, target_index, false)
+    } else {
+        Task::none()
+    }
+}
+
+/// Move the cursor to `target_index`, which must have something
+/// displayable, then update display, prefetch, caches, and filmstrip.
+fn complete_navigation(app: &mut App, target_index: usize, bump_generation: bool) -> Task<Message> {
     let depth = app.config.prefetch_depth;
     let zoom_mode = app.config.zoom_mode;
     let viewport = app.viewport_size;
@@ -765,28 +865,18 @@ fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
         return Task::none();
     };
 
-    match target {
-        NavTarget::Delta(Direction::Forward) => viewer.nav.next(),
-        NavTarget::Delta(Direction::Backward) => viewer.nav.prev(),
-        NavTarget::Index(index) => {
-            // Don't navigate if already at this index.
-            if viewer.nav.cursor() == index {
-                return Task::none();
-            }
-            viewer.nav.set_cursor(index);
-        }
-    }
+    viewer.nav.set_cursor(target_index);
+    viewer.pending_nav = None;
 
-    // Everything in flight for the old position is now stale.
-    pipeline.bump_generation();
+    if bump_generation {
+        // Everything in flight for the old position is now stale.
+        pipeline.bump_generation();
+    }
 
     viewer.gif_player.stop();
     viewer.drag = None;
 
     // Reset pan on navigation. Zoom is preserved only in LockZoomRatio mode.
-    // The previous image stays visible until the new one is ready (flicker
-    // prevention). Its zoom is kept until then to avoid a flash at the
-    // wrong scale.
     viewer.pan = (0.0, 0.0);
     if zoom_mode != ZoomMode::LockZoomRatio {
         viewer.manual_zoom = false;
@@ -813,19 +903,10 @@ fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
         // Instant display, the common case within the prefetch window.
         show_loaded(viewer, &current, cached, zoom_mode, viewport);
     } else {
+        // Navigation only lands on displayable targets, so the blur is
+        // guaranteed here. The full image is loading behind it.
         viewer.pending_since = Some(Instant::now());
-        // Blurred placeholder from the thumb cache, or an empty viewport.
-        // The image area must NEVER show a previous image here. It is
-        // locked in sync with the title and slider, and an honest blank
-        // beats a wrong picture.
-        if !show_placeholder_or_clear(viewer, &current, zoom_mode, viewport) {
-            tasks.push(fire_thumb(
-                &pipeline,
-                viewer,
-                current.clone(),
-                ThumbUrgency::Urgent,
-            ));
-        }
+        show_placeholder_or_clear(viewer, &current, zoom_mode, viewport);
         tasks.push(fire_load(&pipeline, viewer, current, Lane::Current));
     }
 

@@ -377,6 +377,11 @@ impl GifPlayer {
             .map(move |result| GifMessage::FrameAllocated(p.clone(), result))
     }
 
+    /// Whether a decoded copy of `path` is in the cache, ready to display.
+    pub fn has_cached(&self, path: &Path) -> bool {
+        self.cache.contains_key(path)
+    }
+
     /// Stop animation and drop the active GIF state.
     pub fn stop(&mut self) {
         self.active = None;

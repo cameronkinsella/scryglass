@@ -42,11 +42,13 @@ impl Nav {
     }
 
     /// Advance forward one image (wraps around).
+    #[allow(dead_code)]
     pub fn next(&mut self) {
         self.cursor = (self.cursor + 1) % self.files.len();
     }
 
     /// Go back one image (wraps around).
+    #[allow(dead_code)]
     pub fn prev(&mut self) {
         self.cursor = (self.cursor + self.files.len() - 1) % self.files.len();
     }
