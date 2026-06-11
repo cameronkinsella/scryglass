@@ -24,19 +24,31 @@ tar = "0.4.46"
 flate2 = "1.1.9"
 sevenz-rust2 = "0.21.0"
 unrar = { version = "0.5.8", optional = true }
+jxl-oxide = { version = "0.12.6", optional = true }
+resvg = { version = "0.47.0", default-features = false, features = ["text"], optional = true }
+rawler = { version = "0.7.2", optional = true }
+libheif-rs = { version = "2.7.0", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_UI_Shell", "Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Registry"] }
 
 [dev-dependencies]
 tempfile = "3"
+zune-core = "0.5.1"
+zune-jpegxl = "0.5.2"
 
 [features]
 # RAR support builds the vendored unrar C++ sources. On by default,
 # disable with --no-default-features if the toolchain can't build it.
-default = ["rar", "disk-thumbs"]
+default = ["rar", "disk-thumbs", "jxl", "svg", "raw"]
 rar = ["dep:unrar"]
 # Persistent thumbnail cache on disk (privacy-conscious: reconciled
 # against deleted files on folder open, 90-day expiry, size-capped).
 # Also gated at runtime by the `disk_thumbs` config setting.
 disk-thumbs = []
+# Pure-Rust format decoders, on by default.
+jxl = ["dep:jxl-oxide"]
+svg = ["dep:resvg"]
+raw = ["dep:rawler"]
+# HEIC/HEIF needs the system libheif C library, so it's opt-in.
+heif = ["dep:libheif-rs"]

@@ -36,6 +36,12 @@ pub trait ImageFormat: Send + Sync {
     fn sniff(&self, magic: &[u8]) -> bool;
     /// Decode a full file into media.
     fn decode(&self, bytes: &[u8], opts: &DecodeOpts) -> Result<DecodedMedia, MediaError>;
+    /// Claim this format's extensions BEFORE magic sniffing. For container
+    /// formats whose magic collides with another format (RAW files are
+    /// TIFF-structured), the explicit extension is the stronger signal.
+    fn prefer_extension(&self) -> bool {
+        false
+    }
 }
 
 /// The set of known formats.
@@ -45,17 +51,47 @@ pub struct Registry {
 
 impl Registry {
     fn new() -> Self {
-        Self {
-            formats: vec![Box::new(super::decoders::image_rs::ImageRs)],
-        }
+        let mut formats: Vec<Box<dyn ImageFormat>> =
+            vec![Box::new(super::decoders::image_rs::ImageRs)];
+        #[cfg(feature = "jxl")]
+        formats.push(Box::new(super::decoders::jxl::Jxl));
+        #[cfg(feature = "svg")]
+        formats.push(Box::new(super::decoders::svg::Svg));
+        #[cfg(feature = "raw")]
+        formats.push(Box::new(super::decoders::raw::Raw));
+        #[cfg(feature = "heif")]
+        formats.push(Box::new(super::decoders::heif::Heif));
+        Self { formats }
     }
 
-    /// Find the decoder for a file: magic bytes win, extension is the fallback.
+    /// All extensions claimed by registered formats. The single source of
+    /// truth for directory scans and file dialog filters.
+    pub fn extensions(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.formats
+            .iter()
+            .flat_map(|f| f.extensions().iter().copied())
+    }
+
+    /// Find the decoder for a file: extension-priority formats first, then
+    /// magic bytes, then plain extension fallback.
     pub fn find(&self, path: &Path, magic: &[u8]) -> Option<&dyn ImageFormat> {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase());
+
+        if let Some(ext) = &ext
+            && let Some(f) = self
+                .formats
+                .iter()
+                .find(|f| f.prefer_extension() && f.extensions().contains(&ext.as_str()))
+        {
+            return Some(f.as_ref());
+        }
         if let Some(f) = self.formats.iter().find(|f| f.sniff(magic)) {
             return Some(f.as_ref());
         }
-        let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+        let ext = ext?;
         self.formats
             .iter()
             .find(|f| f.extensions().contains(&ext.as_str()))

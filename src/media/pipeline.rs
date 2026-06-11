@@ -259,10 +259,25 @@ impl Pipeline {
                 return Err(MediaError::Unsupported);
             }
 
-            // Background fallback: decode the whole file and downscale.
+            // Background fallback: a registry decode capped at thumb size,
+            // so every supported format gets filmstrip thumbnails.
             let bytes = source.read_all(&path).await?;
             let thumb = tokio::task::spawn_blocking(move || {
-                thumbs::thumb_from_bytes(&bytes).ok_or(MediaError::Unsupported)
+                let magic = &bytes[..bytes.len().min(16)];
+                let format = registry::global()
+                    .find(&path, magic)
+                    .ok_or(MediaError::Unsupported)?;
+                let opts = DecodeOpts {
+                    max_dimension: super::THUMB_DIM,
+                };
+                match format.decode(&bytes, &opts)? {
+                    DecodedMedia::Static(img) => Ok(ThumbData {
+                        width: img.width,
+                        height: img.height,
+                        pixels: img.pixels,
+                        original_size: img.original_size,
+                    }),
+                }
             })
             .await
             .map_err(|e| MediaError::Decode(e.to_string()))??;

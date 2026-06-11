@@ -8,10 +8,11 @@
 use std::io::Cursor;
 
 use image::metadata::Orientation;
-use image::{DynamicImage, ImageDecoder, ImageReader, imageops::FilterType};
+use image::{DynamicImage, ImageDecoder, ImageReader};
 
+use super::finish;
 use crate::media::registry::{DecodeOpts, ImageFormat};
-use crate::media::{DecodedImage, DecodedMedia, MediaError};
+use crate::media::{DecodedMedia, MediaError};
 
 pub struct ImageRs;
 
@@ -44,44 +45,6 @@ impl ImageFormat for ImageRs {
     }
 }
 
-/// Cap dimensions to the texture limit, derive a thumbnail, and convert
-/// to RGBA8.
-fn finish(img: DynamicImage, opts: &DecodeOpts) -> DecodedImage {
-    let original_size = (img.width(), img.height());
-
-    let img = if img.width().max(img.height()) > opts.max_dimension {
-        img.resize(opts.max_dimension, opts.max_dimension, FilterType::Triangle)
-    } else {
-        img
-    };
-
-    // Thumbnails come nearly free here: the pixels are already decoded.
-    let thumbnail = if img.width().max(img.height()) > crate::media::THUMB_DIM {
-        let t = img
-            .thumbnail(crate::media::THUMB_DIM, crate::media::THUMB_DIM)
-            .into_rgba8();
-        let (tw, th) = t.dimensions();
-        Some(crate::media::ThumbData {
-            width: tw,
-            height: th,
-            pixels: t.into_raw(),
-            original_size,
-        })
-    } else {
-        None
-    };
-
-    let rgba = img.into_rgba8();
-    let (width, height) = rgba.dimensions();
-    DecodedImage {
-        width,
-        height,
-        pixels: rgba.into_raw(),
-        original_size,
-        thumbnail,
-    }
-}
-
 /// Recognize the magic bytes of the formats this decoder handles.
 fn sniff(magic: &[u8]) -> bool {
     if magic.len() < 12 {
@@ -102,6 +65,7 @@ fn sniff(magic: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media::DecodedImage;
 
     fn decode(bytes: &[u8], opts: &DecodeOpts) -> DecodedImage {
         match ImageRs.decode(bytes, opts).unwrap() {

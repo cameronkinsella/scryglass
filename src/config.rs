@@ -6,13 +6,15 @@
 //! ignored and missing keys fall back to defaults.
 
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
-/// Supported image file extensions (lowercase, no dot).
-const SUPPORTED_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff", "tif", "ico", "avif",
-];
+/// Supported image file extensions (lowercase, no dot), collected from
+/// the decoder registry so feature flags add/remove formats everywhere
+/// (directory scan, archives, file dialog) at once.
+static SUPPORTED_EXTENSIONS: LazyLock<Vec<&'static str>> =
+    LazyLock::new(|| crate::media::registry::global().extensions().collect());
 
 /// Which color theme the UI uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -165,7 +167,7 @@ impl AppConfig {
 
     /// Returns the list of supported extensions (for file dialog filters).
     pub fn supported_extensions() -> &'static [&'static str] {
-        SUPPORTED_EXTENSIONS
+        &SUPPORTED_EXTENSIONS
     }
 
     /// Location of the persisted config file, if a config dir exists.
@@ -314,5 +316,19 @@ mod tests {
         assert!(!AppConfig::is_supported_extension("rs"));
         assert!(!AppConfig::is_supported_extension("exe"));
         assert!(!AppConfig::is_supported_extension("mp4"));
+    }
+
+    #[test]
+    fn feature_gated_formats_register_their_extensions() {
+        #[cfg(feature = "jxl")]
+        assert!(AppConfig::is_supported_extension("jxl"));
+        #[cfg(feature = "svg")]
+        assert!(AppConfig::is_supported_extension("svg"));
+        #[cfg(feature = "raw")]
+        {
+            assert!(AppConfig::is_supported_extension("cr2"));
+            assert!(AppConfig::is_supported_extension("nef"));
+            assert!(AppConfig::is_supported_extension("dng"));
+        }
     }
 }
