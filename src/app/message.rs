@@ -10,6 +10,7 @@ use crate::config::ZoomMode;
 use crate::gif::GifMessage;
 use crate::media::MediaError;
 use crate::media::archive::ArchiveIndex;
+use crate::media::pipeline::ThumbUrgency;
 
 use super::state::{LoadedMedia, Thumb};
 
@@ -24,9 +25,10 @@ pub enum Message {
         path: PathBuf,
         result: Result<LoadedMedia, MediaError>,
     },
-    /// A thumbnail probe finished (EXIF fast path).
+    /// A thumbnail job finished (EXIF probe or background decode).
     ThumbLoaded {
         path: PathBuf,
+        urgency: ThumbUrgency,
         result: Result<Thumb, MediaError>,
     },
     /// Async file-size probe completed for the given path.
@@ -98,7 +100,7 @@ pub enum Message {
     /// Switch between the dark and light theme.
     ToggleTheme,
     /// Toggle nearest-neighbor sampling when zoomed past 100%.
-    TogglePixelatedZoom,
+    ToggleCrispPixels,
     /// Show the context menu at the cursor position.
     ShowContextMenu,
     /// Dismiss the context menu.
@@ -134,7 +136,7 @@ pub fn is_menu_message(msg: &Message) -> bool {
             | Message::ToggleFooter
             | Message::ToggleToolbar
             | Message::ToggleTheme
-            | Message::TogglePixelatedZoom
+            | Message::ToggleCrispPixels
             // Context menu messages:
             | Message::ShowContextMenu
             | Message::DismissContextMenu

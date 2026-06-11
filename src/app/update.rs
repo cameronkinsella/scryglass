@@ -17,7 +17,7 @@ use crate::cache;
 use crate::config::{AppConfig, ThemeChoice, ZoomMode};
 use crate::gif::{self, GifPlayer};
 use crate::media::archive::{self, ArchiveIndex};
-use crate::media::pipeline::{Lane, Pipeline, Source};
+use crate::media::pipeline::{Lane, Pipeline, Source, ThumbUrgency};
 use crate::media::registry::DecodeOpts;
 use crate::media::{DecodedMedia, MediaError};
 use crate::nav::{self, Nav};
@@ -110,7 +110,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                         viewer.thumbs.insert(path.clone(), thumb, cost);
                     }
                     if viewer.nav.current() == path {
-                        show_loaded(viewer, image, zoom_mode, viewport);
+                        show_loaded(viewer, &path, image, zoom_mode, viewport);
                     }
                     let pinned = viewer.pinned_paths(depth);
                     viewer.cache.evict_over_budget(&pinned);
@@ -143,7 +143,11 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             }
         }
 
-        Message::ThumbLoaded { path, result } => {
+        Message::ThumbLoaded {
+            path,
+            urgency,
+            result,
+        } => {
             let zoom_mode = app.config.zoom_mode;
             let viewport = app.viewport_size;
             let pipeline = app.pipeline.clone();
@@ -159,19 +163,21 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     viewer.thumbs.insert(path.clone(), thumb.clone(), cost);
                     // Show as placeholder if this is the image being waited on.
                     if viewer.nav.current() == path && viewer.pending_since.is_some() {
-                        show_placeholder(viewer, thumb, zoom_mode, viewport);
+                        show_placeholder(viewer, &path, thumb, zoom_mode, viewport);
                     }
-                    Task::none()
                 }
-                Err(MediaError::Cancelled)
-                    if viewer.nav.current() == path && viewer.pending_since.is_some() =>
-                {
-                    fire_thumb(&pipeline, viewer, path)
+                Err(_) => {
+                    // An urgent probe finding no EXIF preview is normal. The
+                    // background fallback will still thumbnail the file. Only
+                    // a failed background attempt writes the file off.
+                    if urgency == ThumbUrgency::Background {
+                        viewer.failed_thumbs.insert(path.clone());
+                    }
                 }
-                // No embedded thumbnail (e.g. PNGs) or unreadable prefix:
-                // the full load is already on its way, nothing to surface.
-                Err(_) => Task::none(),
             }
+
+            // Keep the background thumbnailer chain going.
+            Task::batch(fire_thumbnailer(&pipeline, viewer, 1))
         }
 
         Message::FileSizeProbed(path, size) => {
@@ -214,6 +220,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     allocation: alloc,
                     original_size: (size.width, size.height),
                 };
+                viewer.displayed_path = Some(viewer.nav.current().to_path_buf());
                 viewer.pending_since = None;
             }
 
@@ -550,8 +557,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             save_config(app)
         }
 
-        Message::TogglePixelatedZoom => {
-            app.config.pixelated_zoom = !app.config.pixelated_zoom;
+        Message::ToggleCrispPixels => {
+            app.config.crisp_pixels = !app.config.crisp_pixels;
             save_config(app)
         }
 
@@ -678,11 +685,19 @@ fn open_viewer(app: &mut App, nav: Nav, source: Source) -> Task<Message> {
     if viewer.is_fs() && gif::is_gif(&current) {
         tasks.push(viewer.gif_player.decode_current(&current).map(Message::Gif));
     } else {
-        tasks.push(fire_thumb(&pipeline, &mut viewer, current.clone()));
+        tasks.push(fire_thumb(
+            &pipeline,
+            &mut viewer,
+            current.clone(),
+            ThumbUrgency::Urgent,
+        ));
         tasks.push(fire_load(&pipeline, &mut viewer, current, Lane::Current));
     }
     tasks.extend(fire_prefetch(&pipeline, &mut viewer, depth));
     tasks.extend(fire_visible_thumbs(&pipeline, &mut viewer, window_w));
+    // Background-thumbnail the whole directory so the filmstrip and
+    // placeholders are warm everywhere, not just near the cursor.
+    tasks.extend(fire_thumbnailer(&pipeline, &mut viewer, 3));
 
     app.session = Session::Viewing(Box::new(viewer));
     Task::batch(tasks)
@@ -795,16 +810,21 @@ fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
         }
     } else if let Some(cached) = viewer.cache.get(&current).cloned() {
         // Instant display, the common case within the prefetch window.
-        show_loaded(viewer, cached, zoom_mode, viewport);
+        show_loaded(viewer, &current, cached, zoom_mode, viewport);
     } else {
         viewer.pending_since = Some(Instant::now());
         // Blurred placeholder, instantly from the thumb cache or within
         // milliseconds from the file's embedded EXIF thumbnail. The image
         // area tracks the cursor even when full decodes can't keep up.
         if let Some(thumb) = viewer.thumbs.get(&current).cloned() {
-            show_placeholder(viewer, thumb, zoom_mode, viewport);
+            show_placeholder(viewer, &current, thumb, zoom_mode, viewport);
         } else {
-            tasks.push(fire_thumb(&pipeline, viewer, current.clone()));
+            tasks.push(fire_thumb(
+                &pipeline,
+                viewer,
+                current.clone(),
+                ThumbUrgency::Urgent,
+            ));
         }
         tasks.push(fire_load(&pipeline, viewer, current, Lane::Current));
     }
@@ -836,20 +856,21 @@ fn fire_visible_thumbs(
 ) -> Vec<Task<Message>> {
     let range =
         ui::filmstrip::visible_range(viewer.filmstrip_scroll_x, viewport_w, viewer.nav.len());
-    let is_fs = viewer.is_fs();
-    let paths: Vec<PathBuf> = viewer.nav.files()[range]
-        .iter()
-        .filter(|p| !(is_fs && gif::is_gif(p)))
-        .cloned()
-        .collect();
+    let paths: Vec<PathBuf> = viewer.nav.files()[range].to_vec();
     paths
         .into_iter()
-        .map(|p| fire_thumb(pipeline, viewer, p))
+        .map(|p| fire_thumb(pipeline, viewer, p, ThumbUrgency::Background))
         .collect()
 }
 
 /// Put a loaded image on screen, computing zoom from its true dimensions.
-fn show_loaded(viewer: &mut Viewer, image: CachedImage, zoom_mode: ZoomMode, viewport: Size) {
+fn show_loaded(
+    viewer: &mut Viewer,
+    path: &std::path::Path,
+    image: CachedImage,
+    zoom_mode: ZoomMode,
+    viewport: Size,
+) {
     let (w, h) = image.original_size;
     if !viewer.manual_zoom || zoom_mode != ZoomMode::LockZoomRatio {
         viewer.zoom = compute_zoom(zoom_mode, w, h, viewport);
@@ -859,37 +880,69 @@ fn show_loaded(viewer: &mut Viewer, image: CachedImage, zoom_mode: ZoomMode, vie
         allocation: image.allocation,
         original_size: image.original_size,
     };
+    viewer.displayed_path = Some(path.to_path_buf());
     viewer.pending_since = None;
 }
 
 /// Put a blurred thumbnail on screen while the full image decodes. Zoom is
 /// computed from the true dimensions, so geometry is identical when the
 /// full image swaps in, no jump. The load stays pending (spinner included).
-fn show_placeholder(viewer: &mut Viewer, thumb: Thumb, zoom_mode: ZoomMode, viewport: Size) {
+fn show_placeholder(
+    viewer: &mut Viewer,
+    path: &std::path::Path,
+    thumb: Thumb,
+    zoom_mode: ZoomMode,
+    viewport: Size,
+) {
     let (w, h) = thumb.original_size;
     if !viewer.manual_zoom || zoom_mode != ZoomMode::LockZoomRatio {
         viewer.zoom = compute_zoom(zoom_mode, w, h, viewport);
     }
     viewer.pan = (0.0, 0.0);
     viewer.displayed = DisplayedImage::Placeholder(thumb);
+    viewer.displayed_path = Some(path.to_path_buf());
 }
 
-/// Fire an EXIF-thumbnail probe for `path` unless one is cached/in flight.
-fn fire_thumb(pipeline: &Pipeline, viewer: &mut Viewer, path: PathBuf) -> Task<Message> {
-    if viewer.thumbs.contains(&path) || viewer.in_flight_thumbs.contains(&path) {
+/// Fire a thumbnail job for `path` unless one is cached, in flight, or
+/// known to fail.
+fn fire_thumb(
+    pipeline: &Pipeline,
+    viewer: &mut Viewer,
+    path: PathBuf,
+    urgency: ThumbUrgency,
+) -> Task<Message> {
+    if viewer.thumbs.contains(&path)
+        || viewer.in_flight_thumbs.contains(&path)
+        || viewer.failed_thumbs.contains(&path)
+    {
         return Task::none();
     }
     viewer.in_flight_thumbs.insert(path.clone());
 
-    let load = pipeline.load_thumb(viewer.source.clone(), path.clone(), pipeline.generation());
+    let load = pipeline.load_thumb(viewer.source.clone(), path.clone(), urgency);
     Task::perform(load, move |result| Message::ThumbLoaded {
         path: path.clone(),
+        urgency,
         result: result.map(|data| Thumb {
             handle: Handle::from_rgba(data.width, data.height, data.pixels),
             size: (data.width, data.height),
             original_size: data.original_size,
         }),
     })
+}
+
+/// Start (or continue) background thumbnailing: up to `chains` parallel
+/// job streams that work outward from the cursor until every file in the
+/// directory has a thumbnail.
+fn fire_thumbnailer(pipeline: &Pipeline, viewer: &mut Viewer, chains: usize) -> Vec<Task<Message>> {
+    let mut tasks = Vec::new();
+    for _ in 0..chains {
+        let Some(path) = viewer.next_unthumbed() else {
+            break;
+        };
+        tasks.push(fire_thumb(pipeline, viewer, path, ThumbUrgency::Background));
+    }
+    tasks
 }
 
 /// Fire a pipeline load for `path` unless it's already cached or in flight.

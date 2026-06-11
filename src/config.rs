@@ -79,7 +79,7 @@ pub struct AppConfig {
     pub zoom_mode: ZoomMode,
     /// Render with nearest-neighbor sampling when zoomed past 100%,
     /// crisp pixels for pixel art instead of smoothing.
-    pub pixelated_zoom: bool,
+    pub crisp_pixels: bool,
     /// Whether the toolbar is visible.
     pub show_toolbar: bool,
     /// Whether the filmstrip is visible.
@@ -97,7 +97,7 @@ impl Default for AppConfig {
             cache_budget_mb: 512,
             theme: ThemeChoice::default(),
             zoom_mode: ZoomMode::default(),
-            pixelated_zoom: false,
+            crisp_pixels: false,
             show_toolbar: true,
             show_filmstrip: true,
             show_slider: true,
@@ -181,7 +181,7 @@ mod tests {
             cache_budget_mb: 256,
             theme: ThemeChoice::Light,
             zoom_mode: ZoomMode::ScaleToFit,
-            pixelated_zoom: true,
+            crisp_pixels: true,
             show_toolbar: false,
             show_filmstrip: true,
             show_slider: false,

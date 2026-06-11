@@ -9,10 +9,10 @@
 use std::io::Cursor;
 
 use exif::{In, Tag};
-use image::ImageReader;
 use image::metadata::Orientation;
+use image::{DynamicImage, ImageDecoder, ImageReader};
 
-use super::ThumbData;
+use super::{THUMB_DIM, ThumbData};
 
 /// How much of the file to read for thumbnail probing. EXIF lives at the
 /// start, and 256 KiB comfortably covers the APP1 segment and the SOF header.
@@ -70,6 +70,29 @@ pub fn thumb_from_prefix(prefix: &[u8]) -> Option<ThumbData> {
         width: tw,
         height: th,
         pixels: rgba.into_raw(),
+        original_size,
+    })
+}
+
+/// Decode a whole file and downscale it to a thumbnail, the fallback for
+/// images without an embedded EXIF preview (PNGs, screenshots, GIFs).
+/// Much heavier than the prefix probe, reserved for background work.
+pub fn thumb_from_bytes(bytes: &[u8]) -> Option<ThumbData> {
+    let reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let mut decoder = reader.into_decoder().ok()?;
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let mut img = DynamicImage::from_decoder(decoder).ok()?;
+    img.apply_orientation(orientation);
+
+    let original_size = (img.width(), img.height());
+    let thumb = img.thumbnail(THUMB_DIM, THUMB_DIM).into_rgba8();
+    let (width, height) = thumb.dimensions();
+    Some(ThumbData {
+        width,
+        height,
+        pixels: thumb.into_raw(),
         original_size,
     })
 }
@@ -203,5 +226,31 @@ mod tests {
         // Has EXIF (orientation only) but no IFD1 thumbnail.
         let plain = encode_jpeg(64, 32, 99);
         assert!(thumb_from_prefix(&plain).is_none());
+    }
+
+    #[test]
+    fn thumb_from_bytes_decodes_and_downscales_png() {
+        let img = image::RgbaImage::from_pixel(600, 300, image::Rgba([7, 8, 9, 255]));
+        let mut out = Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+
+        let thumb = thumb_from_bytes(&out.into_inner()).expect("png should decode");
+        assert_eq!(thumb.original_size, (600, 300));
+        assert_eq!((thumb.width, thumb.height), (THUMB_DIM, THUMB_DIM / 2));
+    }
+
+    #[test]
+    fn thumb_from_bytes_decodes_gif_first_frame() {
+        let img = image::RgbaImage::from_pixel(40, 20, image::Rgba([1, 2, 3, 255]));
+        let mut out = Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Gif).unwrap();
+
+        let thumb = thumb_from_bytes(&out.into_inner()).expect("gif should decode");
+        assert_eq!(thumb.original_size, (40, 20));
+    }
+
+    #[test]
+    fn thumb_from_bytes_rejects_garbage() {
+        assert!(thumb_from_bytes(b"definitely not an image").is_none());
     }
 }

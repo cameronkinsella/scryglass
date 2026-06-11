@@ -33,7 +33,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                             allocation.handle(),
                             (texture.width, texture.height),
                             *original_size,
-                            app.config.pixelated_zoom,
+                            app.config.crisp_pixels,
                         )
                     }
                     DisplayedImage::Placeholder(thumb) => {
@@ -121,7 +121,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         app.config.zoom_mode,
         layout_vis,
         app.config.theme == crate::config::ThemeChoice::Light,
-        app.config.pixelated_zoom,
+        app.config.crisp_pixels,
     ) {
         column![dropdown]
             .width(Length::Fill)
@@ -154,7 +154,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
     };
 
     // Loading spinner: appears only after a grace period so fast loads
-    // never flash UI.
+    // never flash UI. When the pixels on screen still belong to a previous
+    // image (no placeholder available yet), a dim scrim makes that obvious
+    // instead of letting the image area silently lag the title and slider.
     let spinner_overlay: Element<'_, Message> = match app.viewer() {
         Some(viewer)
             if viewer
@@ -165,7 +167,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 .pending_since
                 .map(|since| since.elapsed())
                 .unwrap_or_default();
-            center(ui::spinner::spinner(elapsed)).into()
+            let overlay = center(ui::spinner::spinner(elapsed));
+            if viewer.display_is_stale() {
+                overlay.style(ui::theme::stale_scrim).into()
+            } else {
+                overlay.into()
+            }
         }
         _ => column![].width(Length::Fill).height(Length::Fill).into(),
     };

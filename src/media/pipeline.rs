@@ -156,35 +156,55 @@ impl Pipeline {
     }
 }
 
+/// How soon a thumbnail is needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThumbUrgency {
+    /// Placeholder for the image on screen right now: skips the queue and
+    /// only tries the cheap EXIF prefix probe (the full decode is already
+    /// racing on the current lane).
+    Urgent,
+    /// Filmstrip/background work: queued on the thumb lane, and falls back
+    /// to a full decode when there's no embedded preview.
+    Background,
+}
+
 impl Pipeline {
-    /// Probe a file prefix for an embedded EXIF thumbnail. Fast enough
-    /// (a few hundred KiB read + a tiny decode) to provide a placeholder
-    /// while scrubbing, even over slow storage.
+    /// Produce a thumbnail for `path`. Thumbnails are never cancelled by
+    /// navigation. Every result is useful to the filmstrip eventually.
     pub fn load_thumb(
         &self,
         source: Source,
         path: PathBuf,
-        generation: u64,
+        urgency: ThumbUrgency,
     ) -> impl Future<Output = Result<ThumbData, MediaError>> + Send + 'static {
-        let live = self.generation.clone();
-        let semaphore = self.thumb_lane.clone();
+        let semaphore = match urgency {
+            ThumbUrgency::Urgent => None,
+            ThumbUrgency::Background => Some(self.thumb_lane.clone()),
+        };
 
         async move {
-            let _permit = semaphore
-                .acquire_owned()
-                .await
-                .map_err(|_| MediaError::Cancelled)?;
-            if live.load(Ordering::SeqCst) != generation {
-                return Err(MediaError::Cancelled);
-            }
+            let _permit = match semaphore {
+                Some(s) => Some(s.acquire_owned().await.map_err(|_| MediaError::Cancelled)?),
+                None => None,
+            };
 
+            // Cheap path: embedded EXIF preview from the file prefix.
             let prefix = source.read_start(&path, thumbs::PREFIX_LEN).await?;
-            if live.load(Ordering::SeqCst) != generation {
-                return Err(MediaError::Cancelled);
+            let from_prefix =
+                tokio::task::spawn_blocking(move || thumbs::thumb_from_prefix(&prefix))
+                    .await
+                    .map_err(|e| MediaError::Decode(e.to_string()))?;
+            if let Some(thumb) = from_prefix {
+                return Ok(thumb);
+            }
+            if urgency == ThumbUrgency::Urgent {
+                return Err(MediaError::Unsupported);
             }
 
+            // Background fallback: decode the whole file and downscale.
+            let bytes = source.read_all(&path).await?;
             tokio::task::spawn_blocking(move || {
-                thumbs::thumb_from_prefix(&prefix).ok_or(MediaError::Unsupported)
+                thumbs::thumb_from_bytes(&bytes).ok_or(MediaError::Unsupported)
             })
             .await
             .map_err(|e| MediaError::Decode(e.to_string()))?
@@ -303,13 +323,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_thumb_returns_unsupported_without_embedded_thumbnail() {
+    async fn urgent_thumb_fails_fast_without_embedded_preview() {
         let dir = TempDir::new().unwrap();
         let path = write_png(&dir, "a.png", 4, 2);
         let pipeline = Pipeline::new();
-        let generation = pipeline.generation();
-        let result = pipeline.load_thumb(Source::Fs, path, generation).await;
+        let result = pipeline
+            .load_thumb(Source::Fs, path, ThumbUrgency::Urgent)
+            .await;
         assert!(matches!(result, Err(MediaError::Unsupported)));
+    }
+
+    #[tokio::test]
+    async fn background_thumb_falls_back_to_full_decode() {
+        let dir = TempDir::new().unwrap();
+        let path = write_png(&dir, "a.png", 600, 300);
+        let pipeline = Pipeline::new();
+        let thumb = pipeline
+            .load_thumb(Source::Fs, path, ThumbUrgency::Background)
+            .await
+            .expect("fallback should produce a thumbnail");
+        assert_eq!(thumb.original_size, (600, 300));
     }
 
     #[tokio::test]

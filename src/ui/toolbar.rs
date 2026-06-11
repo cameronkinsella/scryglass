@@ -63,7 +63,7 @@ pub fn dropdown<'a>(
     current_zoom_mode: ZoomMode,
     layout_vis: LayoutVisibility,
     light_theme: bool,
-    pixelated_zoom: bool,
+    crisp_pixels: bool,
 ) -> Option<Element<'a, Message>> {
     let open = open_menu?;
 
@@ -130,14 +130,14 @@ pub fn dropdown<'a>(
             items.push(rule::horizontal(1).into());
             items.push(
                 checkable(
-                    "Pixelated zoom",
-                    pixelated_zoom,
-                    Message::TogglePixelatedZoom,
+                    "Crisp pixels when zoomed",
+                    crisp_pixels,
+                    Message::ToggleCrispPixels,
                 )
                 .into(),
             );
 
-            let panel = container(column(items).spacing(1).width(190))
+            let panel = container(column(items).spacing(1).width(200))
                 .padding(Padding::from(4))
                 .style(theme::panel);
 

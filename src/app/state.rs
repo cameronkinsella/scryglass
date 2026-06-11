@@ -109,6 +109,12 @@ pub struct Viewer {
     pub in_flight: HashSet<PathBuf>,
     /// Paths with a thumbnail probe in flight.
     pub in_flight_thumbs: HashSet<PathBuf>,
+    /// Paths whose background thumbnail attempt failed (corrupt or
+    /// undecodable), never re-picked by the thumbnailer.
+    pub failed_thumbs: HashSet<PathBuf>,
+    /// Which file the image area currently shows (full or placeholder).
+    /// `None` until the first image appears.
+    pub displayed_path: Option<PathBuf>,
     /// When the current image's load started, if it isn't displayed yet.
     /// Drives the loading spinner (shown only after a grace period).
     pub pending_since: Option<Instant>,
@@ -143,6 +149,8 @@ impl Viewer {
             thumbs: ImageCache::new(THUMB_BUDGET_BYTES),
             in_flight: HashSet::new(),
             in_flight_thumbs: HashSet::new(),
+            failed_thumbs: HashSet::new(),
+            displayed_path: None,
             pending_since: Some(Instant::now()),
             held_direction: None,
             gif_player,
@@ -168,6 +176,31 @@ impl Viewer {
         matches!(self.source, Source::Fs)
     }
 
+    /// True when the image area is not showing the file under the cursor
+    /// (e.g. a previous image held during a slow load).
+    pub fn display_is_stale(&self) -> bool {
+        self.displayed_path.as_deref() != Some(self.nav.current())
+    }
+
+    /// The next file the background thumbnailer should work on: scans
+    /// forward from the cursor (wrapping) for a file with no thumbnail,
+    /// none in flight, and no full load underway (those yield a thumbnail
+    /// as a by-product).
+    pub fn next_unthumbed(&self) -> Option<PathBuf> {
+        let files = self.nav.files();
+        let len = files.len();
+        let start = self.nav.cursor();
+        (0..len)
+            .map(|i| &files[(start + i) % len])
+            .find(|p| {
+                !self.thumbs.contains(p)
+                    && !self.in_flight_thumbs.contains(*p)
+                    && !self.failed_thumbs.contains(*p)
+                    && !self.in_flight.contains(*p)
+            })
+            .cloned()
+    }
+
     /// The on-disk file behind the current image: the file itself, or the
     /// archive containing it. Used by shell integration (reveal, properties).
     pub fn current_disk_path(&self) -> PathBuf {
@@ -190,4 +223,50 @@ pub struct DragState {
 pub enum Direction {
     Forward,
     Backward,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn test_viewer(names: &[&str], cursor: usize) -> Viewer {
+        let files: Vec<PathBuf> = names.iter().map(PathBuf::from).collect();
+        let start = files[cursor].clone();
+        let nav = Nav::new(files, &start).unwrap();
+        Viewer::new(nav, Source::Fs, GifPlayer::new(), 1024)
+    }
+
+    #[test]
+    fn next_unthumbed_scans_forward_from_cursor_and_wraps() {
+        let viewer = test_viewer(&["a.png", "b.png", "c.png"], 1);
+        assert_eq!(viewer.next_unthumbed(), Some(PathBuf::from("b.png")));
+    }
+
+    #[test]
+    fn next_unthumbed_skips_done_in_flight_and_failed() {
+        let mut viewer = test_viewer(&["a.png", "b.png", "c.png", "d.png"], 0);
+        viewer.in_flight_thumbs.insert("a.png".into());
+        viewer.failed_thumbs.insert("b.png".into());
+        viewer.in_flight.insert("c.png".into());
+        assert_eq!(viewer.next_unthumbed(), Some(PathBuf::from("d.png")));
+    }
+
+    #[test]
+    fn next_unthumbed_returns_none_when_exhausted() {
+        let mut viewer = test_viewer(&["a.png"], 0);
+        viewer.failed_thumbs.insert("a.png".into());
+        assert_eq!(viewer.next_unthumbed(), None);
+    }
+
+    #[test]
+    fn display_is_stale_until_current_is_shown() {
+        let mut viewer = test_viewer(&["a.png", "b.png"], 0);
+        assert!(viewer.display_is_stale());
+        viewer.displayed_path = Some(PathBuf::from("a.png"));
+        assert!(!viewer.display_is_stale());
+        viewer.nav.next();
+        assert!(viewer.display_is_stale());
+        assert_eq!(viewer.displayed_path.as_deref(), Some(Path::new("a.png")));
+    }
 }
