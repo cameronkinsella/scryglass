@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::AsyncReadExt;
 use tokio::sync::Semaphore;
 
+use super::archive::ArchiveIndex;
 use super::registry::{self, DecodeOpts};
 use super::{DecodedMedia, MediaError, ThumbData, thumbs};
 
@@ -27,6 +28,50 @@ pub enum Lane {
     Current,
     /// A neighbor being warmed up in the background.
     Prefetch,
+}
+
+/// Where a viewer session's bytes come from: the filesystem, or entries
+/// inside an opened archive. Navigation paths are filesystem paths in the
+/// first case and archive entry names in the second.
+#[derive(Debug, Clone)]
+pub enum Source {
+    Fs,
+    Archive(Arc<ArchiveIndex>),
+}
+
+impl Source {
+    /// Read a whole file/entry.
+    async fn read_all(&self, path: &PathBuf) -> Result<Vec<u8>, MediaError> {
+        match self {
+            Source::Fs => tokio::fs::read(path)
+                .await
+                .map_err(|e| MediaError::Read(e.to_string())),
+            Source::Archive(index) => {
+                let index = index.clone();
+                let entry = path.clone();
+                tokio::task::spawn_blocking(move || index.read(&entry))
+                    .await
+                    .map_err(|e| MediaError::Read(e.to_string()))?
+                    .map_err(|e| MediaError::Read(e.to_string()))
+            }
+        }
+    }
+
+    /// Read up to `n` bytes from the start of a file/entry.
+    async fn read_start(&self, path: &PathBuf, n: usize) -> Result<Vec<u8>, MediaError> {
+        match self {
+            Source::Fs => read_prefix(path, n)
+                .await
+                .map_err(|e| MediaError::Read(e.to_string())),
+            // Archive entries decompress as a stream anyway, so read fully
+            // and truncate.
+            Source::Archive(_) => {
+                let mut bytes = self.read_all(path).await?;
+                bytes.truncate(n);
+                Ok(bytes)
+            }
+        }
+    }
 }
 
 /// Shared load orchestrator. Cheap to clone.
@@ -65,6 +110,7 @@ impl Pipeline {
     /// generation supersedes this load before it finishes decoding.
     pub fn load(
         &self,
+        source: Source,
         path: PathBuf,
         opts: DecodeOpts,
         lane: Lane,
@@ -87,9 +133,7 @@ impl Pipeline {
 
             // Async read: a stalled read parks here without occupying
             // a decode worker or blocking thread.
-            let bytes = tokio::fs::read(&path)
-                .await
-                .map_err(|e| MediaError::Read(e.to_string()))?;
+            let bytes = source.read_all(&path).await?;
             if live.load(Ordering::SeqCst) != generation {
                 return Err(MediaError::Cancelled);
             }
@@ -118,6 +162,7 @@ impl Pipeline {
     /// while scrubbing, even over slow storage.
     pub fn load_thumb(
         &self,
+        source: Source,
         path: PathBuf,
         generation: u64,
     ) -> impl Future<Output = Result<ThumbData, MediaError>> + Send + 'static {
@@ -133,9 +178,7 @@ impl Pipeline {
                 return Err(MediaError::Cancelled);
             }
 
-            let prefix = read_prefix(&path, thumbs::PREFIX_LEN)
-                .await
-                .map_err(|e| MediaError::Read(e.to_string()))?;
+            let prefix = source.read_start(&path, thumbs::PREFIX_LEN).await?;
             if live.load(Ordering::SeqCst) != generation {
                 return Err(MediaError::Cancelled);
             }
@@ -197,7 +240,13 @@ mod tests {
         let generation = pipeline.generation();
 
         let media = pipeline
-            .load(path, DecodeOpts::default(), Lane::Current, generation)
+            .load(
+                Source::Fs,
+                path,
+                DecodeOpts::default(),
+                Lane::Current,
+                generation,
+            )
             .await
             .unwrap();
         let DecodedMedia::Static(img) = media;
@@ -215,7 +264,13 @@ mod tests {
         pipeline.bump_generation();
 
         let result = pipeline
-            .load(path, DecodeOpts::default(), Lane::Current, generation)
+            .load(
+                Source::Fs,
+                path,
+                DecodeOpts::default(),
+                Lane::Current,
+                generation,
+            )
             .await;
         assert!(matches!(result, Err(MediaError::Cancelled)));
     }
@@ -232,8 +287,13 @@ mod tests {
             .map(|_| pipeline.current_lane.clone().try_acquire_owned().unwrap())
             .collect();
 
-        let task =
-            tokio::spawn(pipeline.load(path, DecodeOpts::default(), Lane::Current, generation));
+        let task = tokio::spawn(pipeline.load(
+            Source::Fs,
+            path,
+            DecodeOpts::default(),
+            Lane::Current,
+            generation,
+        ));
 
         pipeline.bump_generation();
         drop(held);
@@ -248,7 +308,7 @@ mod tests {
         let path = write_png(&dir, "a.png", 4, 2);
         let pipeline = Pipeline::new();
         let generation = pipeline.generation();
-        let result = pipeline.load_thumb(path, generation).await;
+        let result = pipeline.load_thumb(Source::Fs, path, generation).await;
         assert!(matches!(result, Err(MediaError::Unsupported)));
     }
 
@@ -258,6 +318,7 @@ mod tests {
         let generation = pipeline.generation();
         let result = pipeline
             .load(
+                Source::Fs,
                 PathBuf::from("definitely/not/here.png"),
                 DecodeOpts::default(),
                 Lane::Current,
@@ -275,7 +336,13 @@ mod tests {
         let pipeline = Pipeline::new();
         let generation = pipeline.generation();
         let result = pipeline
-            .load(path, DecodeOpts::default(), Lane::Current, generation)
+            .load(
+                Source::Fs,
+                path,
+                DecodeOpts::default(),
+                Lane::Current,
+                generation,
+            )
             .await;
         assert!(matches!(result, Err(MediaError::Unsupported)));
     }

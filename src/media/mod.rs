@@ -5,6 +5,7 @@
 //! never blocks anything), stale loads are cancellable, EXIF orientation is
 //! applied, and oversized images are downscaled before GPU upload.
 
+pub mod archive;
 pub mod cache;
 pub mod decoders;
 pub mod pipeline;

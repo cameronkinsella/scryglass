@@ -8,6 +8,7 @@ use iced::widget::image::{Allocation, Handle};
 
 use crate::gif::GifPlayer;
 use crate::media::cache::ImageCache;
+use crate::media::pipeline::Source;
 use crate::nav::Nav;
 
 /// Thumbnail cache budget. Thumbs are ~256 KB each, so this holds 500+.
@@ -89,9 +90,11 @@ impl DisplayedImage {
     }
 }
 
-/// All state tied to an open directory of images.
+/// All state tied to an open directory (or archive) of images.
 pub struct Viewer {
     pub nav: Nav,
+    /// Where this session's bytes come from (filesystem or an archive).
+    pub source: Source,
     /// What the image area shows. Never reset to `None` during navigation,
     /// the old image stays visible until the new one is ready
     /// (flicker prevention).
@@ -129,11 +132,12 @@ pub struct Viewer {
 }
 
 impl Viewer {
-    /// Fresh viewer for a newly scanned directory, with the first load and
-    /// metadata probe pending.
-    pub fn new(nav: Nav, gif_player: GifPlayer, cache_budget_bytes: usize) -> Self {
+    /// Fresh viewer for a newly scanned directory or archive, with the
+    /// first load and metadata probe pending.
+    pub fn new(nav: Nav, source: Source, gif_player: GifPlayer, cache_budget_bytes: usize) -> Self {
         Self {
             nav,
+            source,
             displayed: DisplayedImage::None,
             cache: ImageCache::new(cache_budget_bytes),
             thumbs: ImageCache::new(THUMB_BUDGET_BYTES),
@@ -157,6 +161,20 @@ impl Viewer {
         let mut pinned: HashSet<PathBuf> = self.nav.peek_around(depth).into_iter().collect();
         pinned.insert(self.nav.current().to_path_buf());
         pinned
+    }
+
+    /// True when this session navigates real files (not archive entries).
+    pub fn is_fs(&self) -> bool {
+        matches!(self.source, Source::Fs)
+    }
+
+    /// The on-disk file behind the current image: the file itself, or the
+    /// archive containing it. Used by shell integration (reveal, properties).
+    pub fn current_disk_path(&self) -> PathBuf {
+        match &self.source {
+            Source::Fs => self.nav.current().to_path_buf(),
+            Source::Archive(index) => index.archive_path.clone(),
+        }
     }
 }
 

@@ -2,12 +2,14 @@
 //! classification helpers.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use iced::Size;
 
 use crate::config::ZoomMode;
 use crate::gif::GifMessage;
 use crate::media::MediaError;
+use crate::media::archive::ArchiveIndex;
 
 use super::state::{LoadedMedia, Thumb};
 
@@ -15,6 +17,8 @@ use super::state::{LoadedMedia, Thumb};
 pub enum Message {
     FileDropped(PathBuf),
     DirectoryScanned(PathBuf, Result<Vec<PathBuf>, String>),
+    /// An archive was opened and its image entries listed.
+    ArchiveScanned(PathBuf, Result<Arc<ArchiveIndex>, String>),
     /// A pipeline load finished (current or prefetch), successfully or not.
     MediaLoaded {
         path: PathBuf,
@@ -151,6 +155,7 @@ pub fn is_menu_message(msg: &Message) -> bool {
             | Message::FilmstripScrolled(_)
             | Message::Gif(_)
             | Message::DirectoryScanned(_, _)
+            | Message::ArchiveScanned(_, _)
             | Message::FileDialogResult(_)
             | Message::NextReleased
             | Message::PrevReleased
@@ -180,6 +185,7 @@ pub fn is_context_menu_message(msg: &Message) -> bool {
             | Message::FilmstripScrolled(_)
             | Message::Gif(_)
             | Message::DirectoryScanned(_, _)
+            | Message::ArchiveScanned(_, _)
             | Message::FileDialogResult(_)
             | Message::NextReleased
             | Message::PrevReleased

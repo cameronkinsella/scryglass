@@ -17,8 +17,11 @@ pub struct ImageRs;
 
 impl ImageFormat for ImageRs {
     fn extensions(&self) -> &'static [&'static str] {
+        // "gif" decodes as a static first frame. Filesystem GIFs are
+        // routed to the animating GifPlayer before reaching the registry,
+        // so this only serves GIFs inside archives.
         &[
-            "png", "jpg", "jpeg", "bmp", "webp", "tiff", "tif", "ico", "avif",
+            "png", "jpg", "jpeg", "bmp", "webp", "tiff", "tif", "ico", "avif", "gif",
         ]
     }
 
@@ -86,13 +89,14 @@ fn sniff(magic: &[u8]) -> bool {
     }
     let png = magic.starts_with(&[0x89, b'P', b'N', b'G']);
     let jpeg = magic.starts_with(&[0xFF, 0xD8, 0xFF]);
+    let gif = magic.starts_with(b"GIF8");
     let bmp = magic.starts_with(b"BM");
     let webp = magic.starts_with(b"RIFF") && &magic[8..12] == b"WEBP";
     let tiff = magic.starts_with(&[0x49, 0x49, 0x2A, 0x00])
         || magic.starts_with(&[0x4D, 0x4D, 0x00, 0x2A]);
     let ico = magic.starts_with(&[0x00, 0x00, 0x01, 0x00]);
     let avif = &magic[4..8] == b"ftyp" && &magic[8..12] == b"avif";
-    png || jpeg || bmp || webp || tiff || ico || avif
+    png || jpeg || gif || bmp || webp || tiff || ico || avif
 }
 
 #[cfg(test)]

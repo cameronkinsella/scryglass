@@ -11,10 +11,13 @@ use iced::time::Instant;
 use iced::widget::image::Handle;
 use iced::{Size, Task};
 
+use std::sync::Arc;
+
 use crate::cache;
 use crate::config::{AppConfig, ThemeChoice, ZoomMode};
 use crate::gif::{self, GifPlayer};
-use crate::media::pipeline::{Lane, Pipeline};
+use crate::media::archive::{self, ArchiveIndex};
+use crate::media::pipeline::{Lane, Pipeline, Source};
 use crate::media::registry::DecodeOpts;
 use crate::media::{DecodedMedia, MediaError};
 use crate::nav::{self, Nav};
@@ -51,37 +54,38 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::FileDropped(path) => open_path(path),
 
         Message::DirectoryScanned(start_file, Ok(files)) => match Nav::new(files, &start_file) {
-            Ok(nav) => {
-                let depth = app.config.prefetch_depth;
-                let budget = app.config.cache_budget_mb * 1024 * 1024;
-                let pipeline = app.pipeline.clone();
-
-                let mut viewer = Viewer::new(nav, GifPlayer::new(), budget);
-                let current = viewer.nav.current().to_path_buf();
-                let mut tasks = vec![probe_file_size(current.clone())];
-
-                if gif::is_gif(&current) {
-                    tasks.push(viewer.gif_player.decode_current(&current).map(Message::Gif));
-                } else {
-                    tasks.push(fire_thumb(&pipeline, &mut viewer, current.clone()));
-                    tasks.push(fire_load(&pipeline, &mut viewer, current, Lane::Current));
-                }
-                tasks.extend(fire_prefetch(&pipeline, &mut viewer, depth));
-                tasks.extend(fire_visible_thumbs(
-                    &pipeline,
-                    &mut viewer,
-                    app.window_size.width,
-                ));
-
-                app.session = Session::Viewing(Box::new(viewer));
-                Task::batch(tasks)
-            }
+            Ok(nav) => open_viewer(app, nav, Source::Fs),
             Err(e) => push_toast(app, ToastKind::Error, format!("Couldn't open: {e}")),
         },
 
         Message::DirectoryScanned(_start_file, Err(err)) => {
             push_toast(app, ToastKind::Error, format!("Couldn't open: {err}"))
         }
+
+        Message::ArchiveScanned(archive_path, Ok(index)) => {
+            let entries = index.image_entries();
+            let start = entries.first().cloned();
+            match start.and_then(|s| Nav::new(entries, &s).ok()) {
+                Some(nav) => open_viewer(app, nav, Source::Archive(index)),
+                None => push_toast(
+                    app,
+                    ToastKind::Error,
+                    format!(
+                        "{}: archive contains no supported images",
+                        archive_path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    ),
+                ),
+            }
+        }
+
+        Message::ArchiveScanned(_archive_path, Err(err)) => push_toast(
+            app,
+            ToastKind::Error,
+            format!("Couldn't open archive: {err}"),
+        ),
 
         Message::MediaLoaded { path, result } => {
             let zoom_mode = app.config.zoom_mode;
@@ -334,6 +338,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                             "Images",
                             &extensions.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                         )
+                        .add_filter(
+                            "Archives",
+                            &["zip", "cbz", "tar", "gz", "tgz", "7z", "cb7", "rar", "cbr"],
+                        )
                         .pick_file()
                         .await;
                     handle.map(|h| h.path().to_path_buf())
@@ -572,7 +580,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             let Some(viewer) = app.viewer() else {
                 return Task::none();
             };
-            let path = viewer.nav.current().to_path_buf();
+            let path = viewer.current_disk_path();
             let copy = Task::future(async move {
                 crate::platform::copy_image_to_clipboard(&path);
             })
@@ -588,7 +596,14 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             let Some(viewer) = app.viewer() else {
                 return Task::none();
             };
-            let path_str = viewer.nav.current().to_string_lossy().to_string();
+            let path_str = match &viewer.source {
+                Source::Fs => viewer.nav.current().to_string_lossy().to_string(),
+                Source::Archive(index) => format!(
+                    "{}/{}",
+                    index.archive_path.display(),
+                    viewer.nav.current().display()
+                ),
+            };
             Task::batch([
                 iced::clipboard::write(path_str),
                 push_toast(app, ToastKind::Info, "Path copied".to_string()),
@@ -617,7 +632,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             let Some(viewer) = app.viewer() else {
                 return Task::none();
             };
-            crate::platform::reveal_in_file_manager(viewer.nav.current());
+            crate::platform::reveal_in_file_manager(&viewer.current_disk_path());
             Task::none()
         }
 
@@ -626,7 +641,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             let Some(viewer) = app.viewer() else {
                 return Task::none();
             };
-            crate::platform::show_properties(viewer.nav.current());
+            crate::platform::show_properties(&viewer.current_disk_path());
             Task::none()
         }
     }
@@ -649,11 +664,52 @@ fn push_toast(app: &mut App, kind: ToastKind, text: String) -> Task<Message> {
     )
 }
 
+/// Build a fresh viewer over `nav` and fire the initial loads.
+fn open_viewer(app: &mut App, nav: Nav, source: Source) -> Task<Message> {
+    let depth = app.config.prefetch_depth;
+    let budget = app.config.cache_budget_mb * 1024 * 1024;
+    let window_w = app.window_size.width;
+    let pipeline = app.pipeline.clone();
+
+    let mut viewer = Viewer::new(nav, source, GifPlayer::new(), budget);
+    let current = viewer.nav.current().to_path_buf();
+    let mut tasks = vec![probe_size(&mut viewer, current.clone())];
+
+    if viewer.is_fs() && gif::is_gif(&current) {
+        tasks.push(viewer.gif_player.decode_current(&current).map(Message::Gif));
+    } else {
+        tasks.push(fire_thumb(&pipeline, &mut viewer, current.clone()));
+        tasks.push(fire_load(&pipeline, &mut viewer, current, Lane::Current));
+    }
+    tasks.extend(fire_prefetch(&pipeline, &mut viewer, depth));
+    tasks.extend(fire_visible_thumbs(&pipeline, &mut viewer, window_w));
+
+    app.session = Session::Viewing(Box::new(viewer));
+    Task::batch(tasks)
+}
+
 /// Shared logic for opening a path (from drop, dialog, or CLI argument).
 ///
 /// A file opens at that file within its parent directory. A directory
-/// opens at its first supported image.
+/// opens at its first supported image. An archive opens at its first
+/// image entry.
 pub fn open_path(path: PathBuf) -> Task<Message> {
+    if archive::is_archive(&path) {
+        return Task::perform(
+            async move {
+                let result = tokio::task::spawn_blocking({
+                    let p = path.clone();
+                    move || ArchiveIndex::open(&p).map(Arc::new)
+                })
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r.map_err(|e| e.to_string()));
+                (path, result)
+            },
+            |(path, result)| Message::ArchiveScanned(path, result),
+        );
+    }
+
     Task::perform(
         async move {
             let (dir, start) = if path.is_dir() {
@@ -728,9 +784,9 @@ fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
     viewer.gif_player.prune_cache(&keep);
 
     let current = viewer.nav.current().to_path_buf();
-    let mut tasks = vec![probe_file_size(current.clone())];
+    let mut tasks = vec![probe_size(viewer, current.clone())];
 
-    if gif::is_gif(&current) {
+    if viewer.is_fs() && gif::is_gif(&current) {
         viewer.pending_since = Some(Instant::now());
         if let Some(gif_task) = viewer.gif_player.try_start_from_cache(&current) {
             tasks.push(gif_task.map(Message::Gif));
@@ -780,9 +836,10 @@ fn fire_visible_thumbs(
 ) -> Vec<Task<Message>> {
     let range =
         ui::filmstrip::visible_range(viewer.filmstrip_scroll_x, viewport_w, viewer.nav.len());
+    let is_fs = viewer.is_fs();
     let paths: Vec<PathBuf> = viewer.nav.files()[range]
         .iter()
-        .filter(|p| !gif::is_gif(p))
+        .filter(|p| !(is_fs && gif::is_gif(p)))
         .cloned()
         .collect();
     paths
@@ -824,7 +881,7 @@ fn fire_thumb(pipeline: &Pipeline, viewer: &mut Viewer, path: PathBuf) -> Task<M
     }
     viewer.in_flight_thumbs.insert(path.clone());
 
-    let load = pipeline.load_thumb(path.clone(), pipeline.generation());
+    let load = pipeline.load_thumb(viewer.source.clone(), path.clone(), pipeline.generation());
     Task::perform(load, move |result| Message::ThumbLoaded {
         path: path.clone(),
         result: result.map(|data| Thumb {
@@ -844,7 +901,13 @@ fn fire_load(pipeline: &Pipeline, viewer: &mut Viewer, path: PathBuf, lane: Lane
     viewer.in_flight.insert(path.clone());
 
     let generation = pipeline.generation();
-    let load = pipeline.load(path.clone(), DecodeOpts::default(), lane, generation);
+    let load = pipeline.load(
+        viewer.source.clone(),
+        path.clone(),
+        DecodeOpts::default(),
+        lane,
+        generation,
+    );
 
     Task::perform(load, |r| r).then(move |result| match result {
         Ok(DecodedMedia::Static(img)) => {
@@ -883,13 +946,25 @@ fn fire_load(pipeline: &Pipeline, viewer: &mut Viewer, path: PathBuf, lane: Lane
 fn fire_prefetch(pipeline: &Pipeline, viewer: &mut Viewer, depth: usize) -> Vec<Task<Message>> {
     let mut tasks = Vec::new();
     for p in viewer.nav.peek_around(depth) {
-        if gif::is_gif(&p) {
+        if viewer.is_fs() && gif::is_gif(&p) {
             tasks.push(viewer.gif_player.prefetch_decode(&p).map(Message::Gif));
         } else {
             tasks.push(fire_load(pipeline, viewer, p, Lane::Prefetch));
         }
     }
     tasks
+}
+
+/// Resolve the current image's byte size: instantly from the archive
+/// index, or via an async stat for filesystem images.
+fn probe_size(viewer: &mut Viewer, path: PathBuf) -> Task<Message> {
+    match &viewer.source {
+        Source::Fs => probe_file_size(path),
+        Source::Archive(index) => {
+            viewer.current_file_size = index.entry_size(&path);
+            Task::none()
+        }
+    }
 }
 
 /// Fetch the file size off-thread, a stat on slow storage can stall for seconds and
