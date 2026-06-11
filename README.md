@@ -11,6 +11,7 @@ A lightweight, blazing-fast image viewer built with [iced](https://github.com/ic
 - **Zoom modes**: Auto, Lock Zoom Ratio, Scale to Width/Height/Fit/Fill, plus scroll-wheel zoom toward the cursor, drag-to-pan, and an optional pixelated mode for crisp pixel art past 100%
 - **Animated GIF support**: frames are decoded with proper disposal-method compositing and animated at their native frame rate
 - **EXIF aware**: orientation is applied, and embedded camera thumbnails power instant previews
+- **Persistent thumbnails, done right**: folders open warm across sessions, and cached thumbnails of deleted files are purged when their folder reopens, unused entries expire after 90 days, and the store is capped at 512 MB, all judged from local metadata, so sleeping external drives are never touched. Disable via the `disk_thumbs` config setting or build without the `disk-thumbs` feature
 - **"Open with…" support**: pass a file, folder, or archive as a CLI argument
 - **Drag-and-drop**: drop any image, folder, or archive to open it, and navigation wraps around
 - **Natural sorting**: `img2` comes before `img10`, like a file manager
