@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use iced::Size;
 
+use crate::anim::AnimMessage;
 use crate::config::{SortKey, ZoomMode};
-use crate::gif::GifMessage;
 use crate::media::MediaError;
 use crate::media::archive::ArchiveIndex;
 use crate::media::pipeline::ThumbUrgency;
@@ -38,7 +38,7 @@ pub enum Message {
     /// A toast's display time elapsed.
     DismissToast(u64),
     /// Wrapped GIF player message.
-    Gif(GifMessage),
+    Anim(AnimMessage),
     /// Navigate forward (initial press).
     Next,
     /// Navigate backward (initial press).
@@ -202,7 +202,7 @@ pub fn is_menu_message(msg: &Message) -> bool {
             | Message::Resorted(_)
             | Message::ExifLoaded(_, _)
             | Message::ViewRotated { .. }
-            | Message::Gif(_)
+            | Message::Anim(_)
             | Message::DirectoryScanned(_, _)
             | Message::ArchiveScanned(_, _)
             | Message::FileDialogResult(_)
@@ -235,7 +235,7 @@ pub fn is_context_menu_message(msg: &Message) -> bool {
             | Message::Resorted(_)
             | Message::ExifLoaded(_, _)
             | Message::ViewRotated { .. }
-            | Message::Gif(_)
+            | Message::Anim(_)
             | Message::DirectoryScanned(_, _)
             | Message::ArchiveScanned(_, _)
             | Message::FileDialogResult(_)

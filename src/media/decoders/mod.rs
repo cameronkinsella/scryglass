@@ -28,28 +28,35 @@ pub(crate) fn finish(img: DynamicImage, opts: &DecodeOpts) -> DecodedImage {
     };
 
     // Thumbnails come nearly free here: the pixels are already decoded.
-    let thumbnail = if img.width().max(img.height()) > crate::media::THUMB_DIM {
-        let t = img
+    // Always produced, even thumb-sized images need a filmstrip entry
+    // (the background thumbnailer skips files a full decode covers).
+    let rgba = img.into_rgba8();
+    let (width, height) = rgba.dimensions();
+    let thumbnail = if width.max(height) > crate::media::THUMB_DIM {
+        let t = image::DynamicImage::ImageRgba8(rgba.clone())
             .thumbnail(crate::media::THUMB_DIM, crate::media::THUMB_DIM)
             .into_rgba8();
         let (tw, th) = t.dimensions();
-        Some(crate::media::ThumbData {
+        crate::media::ThumbData {
             width: tw,
             height: th,
             pixels: t.into_raw(),
             original_size,
-        })
+        }
     } else {
-        None
+        crate::media::ThumbData {
+            width,
+            height,
+            pixels: rgba.as_raw().clone(),
+            original_size,
+        }
     };
 
-    let rgba = img.into_rgba8();
-    let (width, height) = rgba.dimensions();
     DecodedImage {
         width,
         height,
         pixels: rgba.into_raw(),
         original_size,
-        thumbnail,
+        thumbnail: Some(thumbnail),
     }
 }

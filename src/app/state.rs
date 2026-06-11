@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use iced::time::Instant;
 use iced::widget::image::{Allocation, Handle};
 
-use crate::gif::GifPlayer;
+use crate::anim::AnimPlayer;
 use crate::media::cache::ImageCache;
 use crate::media::pipeline::Source;
 use crate::nav::Nav;
@@ -57,11 +57,19 @@ impl Thumb {
     }
 }
 
-/// A finished pipeline load: the full image plus its derived thumbnail.
+/// A finished pipeline load: media ready to show plus its derived thumbnail.
 #[derive(Debug, Clone)]
-pub struct LoadedMedia {
-    pub image: CachedImage,
-    pub thumb: Option<Thumb>,
+pub enum LoadedMedia {
+    /// A still image, already uploaded to the GPU.
+    Static {
+        image: CachedImage,
+        thumb: Option<Thumb>,
+    },
+    /// A decoded animation, played frame-by-frame by the [`AnimPlayer`].
+    Animated {
+        anim: std::sync::Arc<crate::media::animation::AnimatedImage>,
+        thumb: Option<Thumb>,
+    },
 }
 
 /// What the image area is currently showing.
@@ -131,7 +139,7 @@ pub struct Viewer {
     /// Which direction key is currently held, and when the hold started.
     pub held_direction: Option<(Direction, Instant)>,
     /// Animated GIF player that handles decode cache and animation.
-    pub gif_player: GifPlayer,
+    pub anim_player: AnimPlayer,
     /// File size in bytes of the current image. `None` while the async
     /// metadata probe is in flight.
     pub current_file_size: Option<u64>,
@@ -158,7 +166,12 @@ pub struct Viewer {
 impl Viewer {
     /// Fresh viewer for a newly scanned directory or archive, with the
     /// first load and metadata probe pending.
-    pub fn new(nav: Nav, source: Source, gif_player: GifPlayer, cache_budget_bytes: usize) -> Self {
+    pub fn new(
+        nav: Nav,
+        source: Source,
+        anim_player: AnimPlayer,
+        cache_budget_bytes: usize,
+    ) -> Self {
         Self {
             nav,
             source,
@@ -173,7 +186,7 @@ impl Viewer {
             pending_nav: None,
             slider_drag: None,
             held_direction: None,
-            gif_player,
+            anim_player,
             current_file_size: None,
             zoom: 1.0,
             manual_zoom: false,
@@ -195,6 +208,7 @@ impl Viewer {
     }
 
     /// True when this session navigates real files (not archive entries).
+    #[allow(dead_code)] // file operations are filesystem-only
     pub fn is_fs(&self) -> bool {
         matches!(self.source, Source::Fs)
     }
@@ -202,7 +216,7 @@ impl Viewer {
     /// Whether anything can be put on screen for `path` right now:
     /// a decoded image, a thumbnail (blur), or a cached GIF.
     pub fn displayable(&self, path: &std::path::Path) -> bool {
-        self.cache.contains(path) || self.thumbs.contains(path) || self.gif_player.has_cached(path)
+        self.cache.contains(path) || self.thumbs.contains(path) || self.anim_player.has_cached(path)
     }
 
     /// The next file the background thumbnailer should work on: scans
@@ -268,7 +282,7 @@ mod tests {
         let files: Vec<PathBuf> = names.iter().map(PathBuf::from).collect();
         let start = files[cursor].clone();
         let nav = Nav::new(files, &start).unwrap();
-        Viewer::new(nav, Source::Fs, GifPlayer::new(), 1024)
+        Viewer::new(nav, Source::Fs, AnimPlayer::new(), 1024)
     }
 
     #[test]

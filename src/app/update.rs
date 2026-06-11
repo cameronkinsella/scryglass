@@ -13,9 +13,9 @@ use iced::{Size, Task};
 
 use std::sync::Arc;
 
+use crate::anim::{AnimMessage, AnimPlayer};
 use crate::cache;
 use crate::config::{AppConfig, ThemeChoice, ZoomMode};
-use crate::gif::{self, GifPlayer};
 use crate::media::archive::{self, ArchiveIndex};
 use crate::media::pipeline::{Lane, Pipeline, Source, ThumbUrgency};
 use crate::media::registry::DecodeOpts;
@@ -100,13 +100,12 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             viewer.in_flight.remove(&path);
 
             match result {
-                Ok(loaded) => {
+                Ok(LoadedMedia::Static { image, thumb }) => {
                     // A "stale" decode is a free prefetch, so cache it anyway.
-                    let image = loaded.image;
                     viewer
                         .cache
                         .insert(path.clone(), image.clone(), image.byte_cost());
-                    if let Some(thumb) = loaded.thumb {
+                    if let Some(thumb) = thumb {
                         let cost = thumb.byte_cost();
                         viewer.thumbs.insert(path.clone(), thumb, cost);
                     }
@@ -117,6 +116,24 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     viewer.cache.evict_over_budget(&pinned);
                     viewer.thumbs.evict_over_budget(&pinned);
                     resolve_pending_nav(app)
+                }
+                Ok(LoadedMedia::Animated { anim, thumb }) => {
+                    if let Some(thumb) = thumb {
+                        let cost = thumb.byte_cost();
+                        viewer.thumbs.insert(path.clone(), thumb, cost);
+                    }
+                    viewer.anim_player.insert(path.clone(), anim);
+                    // Start playback if this is the image on screen.
+                    let play = if viewer.nav.current() == path {
+                        viewer
+                            .anim_player
+                            .try_start_from_cache(&path)
+                            .map(|t| t.map(Message::Anim))
+                            .unwrap_or_else(Task::none)
+                    } else {
+                        Task::none()
+                    };
+                    Task::batch([play, resolve_pending_nav(app)])
                 }
                 Err(MediaError::Cancelled) => {
                     // Cancelled loads that are still wanted get re-fired with
@@ -215,7 +232,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
 
-        Message::Gif(gif_msg) => {
+        Message::Anim(anim_msg) => {
             let zoom_mode = app.config.zoom_mode;
             let viewport = app.viewport_size;
             let Some(viewer) = app.viewer_mut() else {
@@ -224,9 +241,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
             let is_first_frame = matches!(viewer.displayed, DisplayedImage::None)
                 || (viewer.pending_since.is_some()
-                    && matches!(&gif_msg, gif::GifMessage::FrameAllocated(..)));
+                    && matches!(&anim_msg, AnimMessage::FrameAllocated(..)));
 
-            let (task, allocation) = viewer.gif_player.update(gif_msg, viewer.nav.current());
+            let (task, allocation) = viewer.anim_player.update(anim_msg, viewer.nav.current());
 
             if let Some(alloc) = allocation {
                 let size = alloc.size();
@@ -243,7 +260,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             }
 
             // A pending move onto a GIF resolves once its decode lands.
-            Task::batch([task.map(Message::Gif), resolve_pending_nav(app)])
+            Task::batch([task.map(Message::Anim), resolve_pending_nav(app)])
         }
 
         // --- Initial press: always navigate + record hold start ---
@@ -1087,21 +1104,17 @@ fn open_viewer(app: &mut App, nav: Nav, source: Source) -> Task<Message> {
         None => Task::none(),
     };
 
-    let mut viewer = Viewer::new(nav, source, GifPlayer::new(), budget);
+    let mut viewer = Viewer::new(nav, source, AnimPlayer::new(), budget);
     let current = viewer.nav.current().to_path_buf();
     let mut tasks = vec![reconcile, probe_size(&mut viewer, current.clone())];
 
-    if viewer.is_fs() && gif::is_gif(&current) {
-        tasks.push(viewer.gif_player.decode_current(&current).map(Message::Gif));
-    } else {
-        tasks.push(fire_thumb(
-            &pipeline,
-            &mut viewer,
-            current.clone(),
-            ThumbUrgency::Urgent,
-        ));
-        tasks.push(fire_load(&pipeline, &mut viewer, current, Lane::Current));
-    }
+    tasks.push(fire_thumb(
+        &pipeline,
+        &mut viewer,
+        current.clone(),
+        ThumbUrgency::Urgent,
+    ));
+    tasks.push(fire_load(&pipeline, &mut viewer, current, Lane::Current));
     tasks.extend(fire_prefetch(&pipeline, &mut viewer, depth));
     tasks.extend(fire_visible_thumbs(&pipeline, &mut viewer, window_w));
     // Background-thumbnail the whole directory so the filmstrip and
@@ -1215,23 +1228,10 @@ fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
     viewer.pending_nav = Some(target_index);
     viewer.pending_since = Some(Instant::now());
 
-    let mut tasks = Vec::new();
-    if viewer.is_fs() && gif::is_gif(&target_path) {
-        tasks.push(
-            viewer
-                .gif_player
-                .prefetch_decode(&target_path)
-                .map(Message::Gif),
-        );
-    } else {
-        tasks.push(fire_thumb(
-            &pipeline,
-            viewer,
-            target_path.clone(),
-            ThumbUrgency::Urgent,
-        ));
-        tasks.push(fire_load(&pipeline, viewer, target_path, Lane::Current));
-    }
+    let tasks = vec![
+        fire_thumb(&pipeline, viewer, target_path.clone(), ThumbUrgency::Urgent),
+        fire_load(&pipeline, viewer, target_path, Lane::Current),
+    ];
     Task::batch(tasks)
 }
 
@@ -1247,7 +1247,7 @@ fn scrub_to(app: &mut App, index: usize) -> Task<Message> {
 
     viewer.nav.set_cursor(index);
     viewer.pending_nav = None;
-    viewer.gif_player.stop();
+    viewer.anim_player.stop();
     viewer.drag = None;
     viewer.pan = (0.0, 0.0);
     if zoom_mode != ZoomMode::LockZoomRatio {
@@ -1309,7 +1309,7 @@ fn complete_navigation(app: &mut App, target_index: usize, bump_generation: bool
         pipeline.bump_generation();
     }
 
-    viewer.gif_player.stop();
+    viewer.anim_player.stop();
     viewer.drag = None;
 
     // Reset pan on navigation. Zoom is preserved only in LockZoomRatio mode.
@@ -1322,27 +1322,25 @@ fn complete_navigation(app: &mut App, target_index: usize, bump_generation: bool
     viewer.rotation = 0;
     viewer.displayed_rotation = 0;
 
-    // The GIF decode cache prunes by window, the image cache by byte budget.
+    // The animation decode cache prunes by window, the image cache by
+    // byte budget.
     let keep = viewer.pinned_paths(depth);
-    viewer.gif_player.prune_cache(&keep);
+    viewer.anim_player.prune_cache(&keep);
 
     let current = viewer.nav.current().to_path_buf();
     let mut tasks = vec![probe_size(viewer, current.clone())];
 
-    if viewer.is_fs() && gif::is_gif(&current) {
+    if let Some(anim_task) = viewer.anim_player.try_start_from_cache(&current) {
+        // Cached animation: blur stands in until frame 0 allocates.
         viewer.pending_since = Some(Instant::now());
         show_placeholder_or_clear(viewer, &current, zoom_mode, viewport);
-        if let Some(gif_task) = viewer.gif_player.try_start_from_cache(&current) {
-            tasks.push(gif_task.map(Message::Gif));
-        } else {
-            tasks.push(viewer.gif_player.decode_current(&current).map(Message::Gif));
-        }
+        tasks.push(anim_task.map(Message::Anim));
     } else if let Some(cached) = viewer.cache.get(&current).cloned() {
         // Instant display, the common case within the prefetch window.
         show_loaded(viewer, &current, cached, zoom_mode, viewport);
     } else {
         // Navigation only lands on displayable targets, so the blur is
-        // guaranteed here. The full image is loading behind it.
+        // guaranteed here. The full image (or animation) loads behind it.
         viewer.pending_since = Some(Instant::now());
         show_placeholder_or_clear(viewer, &current, zoom_mode, viewport);
         tasks.push(fire_load(&pipeline, viewer, current, Lane::Current));
@@ -1490,7 +1488,10 @@ fn fire_thumbnailer(pipeline: &Pipeline, viewer: &mut Viewer, chains: usize) -> 
 /// Fire a pipeline load for `path` unless it's already cached or in flight.
 /// The resulting RGBA is uploaded to the GPU and lands as `MediaLoaded`.
 fn fire_load(pipeline: &Pipeline, viewer: &mut Viewer, path: PathBuf, lane: Lane) -> Task<Message> {
-    if viewer.cache.contains(&path) || viewer.in_flight.contains(&path) {
+    if viewer.cache.contains(&path)
+        || viewer.anim_player.has_cached(&path)
+        || viewer.in_flight.contains(&path)
+    {
         return Task::none();
     }
     viewer.in_flight.insert(path.clone());
@@ -1516,7 +1517,7 @@ fn fire_load(pipeline: &Pipeline, viewer: &mut Viewer, path: PathBuf, lane: Lane
             let p = path.clone();
             cache::allocate_handle(handle).map(move |upload| {
                 let result = upload
-                    .map(|allocation| LoadedMedia {
+                    .map(|allocation| LoadedMedia::Static {
                         image: CachedImage {
                             allocation,
                             original_size,
@@ -1530,6 +1531,19 @@ fn fire_load(pipeline: &Pipeline, viewer: &mut Viewer, path: PathBuf, lane: Lane
                 }
             })
         }
+        Ok(DecodedMedia::Animated(anim)) => {
+            // Frames allocate at display time, only the thumb needs a
+            // handle here.
+            let thumb = anim.thumbnail.as_ref().map(|t| Thumb {
+                handle: Handle::from_rgba(t.width, t.height, t.pixels.clone()),
+                size: (t.width, t.height),
+                original_size: t.original_size,
+            });
+            Task::done(Message::MediaLoaded {
+                path: path.clone(),
+                result: Ok(LoadedMedia::Animated { anim, thumb }),
+            })
+        }
         Err(e) => Task::done(Message::MediaLoaded {
             path: path.clone(),
             result: Err(e),
@@ -1539,15 +1553,12 @@ fn fire_load(pipeline: &Pipeline, viewer: &mut Viewer, path: PathBuf, lane: Lane
 
 /// Warm the prefetch window around the cursor.
 fn fire_prefetch(pipeline: &Pipeline, viewer: &mut Viewer, depth: usize) -> Vec<Task<Message>> {
-    let mut tasks = Vec::new();
-    for p in viewer.nav.peek_around(depth) {
-        if viewer.is_fs() && gif::is_gif(&p) {
-            tasks.push(viewer.gif_player.prefetch_decode(&p).map(Message::Gif));
-        } else {
-            tasks.push(fire_load(pipeline, viewer, p, Lane::Prefetch));
-        }
-    }
-    tasks
+    viewer
+        .nav
+        .peek_around(depth)
+        .into_iter()
+        .map(|p| fire_load(pipeline, viewer, p, Lane::Prefetch))
+        .collect()
 }
 
 /// Resolve the current image's byte size: instantly from the archive

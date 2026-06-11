@@ -1,7 +1,7 @@
+mod anim;
 mod app;
 mod cache;
 mod config;
-mod gif;
 mod media;
 mod nav;
 mod platform;

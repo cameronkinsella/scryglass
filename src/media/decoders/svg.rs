@@ -94,7 +94,9 @@ mod tests {
     #[test]
     fn renders_svg_at_cap_preserving_aspect() {
         let opts = DecodeOpts { max_dimension: 100 };
-        let DecodedMedia::Static(img) = Svg.decode(RED_SQUARE, &opts).unwrap();
+        let DecodedMedia::Static(img) = Svg.decode(RED_SQUARE, &opts).unwrap() else {
+            panic!("expected static media");
+        };
         assert_eq!((img.width, img.height), (100, 50));
         assert_eq!(&img.pixels[..4], &[255, 0, 0, 255]);
     }

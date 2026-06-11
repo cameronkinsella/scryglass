@@ -164,9 +164,11 @@ impl Pipeline {
 
                 // Decodes produce a thumbnail nearly for free. Persist it
                 // so the next session opens this folder warm.
-                if let (Some(disk), DecodedMedia::Static(img)) = (&disk, &media)
-                    && let Some(thumb) = &img.thumbnail
-                {
+                let thumb = match &media {
+                    DecodedMedia::Static(img) => img.thumbnail.as_ref(),
+                    DecodedMedia::Animated(anim) => anim.thumbnail.as_ref(),
+                };
+                if let (Some(disk), Some(thumb)) = (&disk, thumb) {
                     let (container, name) = &cache_key;
                     disk.store(container, name, thumb, None, src_size);
                 }
@@ -277,6 +279,21 @@ impl Pipeline {
                         pixels: img.pixels,
                         original_size: img.original_size,
                     }),
+                    DecodedMedia::Animated(anim) => Ok(match &anim.thumbnail {
+                        Some(t) => ThumbData {
+                            width: t.width,
+                            height: t.height,
+                            pixels: t.pixels.clone(),
+                            original_size: t.original_size,
+                        },
+                        // Already thumbnail-sized: first frame as-is.
+                        None => ThumbData {
+                            width: anim.width,
+                            height: anim.height,
+                            pixels: super::animation::first_frame_rgba(&anim),
+                            original_size: (anim.width, anim.height),
+                        },
+                    }),
                 }
             })
             .await
@@ -378,7 +395,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let DecodedMedia::Static(img) = media;
+        let DecodedMedia::Static(img) = media else {
+            panic!("expected static media");
+        };
         assert_eq!((img.width, img.height), (4, 2));
     }
 
@@ -452,6 +471,34 @@ mod tests {
             .await
             .expect("fallback should produce a thumbnail");
         assert_eq!(thumb.original_size, (600, 300));
+    }
+
+    #[tokio::test]
+    async fn background_thumb_handles_animated_files() {
+        let dir = TempDir::new().unwrap();
+        // A small 2-frame GIF (below thumb size, so the first frame
+        // becomes the thumbnail directly).
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = gif::Encoder::new(&mut bytes, 4, 4, &[]).unwrap();
+            for shade in [10u8, 200] {
+                let mut pixels = [shade; 4 * 4 * 4].to_vec();
+                pixels.iter_mut().skip(3).step_by(4).for_each(|a| *a = 255);
+                encoder
+                    .write_frame(&gif::Frame::from_rgba(4, 4, &mut pixels))
+                    .unwrap();
+            }
+        }
+        let path = dir.path().join("anim.gif");
+        std::fs::write(&path, &bytes).unwrap();
+
+        let pipeline = Pipeline::new(None);
+        let thumb = pipeline
+            .load_thumb(Source::Fs, path, ThumbUrgency::Background)
+            .await
+            .expect("animated fallback should produce a thumbnail");
+        assert_eq!(thumb.original_size, (4, 4));
+        assert_eq!((thumb.width, thumb.height), (4, 4));
     }
 
     #[tokio::test]

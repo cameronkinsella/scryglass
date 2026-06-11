@@ -89,7 +89,9 @@ mod tests {
     fn decodes_jxl_roundtrip() {
         let bytes = encode_jxl(6, 4);
         assert!(sniff(&bytes[..12.min(bytes.len())]));
-        let DecodedMedia::Static(img) = Jxl.decode(&bytes, &DecodeOpts::default()).unwrap();
+        let DecodedMedia::Static(img) = Jxl.decode(&bytes, &DecodeOpts::default()).unwrap() else {
+            panic!("expected static media");
+        };
         assert_eq!((img.width, img.height), (6, 4));
         // Lossless modular encode: exact pixel match.
         assert_eq!(&img.pixels[..4], &[200, 100, 50, 255]);

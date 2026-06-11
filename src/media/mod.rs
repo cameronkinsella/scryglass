@@ -5,6 +5,7 @@
 //! never blocks anything), stale loads are cancellable, EXIF orientation is
 //! applied, and oversized images are downscaled before GPU upload.
 
+pub mod animation;
 pub mod archive;
 pub mod cache;
 pub mod decoders;
@@ -39,6 +40,7 @@ pub struct DecodedImage {
 }
 
 /// CPU-side thumbnail pixels (RGBA8, orientation applied).
+#[derive(Debug, Clone)]
 pub struct ThumbData {
     pub width: u32,
     pub height: u32,
@@ -50,6 +52,9 @@ pub struct ThumbData {
 /// Decoded media of any kind.
 pub enum DecodedMedia {
     Static(DecodedImage),
+    /// A multi-frame animation (GIF, APNG, animated WebP), shared between
+    /// the player's cache and active playback.
+    Animated(std::sync::Arc<animation::AnimatedImage>),
 }
 
 /// Why a load produced no media.

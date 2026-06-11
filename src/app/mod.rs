@@ -33,8 +33,8 @@ use iced::keyboard::Key;
 use iced::keyboard::key::Named;
 use iced::{Event, Size, Subscription, Task, event, keyboard, mouse, window};
 
+use crate::anim::AnimMessage;
 use crate::config::AppConfig;
-use crate::gif::GifMessage;
 use crate::media::disk_thumbs::DiskThumbs;
 use crate::media::pipeline::Pipeline;
 use crate::ui;
@@ -245,10 +245,10 @@ pub fn subscription(app: &App) -> Subscription<Message> {
         }
 
         if viewer.pending_since.is_none()
-            && viewer.gif_player.is_animating()
-            && let Some(delay) = viewer.gif_player.current_delay()
+            && viewer.anim_player.is_animating()
+            && let Some(delay) = viewer.anim_player.current_delay()
         {
-            subs.push(iced::time::every(delay).map(|_| Message::Gif(GifMessage::Tick)));
+            subs.push(iced::time::every(delay).map(|_| Message::Anim(AnimMessage::Tick)));
         }
     }
 

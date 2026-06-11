@@ -11,6 +11,7 @@ use image::metadata::Orientation;
 use image::{DynamicImage, ImageDecoder, ImageReader};
 
 use super::finish;
+use crate::media::animation;
 use crate::media::registry::{DecodeOpts, ImageFormat};
 use crate::media::{DecodedMedia, MediaError};
 
@@ -31,6 +32,12 @@ impl ImageFormat for ImageRs {
     }
 
     fn decode(&self, bytes: &[u8], opts: &DecodeOpts) -> Result<DecodedMedia, MediaError> {
+        // Animated containers route to the frame decoder. Everything else
+        // (and single-frame APNG/WebP) takes the static path below.
+        if let Some(anim) = decode_animated(bytes)? {
+            return Ok(DecodedMedia::Animated(std::sync::Arc::new(anim)));
+        }
+
         let reader = ImageReader::new(Cursor::new(bytes))
             .with_guessed_format()
             .map_err(|e| MediaError::Read(e.to_string()))?;
@@ -43,6 +50,39 @@ impl ImageFormat for ImageRs {
         img.apply_orientation(orientation);
         Ok(DecodedMedia::Static(finish(img, opts)))
     }
+}
+
+/// Decode GIF / APNG / animated WebP frames. Returns `Ok(None)` when the
+/// bytes are a different (or single-frame) format.
+fn decode_animated(bytes: &[u8]) -> Result<Option<animation::AnimatedImage>, MediaError> {
+    if bytes.starts_with(b"GIF8") {
+        return animation::decode_gif_bytes(bytes).map(Some);
+    }
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        let decoder = image::codecs::png::PngDecoder::new(Cursor::new(bytes))
+            .map_err(|e| MediaError::Decode(e.to_string()))?;
+        if decoder
+            .is_apng()
+            .map_err(|e| MediaError::Decode(e.to_string()))?
+        {
+            return animation::from_image_frames(
+                decoder
+                    .apng()
+                    .map_err(|e| MediaError::Decode(e.to_string()))?,
+            )
+            .map(Some);
+        }
+        return Ok(None);
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        let decoder = image::codecs::webp::WebPDecoder::new(Cursor::new(bytes))
+            .map_err(|e| MediaError::Decode(e.to_string()))?;
+        if decoder.has_animation() {
+            return animation::from_image_frames(decoder).map(Some);
+        }
+        return Ok(None);
+    }
+    Ok(None)
 }
 
 /// Recognize the magic bytes of the formats this decoder handles.
@@ -70,6 +110,7 @@ mod tests {
     fn decode(bytes: &[u8], opts: &DecodeOpts) -> DecodedImage {
         match ImageRs.decode(bytes, opts).unwrap() {
             DecodedMedia::Static(img) => img,
+            DecodedMedia::Animated(_) => panic!("expected static media"),
         }
     }
 
