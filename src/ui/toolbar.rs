@@ -9,7 +9,7 @@ use iced::widget::{button, column, container, row, rule, text, toggler};
 use iced::{Alignment, Element, Length, Padding};
 
 use crate::app::Message;
-use crate::config::ZoomMode;
+use crate::config::{SortKey, ZoomMode};
 use crate::ui::{icons, theme};
 
 /// Layout visibility state passed into dropdown rendering.
@@ -25,6 +25,7 @@ pub struct LayoutVisibility {
 pub enum OpenMenu {
     File,
     Zoom,
+    Sort,
     Layout,
 }
 
@@ -44,6 +45,7 @@ pub fn menu_bar<'a>(open_menu: Option<OpenMenu>) -> Element<'a, Message> {
     let bar = row![
         tab("File", OpenMenu::File, Message::ToggleFileMenu),
         tab("Zoom", OpenMenu::Zoom, Message::ToggleZoomMenu),
+        tab("Sort", OpenMenu::Sort, Message::ToggleSortMenu),
         tab("Layout", OpenMenu::Layout, Message::ToggleLayoutMenu),
     ]
     .padding([2, 4]);
@@ -64,6 +66,8 @@ pub fn dropdown<'a>(
     layout_vis: LayoutVisibility,
     light_theme: bool,
     crisp_pixels: bool,
+    sort_key: SortKey,
+    sort_desc: bool,
 ) -> Option<Element<'a, Message>> {
     let open = open_menu?;
 
@@ -150,6 +154,28 @@ pub fn dropdown<'a>(
 
             Some(positioned.into())
         }
+        OpenMenu::Sort => {
+            let mut items: Vec<Element<'a, Message>> = Vec::new();
+            for &key in SortKey::ALL {
+                items
+                    .push(checkable(key.label(), key == sort_key, Message::SetSortKey(key)).into());
+            }
+            items.push(rule::horizontal(1).into());
+            items.push(checkable("Descending", sort_desc, Message::ToggleSortDirection).into());
+
+            let panel = container(column(items).spacing(1).width(180))
+                .padding(Padding::from(4))
+                .style(theme::panel);
+
+            let positioned = container(panel).padding(Padding {
+                top: 2.0,
+                right: 0.0,
+                bottom: 0.0,
+                left: 100.0,
+            });
+
+            Some(positioned.into())
+        }
         OpenMenu::Layout => {
             let toggle = |label: &'a str, active: bool, msg: fn(bool) -> Message| {
                 toggler(active)
@@ -179,7 +205,7 @@ pub fn dropdown<'a>(
                 top: 2.0,
                 right: 0.0,
                 bottom: 0.0,
-                left: 100.0,
+                left: 144.0,
             });
 
             Some(positioned.into())

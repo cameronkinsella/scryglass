@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, SortKey};
 
 #[derive(Debug, thiserror::Error)]
 pub enum NavError {
@@ -123,6 +123,52 @@ impl Nav {
     pub fn set_cursor(&mut self, index: usize) {
         self.cursor = index % self.files.len();
     }
+
+    /// Swap in a re-ordered file list, keeping the cursor on the same
+    /// file when it's still present. Empty lists are ignored.
+    pub fn replace_files(&mut self, files: Vec<PathBuf>) {
+        if files.is_empty() {
+            return;
+        }
+        let current = self.current().to_path_buf();
+        self.cursor = files.iter().position(|p| *p == current).unwrap_or(0);
+        self.files = files;
+    }
+}
+
+/// Metadata needed to sort a file list.
+pub struct FileMeta {
+    pub path: PathBuf,
+    pub modified: Option<std::time::SystemTime>,
+    pub size: u64,
+}
+
+/// Order files by the configured key. Ties (and missing metadata) fall
+/// back to natural name order, so results are always deterministic.
+pub fn sort_paths(mut entries: Vec<FileMeta>, key: SortKey, descending: bool) -> Vec<PathBuf> {
+    let by_name = |a: &FileMeta, b: &FileMeta| {
+        natord::compare_ignore_case(
+            &a.path.file_name().unwrap_or_default().to_string_lossy(),
+            &b.path.file_name().unwrap_or_default().to_string_lossy(),
+        )
+    };
+
+    entries.sort_by(|a, b| match key {
+        SortKey::NaturalName => by_name(a, b),
+        SortKey::Name => a
+            .path
+            .file_name()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .cmp(&b.path.file_name().unwrap_or_default().to_ascii_lowercase())
+            .then_with(|| by_name(a, b)),
+        SortKey::DateModified => a.modified.cmp(&b.modified).then_with(|| by_name(a, b)),
+        SortKey::Size => a.size.cmp(&b.size).then_with(|| by_name(a, b)),
+    });
+    if descending {
+        entries.reverse();
+    }
+    entries.into_iter().map(|e| e.path).collect()
 }
 
 /// Scan `dir` for files with supported image extensions, returning a sorted list.
@@ -369,5 +415,81 @@ mod tests {
         let files = vec![PathBuf::from("a.png"), PathBuf::from("b.png")];
         let nav = Nav::new(files, Path::new("a.png")).unwrap();
         assert_eq!(nav.peek_prev(), PathBuf::from("b.png"));
+    }
+
+    // --- replace_files / sort_paths tests ---
+
+    #[test]
+    fn replace_files_keeps_cursor_on_current() {
+        let files = vec![
+            PathBuf::from("a.png"),
+            PathBuf::from("b.png"),
+            PathBuf::from("c.png"),
+        ];
+        let mut nav = Nav::new(files, Path::new("b.png")).unwrap();
+        nav.replace_files(vec![
+            PathBuf::from("c.png"),
+            PathBuf::from("b.png"),
+            PathBuf::from("a.png"),
+        ]);
+        assert_eq!(nav.current(), Path::new("b.png"));
+        assert_eq!(nav.cursor(), 1);
+    }
+
+    #[test]
+    fn replace_files_falls_back_to_first_when_current_gone() {
+        let files = vec![PathBuf::from("a.png"), PathBuf::from("b.png")];
+        let mut nav = Nav::new(files, Path::new("b.png")).unwrap();
+        nav.replace_files(vec![PathBuf::from("x.png"), PathBuf::from("y.png")]);
+        assert_eq!(nav.current(), Path::new("x.png"));
+    }
+
+    fn meta(name: &str, secs: u64, size: u64) -> FileMeta {
+        FileMeta {
+            path: PathBuf::from(name),
+            modified: Some(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs),
+            ),
+            size,
+        }
+    }
+
+    #[test]
+    fn sort_by_date_then_descending() {
+        let entries = vec![meta("new.png", 300, 1), meta("old.png", 100, 1)];
+        let sorted = sort_paths(entries, SortKey::DateModified, false);
+        assert_eq!(sorted, [PathBuf::from("old.png"), PathBuf::from("new.png")]);
+
+        let entries = vec![meta("new.png", 300, 1), meta("old.png", 100, 1)];
+        let sorted = sort_paths(entries, SortKey::DateModified, true);
+        assert_eq!(sorted, [PathBuf::from("new.png"), PathBuf::from("old.png")]);
+    }
+
+    #[test]
+    fn sort_by_size_with_name_tiebreak() {
+        let entries = vec![
+            meta("b.png", 0, 50),
+            meta("a.png", 0, 50),
+            meta("big.png", 0, 900),
+        ];
+        let sorted = sort_paths(entries, SortKey::Size, false);
+        assert_eq!(
+            sorted,
+            [
+                PathBuf::from("a.png"),
+                PathBuf::from("b.png"),
+                PathBuf::from("big.png")
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_natural_orders_numbers() {
+        let entries = vec![meta("img10.png", 0, 0), meta("img2.png", 0, 0)];
+        let sorted = sort_paths(entries, SortKey::NaturalName, false);
+        assert_eq!(
+            sorted,
+            [PathBuf::from("img2.png"), PathBuf::from("img10.png")]
+        );
     }
 }

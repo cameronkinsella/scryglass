@@ -24,6 +24,40 @@ pub enum ThemeChoice {
     Light,
 }
 
+/// How the file list is ordered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SortKey {
+    /// Natural name order: img2 before img10, like a file manager.
+    #[default]
+    NaturalName,
+    /// Plain lexicographic name order.
+    Name,
+    /// Most recently modified last (or first when descending).
+    DateModified,
+    /// Smallest first (or largest when descending).
+    Size,
+}
+
+impl SortKey {
+    /// All keys in menu order.
+    pub const ALL: &'static [SortKey] = &[
+        SortKey::NaturalName,
+        SortKey::Name,
+        SortKey::DateModified,
+        SortKey::Size,
+    ];
+
+    /// Human-readable label for menu display.
+    pub fn label(self) -> &'static str {
+        match self {
+            SortKey::NaturalName => "Name (natural)",
+            SortKey::Name => "Name",
+            SortKey::DateModified => "Date modified",
+            SortKey::Size => "Size",
+        }
+    }
+}
+
 /// How the image zoom level is determined when opening/navigating.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ZoomMode {
@@ -77,6 +111,10 @@ pub struct AppConfig {
     pub theme: ThemeChoice,
     /// Zoom mode applied when opening/navigating images.
     pub zoom_mode: ZoomMode,
+    /// How the file list is ordered.
+    pub sort_key: SortKey,
+    /// Reverse the sort order.
+    pub sort_desc: bool,
     /// Render with nearest-neighbor sampling when zoomed past 100%,
     /// crisp pixels for pixel art instead of smoothing.
     pub crisp_pixels: bool,
@@ -101,6 +139,8 @@ impl Default for AppConfig {
             cache_budget_mb: 512,
             theme: ThemeChoice::default(),
             zoom_mode: ZoomMode::default(),
+            sort_key: SortKey::default(),
+            sort_desc: false,
             crisp_pixels: false,
             disk_thumbs: true,
             show_toolbar: true,
@@ -186,6 +226,8 @@ mod tests {
             cache_budget_mb: 256,
             theme: ThemeChoice::Light,
             zoom_mode: ZoomMode::ScaleToFit,
+            sort_key: SortKey::DateModified,
+            sort_desc: true,
             crisp_pixels: true,
             disk_thumbs: false,
             show_toolbar: false,

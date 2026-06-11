@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use iced::Size;
 
-use crate::config::ZoomMode;
+use crate::config::{SortKey, ZoomMode};
 use crate::gif::GifMessage;
 use crate::media::MediaError;
 use crate::media::archive::ArchiveIndex;
@@ -61,6 +61,14 @@ pub enum Message {
     ToggleZoomMenu,
     /// Toggle the Layout dropdown menu.
     ToggleLayoutMenu,
+    /// Toggle the Sort dropdown menu.
+    ToggleSortMenu,
+    /// Change the sort key (re-sorts the open folder).
+    SetSortKey(SortKey),
+    /// Flip ascending/descending.
+    ToggleSortDirection,
+    /// Background re-sort finished.
+    Resorted(Vec<PathBuf>),
     /// Dismiss any open overlay (click outside menu).
     DismissOverlay,
     /// Open a file via native dialog.
@@ -140,6 +148,9 @@ pub fn is_menu_message(msg: &Message) -> bool {
         Message::ToggleFileMenu
             | Message::ToggleZoomMenu
             | Message::ToggleLayoutMenu
+            | Message::ToggleSortMenu
+            | Message::SetSortKey(_)
+            | Message::ToggleSortDirection
             | Message::DismissOverlay
             | Message::OpenFile
             | Message::CloseFile
@@ -169,6 +180,7 @@ pub fn is_menu_message(msg: &Message) -> bool {
             | Message::SpinnerTick
             | Message::DismissToast(_)
             | Message::FilmstripScrolled(_)
+            | Message::Resorted(_)
             | Message::Gif(_)
             | Message::DirectoryScanned(_, _)
             | Message::ArchiveScanned(_, _)
@@ -199,6 +211,7 @@ pub fn is_context_menu_message(msg: &Message) -> bool {
             | Message::SpinnerTick
             | Message::DismissToast(_)
             | Message::FilmstripScrolled(_)
+            | Message::Resorted(_)
             | Message::Gif(_)
             | Message::DirectoryScanned(_, _)
             | Message::ArchiveScanned(_, _)

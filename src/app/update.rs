@@ -376,6 +376,49 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
 
+        Message::ToggleSortMenu => {
+            app.open_menu = if app.open_menu == Some(OpenMenu::Sort) {
+                None
+            } else {
+                Some(OpenMenu::Sort)
+            };
+            Task::none()
+        }
+
+        // --- Sorting ---
+        Message::SetSortKey(key) => {
+            app.open_menu = None;
+            app.config.sort_key = key;
+            Task::batch([save_config(app), fire_resort(app)])
+        }
+
+        Message::ToggleSortDirection => {
+            app.config.sort_desc = !app.config.sort_desc;
+            Task::batch([save_config(app), fire_resort(app)])
+        }
+
+        Message::Resorted(files) => {
+            let window_w = app.window_size.width;
+            let show_filmstrip = app.config.show_filmstrip;
+            let pipeline = app.pipeline.clone();
+            let Some(viewer) = app.viewer_mut() else {
+                return Task::none();
+            };
+            viewer.nav.replace_files(files);
+
+            let mut tasks = Vec::new();
+            if show_filmstrip {
+                let center = ui::filmstrip::centering_offset(viewer.nav.cursor(), window_w);
+                viewer.filmstrip_scroll_x = center;
+                tasks.push(iced::widget::operation::scroll_to(
+                    ui::filmstrip::filmstrip_id(),
+                    iced::widget::scrollable::AbsoluteOffset { x: center, y: 0.0 },
+                ));
+                tasks.extend(fire_visible_thumbs(&pipeline, viewer, window_w));
+            }
+            Task::batch(tasks)
+        }
+
         Message::DismissOverlay => {
             app.open_menu = None;
             Task::none()
@@ -786,6 +829,57 @@ fn save_config(app: &App) -> Task<Message> {
     Task::future(app.config.clone().save()).discard()
 }
 
+/// Re-sort the open folder by the configured key off-thread. Metadata
+/// (date/size) is fetched only when the key needs it, archives use their
+/// index and never touch the filesystem.
+fn fire_resort(app: &App) -> Task<Message> {
+    let Some(viewer) = app.viewer() else {
+        return Task::none();
+    };
+    let key = app.config.sort_key;
+    let desc = app.config.sort_desc;
+    let files = viewer.nav.files().to_vec();
+    let source = viewer.source.clone();
+
+    Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let needs_meta = matches!(
+                    key,
+                    crate::config::SortKey::DateModified | crate::config::SortKey::Size
+                );
+                let entries: Vec<nav::FileMeta> = files
+                    .into_iter()
+                    .map(|path| {
+                        let (modified, size) = match (&source, needs_meta) {
+                            (Source::Fs, true) => {
+                                let meta = std::fs::metadata(&path).ok();
+                                (
+                                    meta.as_ref().and_then(|m| m.modified().ok()),
+                                    meta.map(|m| m.len()).unwrap_or(0),
+                                )
+                            }
+                            (Source::Archive(index), true) => {
+                                (None, index.entry_size(&path).unwrap_or(0))
+                            }
+                            _ => (None, 0),
+                        };
+                        nav::FileMeta {
+                            path,
+                            modified,
+                            size,
+                        }
+                    })
+                    .collect();
+                nav::sort_paths(entries, key, desc)
+            })
+            .await
+            .unwrap_or_default()
+        },
+        Message::Resorted,
+    )
+}
+
 /// Show a transient notification that dismisses itself after a few seconds.
 fn push_toast(app: &mut App, kind: ToastKind, text: String) -> Task<Message> {
     let id = app.next_toast_id;
@@ -854,6 +948,13 @@ fn open_viewer(app: &mut App, nav: Nav, source: Source) -> Task<Message> {
     tasks.extend(fire_thumbnailer(&pipeline, &mut viewer, 3));
 
     app.session = Session::Viewing(Box::new(viewer));
+
+    // Folders open in natural order instantly. A configured custom sort
+    // applies as soon as its metadata is gathered.
+    if app.config.sort_key != crate::config::SortKey::NaturalName || app.config.sort_desc {
+        tasks.push(fire_resort(app));
+    }
+
     Task::batch(tasks)
 }
 

@@ -148,6 +148,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
         layout_vis,
         app.config.theme == crate::config::ThemeChoice::Light,
         app.config.crisp_pixels,
+        app.config.sort_key,
+        app.config.sort_desc,
     ) {
         column![dropdown]
             .width(Length::Fill)
