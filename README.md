@@ -62,11 +62,35 @@ cargo test                     # run tests
 Building with `video` links FFmpeg's libraries. On Linux, install the dev
 packages (`libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
 libswresample-dev`) plus `clang`. On Windows, install LLVM and an FFmpeg
-7.x *shared* build (e.g. `winget install LLVM.LLVM Gyan.FFmpeg.Shared`),
+*shared* build (e.g. `winget install LLVM.LLVM Gyan.FFmpeg.Shared`),
 then set `FFMPEG_DIR` to the FFmpeg folder containing `include/` and
 `lib/`, and `LIBCLANG_PATH` to LLVM's `bin` directory. At runtime the
 FFmpeg DLLs must be on PATH or beside the executable (LGPL dynamic
 linking).
+
+### Single-file executable (`video-static`)
+
+For a fully self-contained binary with every feature: no DLLs, no
+runtime dependencies at all, link FFmpeg statically instead:
+
+```
+vcpkg install ffmpeg[core,avcodec,avformat,swscale,swresample]:x64-windows-static-md
+$env:FFMPEG_DIR = "<vcpkg>\installed\x64-windows-static-md"
+cargo build --release --all-features
+```
+
+`--all-features` includes `video-static`, which switches the FFmpeg link
+to static, and the build fails loudly if `FFMPEG_DIR` points at a shared
+build, so you can't silently produce a DLL-dependent exe. Building the
+vcpkg port needs a recent Windows SDK (10.0.22000+, since FFmpeg 8's D3D12
+code doesn't compile against older headers). HEIF is already static via
+vcpkg, so the result is one ~55 MB exe.
+
+Licensing: this configuration is LGPL-clean (no x264/x265 inside FFmpeg;
+HEVC *decoding* uses FFmpeg's native LGPL decoder). LGPL's relink
+requirement is satisfied by this project being open source. The codec
+set is FFmpeg's built-ins. Broad coverage, but AV1 video would need the
+`dav1d` vcpkg feature added.
 
 ## Configuration
 

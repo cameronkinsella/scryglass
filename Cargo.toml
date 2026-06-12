@@ -2,6 +2,14 @@
 name = "scryglass"
 version = "0.1.0"
 edition = "2024"
+description = "A lightweight, blazing-fast image viewer"
+license = "MIT"
+# TODO: set repository before publishing (cargo-binstall reads it).
+
+[package.metadata.binstall]
+# Let cargo-binstall grab release artifacts instead of building from source.
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }{ archive-suffix }"
+pkg-fmt = "zip"
 
 [dependencies]
 iced = { version = "0.14", features = ["image", "tokio", "canvas"] }
@@ -58,6 +66,11 @@ raw = ["dep:rawler"]
 # HEIC/HEIF needs the system libheif C library, so it's opt-in.
 heif = ["dep:libheif-rs"]
 # Video playback via FFmpeg's libraries (in-process decode). Building
-# needs the FFmpeg 7.x shared dev package (FFMPEG_DIR) and libclang;
-# running needs the FFmpeg DLLs beside the exe or on PATH. Opt-in.
+# needs an FFmpeg dev package (FFMPEG_DIR) and libclang. With shared
+# libraries the FFmpeg DLLs must be beside the exe at runtime. Opt-in.
 video = ["dep:ffmpeg-next", "dep:rodio"]
+# Fully self-contained executable: links FFmpeg statically. Point
+# FFMPEG_DIR at a static build (e.g. vcpkg's x64-windows-static-md);
+# build.rs rejects shared builds to prevent silently DLL-dependent
+# binaries. See README for the licensing note (LGPL relink terms).
+video-static = ["video", "ffmpeg-next/static"]
