@@ -170,6 +170,9 @@ pub struct Viewer {
     /// Archive video entry currently extracting to a temp file, to
     /// prevent duplicate extractions.
     pub video_extracting: Option<PathBuf>,
+    /// Video controls stay visible until this deadline, refreshed by any
+    /// mouse movement. `None` means hidden (while playing).
+    pub video_controls_until: Option<Instant>,
 }
 
 impl Viewer {
@@ -208,6 +211,7 @@ impl Viewer {
             video: None,
             video_seek_drag: None,
             video_extracting: None,
+            video_controls_until: None,
         }
     }
 

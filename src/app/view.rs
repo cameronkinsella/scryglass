@@ -77,13 +77,15 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 image_view
             };
 
-            // Video transport controls: visible while paused or when the
-            // cursor is near the bottom of the window, hidden otherwise so
-            // the picture stays clean.
+            // Video transport controls: visible while paused, mid-seek, or
+            // for a few seconds after any mouse movement (refreshed by
+            // DragMove, cleared when the cursor leaves the window).
+            let controls_alive = viewer
+                .video_controls_until
+                .is_some_and(|until| iced::time::Instant::now() < until);
             let image_view: Element<'_, Message> = match &viewer.video {
                 Some(session)
-                    if !session.playing
-                        || app.last_cursor_pos.y > app.window_size.height * 0.72 =>
+                    if !session.playing || viewer.video_seek_drag.is_some() || controls_alive =>
                 {
                     let controls =
                         ui::video_controls::video_controls(ui::video_controls::VideoControls {

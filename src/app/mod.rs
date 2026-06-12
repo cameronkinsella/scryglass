@@ -62,6 +62,9 @@ const TOOLBAR_HEIGHT: f32 = 30.0;
 /// without any flash of UI.
 const SPINNER_DELAY: Duration = Duration::from_millis(150);
 
+/// How long the video controls stay up after the last mouse movement.
+const VIDEO_CONTROLS_TIMEOUT: Duration = Duration::from_millis(2500);
+
 /// Application state: the single source of truth.
 pub struct App {
     session: Session,
@@ -344,6 +347,7 @@ fn handle_event(event: Event, _status: event::Status, _id: window::Id) -> Option
 
         // --- Mouse: cursor moved (for drag panning) ---
         Event::Mouse(mouse::Event::CursorMoved { position }) => Some(Message::DragMove(*position)),
+        Event::Mouse(mouse::Event::CursorLeft) => Some(Message::CursorLeft),
 
         // --- Mouse: left button released (end drag) ---
         Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(Message::DragEnd),

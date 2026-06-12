@@ -627,6 +627,11 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 return Task::none();
             };
 
+            // Any mouse movement keeps the video controls up.
+            if viewer.video.is_some() {
+                viewer.video_controls_until = Some(Instant::now() + super::VIDEO_CONTROLS_TIMEOUT);
+            }
+
             if let Some(ds) = viewer.drag {
                 let dx = pos.x - ds.start.x;
                 let dy = pos.y - ds.start.y;
@@ -637,6 +642,14 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     let img_h = h as f32 * viewer.zoom;
                     viewer.pan = clamp_pan(new_pan, img_w, img_h, viewport);
                 }
+            }
+            Task::none()
+        }
+
+        Message::CursorLeft => {
+            // Mouse left the window: hide the controls right away.
+            if let Some(viewer) = app.viewer_mut() {
+                viewer.video_controls_until = None;
             }
             Task::none()
         }
@@ -1849,6 +1862,8 @@ fn scrub_to(app: &mut App, index: usize) -> Task<Message> {
 /// for filesystem files, or extract the archive entry to a temp file
 /// first (FFmpeg needs a real file, the spinner covers the wait).
 fn start_video(viewer: &mut Viewer, current: PathBuf, volume: f32, muted: bool) -> Task<Message> {
+    // Show the controls briefly on open, like most players.
+    viewer.video_controls_until = Some(Instant::now() + super::VIDEO_CONTROLS_TIMEOUT);
     match &viewer.source {
         Source::Fs => {
             viewer.video = Some(crate::video::VideoSession::open(

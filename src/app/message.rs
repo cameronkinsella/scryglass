@@ -114,6 +114,8 @@ pub enum Message {
     DragStart,
     /// Mouse moved during drag.
     DragMove(iced::Point),
+    /// Mouse left the window (hides video controls).
+    CursorLeft,
     /// Mouse released, end drag.
     DragEnd,
     /// Window resized.
@@ -295,6 +297,7 @@ pub fn is_menu_message(msg: &Message) -> bool {
             | Message::RequestRename
             // Passive events that shouldn't dismiss menus:
             | Message::DragMove(_)
+            | Message::CursorLeft
             | Message::DragEnd
             | Message::WindowResized(_)
             | Message::MediaLoaded { .. }
@@ -335,6 +338,7 @@ pub fn is_context_menu_message(msg: &Message) -> bool {
             | Message::ToggleToolbar
             // Passive events:
             | Message::DragMove(_)
+            | Message::CursorLeft
             | Message::WindowResized(_)
             | Message::MediaLoaded { .. }
             | Message::ThumbLoaded { .. }
