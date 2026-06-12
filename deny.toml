@@ -29,6 +29,9 @@ allow = [
     "NCSA",
     "Unicode-3.0",
     "Unlicense",
+    # The ffmpeg-next binding crates. FFmpeg itself is LGPL and covered
+    # in THIRD-PARTY.md.
+    "WTFPL",
     "Zlib",
     "bzip2-1.0.6",
 ]

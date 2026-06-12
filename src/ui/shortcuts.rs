@@ -60,6 +60,16 @@ mod tests {
         Key::Character(s.into())
     }
 
+    /// The platform command modifier, matching `Modifiers::command()`:
+    /// Cmd on macOS, Ctrl everywhere else.
+    fn cmd() -> Modifiers {
+        if cfg!(target_os = "macos") {
+            Modifiers::LOGO
+        } else {
+            Modifiers::CTRL
+        }
+    }
+
     #[test]
     fn fullscreen_keys() {
         assert!(matches!(
@@ -83,11 +93,11 @@ mod tests {
             Some(Message::ZoomStep(-1))
         ));
         assert!(matches!(
-            map_press(&ch("0"), Modifiers::CTRL),
+            map_press(&ch("0"), cmd()),
             Some(Message::ResetZoom)
         ));
         assert!(matches!(
-            map_press(&ch("1"), Modifiers::CTRL),
+            map_press(&ch("1"), cmd()),
             Some(Message::ZoomActual)
         ));
         // Bare digits do nothing.
@@ -145,16 +155,15 @@ mod tests {
     #[test]
     fn clipboard_and_open_shortcuts() {
         assert!(matches!(
-            map_press(&ch("c"), Modifiers::CTRL),
+            map_press(&ch("c"), cmd()),
             Some(Message::CopyImage)
         ));
-        let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
         assert!(matches!(
-            map_press(&ch("C"), ctrl_shift),
+            map_press(&ch("C"), cmd() | Modifiers::SHIFT),
             Some(Message::CopyFilePath)
         ));
         assert!(matches!(
-            map_press(&ch("o"), Modifiers::CTRL),
+            map_press(&ch("o"), cmd()),
             Some(Message::OpenFile)
         ));
         assert!(matches!(
@@ -168,6 +177,6 @@ mod tests {
     #[test]
     fn unmapped_keys_are_none() {
         assert!(map_press(&ch("q"), Modifiers::default()).is_none());
-        assert!(map_press(&ch("f"), Modifiers::CTRL).is_none());
+        assert!(map_press(&ch("f"), cmd()).is_none());
     }
 }

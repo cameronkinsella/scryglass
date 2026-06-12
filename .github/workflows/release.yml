@@ -1,0 +1,187 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pin vcpkg so FFmpeg and libheif versions only change deliberately.
+  VCPKG_COMMIT: 06a7fdd564234908731c59ac46a624f808e87b1c
+  # Core LGPL FFmpeg plus decode-only libheif. No x265, no GPL anywhere.
+  VCPKG_PACKAGES: ffmpeg[core,avcodec,avformat,swscale,swresample] libheif[core]
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            triplet: x64-windows-static-md
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            triplet: x64-linux
+          # The minimum macOS the binaries require comes from the pinned
+          # deployment target (see vcpkg-triplets), not the image, so
+          # build with the newest SDKs.
+          - os: macos-26
+            target: aarch64-apple-darwin
+            triplet: arm64-osx
+          - os: macos-26-intel
+            target: x86_64-apple-darwin
+            triplet: x64-osx
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check tag matches crate version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          crate=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ "$tag" != "$crate" ]; then
+            echo "tag v$tag does not match crate version $crate"
+            exit 1
+          fi
+
+      - name: Check Windows SDK is new enough for FFmpeg
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $sdks = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include" -Directory |
+            ForEach-Object { $_.Name } | Where-Object { $_ -ge "10.0.22000.0" }
+          if (-not $sdks) { throw "No Windows SDK >= 10.0.22000 on this runner" }
+          "SDKs: $sdks"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: >
+          sudo apt-get update && sudo apt-get install -y
+          clang pkg-config nasm libasound2-dev libgtk-3-dev
+
+      - name: Install nasm (Intel macOS)
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: brew install nasm
+
+      - name: Set up pinned vcpkg
+        shell: bash
+        run: |
+          git clone https://github.com/microsoft/vcpkg "$GITHUB_WORKSPACE/vcpkg"
+          cd "$GITHUB_WORKSPACE/vcpkg"
+          git checkout "$VCPKG_COMMIT"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            ./bootstrap-vcpkg.bat
+          else
+            ./bootstrap-vcpkg.sh
+          fi
+          echo "VCPKG_ROOT=$GITHUB_WORKSPACE/vcpkg" >> "$GITHUB_ENV"
+          mkdir -p "$GITHUB_WORKSPACE/vcpkg-bincache"
+          echo "VCPKG_DEFAULT_BINARY_CACHE=$GITHUB_WORKSPACE/vcpkg-bincache" >> "$GITHUB_ENV"
+
+      - name: Cache vcpkg binary packages
+        uses: actions/cache@v5
+        with:
+          path: ${{ github.workspace }}/vcpkg-bincache
+          key: vcpkg-bin-${{ matrix.triplet }}-${{ env.VCPKG_COMMIT }}-v1
+          restore-keys: vcpkg-bin-${{ matrix.triplet }}-
+
+      - name: Build static media libraries
+        shell: bash
+        run: |
+          pkgs=""
+          for p in $VCPKG_PACKAGES; do pkgs="$pkgs $p:${{ matrix.triplet }}"; done
+          "$VCPKG_ROOT/vcpkg" install $pkgs \
+            --overlay-triplets="$GITHUB_WORKSPACE/.github/vcpkg-triplets"
+
+      - name: Locate libclang (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "C:\Program Files\LLVM\bin\libclang.dll")) {
+            choco install llvm -y --no-progress
+          }
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+
+      - name: Build
+        shell: bash
+        env:
+          PKG_CONFIG_ALL_STATIC: "1"
+        run: |
+          export FFMPEG_DIR="$VCPKG_ROOT/installed/${{ matrix.triplet }}"
+          export PKG_CONFIG_PATH="$FFMPEG_DIR/lib/pkgconfig"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # Match the pinned vcpkg deployment target.
+            export MACOSX_DEPLOYMENT_TARGET=11.0
+          fi
+          if [ "${{ matrix.target }}" = "x86_64-apple-darwin" ]; then
+            # libde265's x86 SIMD dispatch references clang's compiler-rt
+            # builtins (__cpu_model), which Rust's link line never pulls in.
+            rtlib="$(clang --print-resource-dir)/lib/darwin/libclang_rt.osx.a"
+            export RUSTFLAGS="-C link-arg=$rtlib"
+          fi
+          cargo build --release --all-features --target ${{ matrix.target }}
+
+      - name: Check for stray media DLL imports (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vsPath = & "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          Import-Module "$vsPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation -DevCmdArguments "-arch=x64"
+          $deps = dumpbin /dependents "target\${{ matrix.target }}\release\scryglass.exe"
+          if ($deps -match "avcodec|avformat|heif|de265") {
+            $deps
+            throw "exe imports media DLLs, static link failed"
+          }
+
+      - name: Package
+        shell: bash
+        run: |
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          name="scryglass-v${version}-${{ matrix.target }}"
+          mkdir "$name"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/scryglass.exe" "$name/"
+          else
+            cp "target/${{ matrix.target }}/release/scryglass" "$name/"
+          fi
+          cp LICENSE THIRD-PARTY.md README.md "$name/"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a "$name.zip" "$name"
+          else
+            zip -r "$name.zip" "$name"
+          fi
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: scryglass-${{ matrix.target }}
+          path: "*.zip"
+
+  release:
+    name: Create release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: "*.zip"
