@@ -98,12 +98,10 @@ impl ArchiveIndex {
         })
     }
 
-    /// The image entries as navigation paths, naturally sorted.
+    /// The image entries as navigation paths, in name order.
     pub fn image_entries(&self) -> Vec<PathBuf> {
         let mut paths: Vec<PathBuf> = self.entries.keys().cloned().collect();
-        paths.sort_by(|a, b| {
-            natord::compare_ignore_case(&a.to_string_lossy(), &b.to_string_lossy())
-        });
+        paths.sort_by(|a, b| crate::nav::name_cmp(a.as_os_str(), b.as_os_str()));
         paths
     }
 

@@ -33,10 +33,10 @@ pub enum ThemeChoice {
 /// How the file list is ordered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SortKey {
-    /// Natural name order: img2 before img10, like a file manager.
+    /// Name order matching the platform's file manager. The alias keeps
+    /// configs written before the two name sorts were merged.
     #[default]
-    NaturalName,
-    /// Plain lexicographic name order.
+    #[serde(alias = "NaturalName")]
     Name,
     /// Most recently modified last (or first when descending).
     DateModified,
@@ -46,17 +46,11 @@ pub enum SortKey {
 
 impl SortKey {
     /// All keys in menu order.
-    pub const ALL: &'static [SortKey] = &[
-        SortKey::NaturalName,
-        SortKey::Name,
-        SortKey::DateModified,
-        SortKey::Size,
-    ];
+    pub const ALL: &'static [SortKey] = &[SortKey::Name, SortKey::DateModified, SortKey::Size];
 
     /// Human-readable label for menu display.
     pub fn label(self) -> &'static str {
         match self {
-            SortKey::NaturalName => "Name (natural)",
             SortKey::Name => "Name",
             SortKey::DateModified => "Date modified",
             SortKey::Size => "Size",
@@ -284,6 +278,13 @@ mod tests {
     fn from_toml_ignores_unknown_keys() {
         let cfg = AppConfig::from_toml("some_future_setting = 42\nprefetch_depth = 7\n");
         assert_eq!(cfg.prefetch_depth, 7);
+    }
+
+    #[test]
+    fn old_natural_name_sort_value_still_parses() {
+        let cfg = AppConfig::from_toml("sort_key = \"NaturalName\"\nshow_footer = false\n");
+        assert_eq!(cfg.sort_key, SortKey::Name);
+        assert!(!cfg.show_footer);
     }
 
     #[test]

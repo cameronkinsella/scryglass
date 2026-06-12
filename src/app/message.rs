@@ -17,7 +17,10 @@ use super::state::{CachedImage, LoadedMedia, Thumb};
 #[derive(Debug, Clone)]
 pub enum Message {
     FileDropped(PathBuf),
-    DirectoryScanned(PathBuf, Result<Vec<PathBuf>, String>),
+    /// Directory listing finished. The bool is true when the user opened
+    /// the directory itself rather than a file inside it, in which case
+    /// the viewer should land on the first image of the configured sort.
+    DirectoryScanned(PathBuf, bool, Result<Vec<PathBuf>, String>),
     /// An archive was opened and its image entries listed.
     ArchiveScanned(PathBuf, Result<Arc<ArchiveIndex>, String>),
     /// A pipeline load finished (current or prefetch), successfully or not.
@@ -313,7 +316,7 @@ pub fn is_menu_message(msg: &Message) -> bool {
             | Message::VideoExtracted { .. }
             | Message::VideoFrame { .. }
             | Message::Anim(_)
-            | Message::DirectoryScanned(_, _)
+            | Message::DirectoryScanned(_, _, _)
             | Message::ArchiveScanned(_, _)
             | Message::FileDialogResult(_)
             | Message::NextReleased
@@ -353,7 +356,7 @@ pub fn is_context_menu_message(msg: &Message) -> bool {
             | Message::VideoExtracted { .. }
             | Message::VideoFrame { .. }
             | Message::Anim(_)
-            | Message::DirectoryScanned(_, _)
+            | Message::DirectoryScanned(_, _, _)
             | Message::ArchiveScanned(_, _)
             | Message::FileDialogResult(_)
             | Message::NextReleased

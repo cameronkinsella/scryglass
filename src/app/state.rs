@@ -173,6 +173,10 @@ pub struct Viewer {
     /// Video controls stay visible until this deadline, refreshed by any
     /// mouse movement. `None` means hidden (while playing).
     pub video_controls_until: Option<Instant>,
+    /// After the post-open resort lands, jump to the first image of the
+    /// new order. Set when a folder or archive was opened rather than a
+    /// specific file.
+    pub resort_to_first: bool,
 }
 
 impl Viewer {
@@ -212,6 +216,7 @@ impl Viewer {
             video_seek_drag: None,
             video_extracting: None,
             video_controls_until: None,
+            resort_to_first: false,
         }
     }
 

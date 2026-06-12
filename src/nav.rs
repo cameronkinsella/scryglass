@@ -166,25 +166,38 @@ pub struct FileMeta {
     pub size: u64,
 }
 
+/// Compare file names the way the platform's file manager does. On
+/// Windows that is StrCmpLogicalW, the exact ordering Explorer uses
+/// (punctuation before digits, numeric runs by value, case ignored).
+/// Elsewhere fall back to a natural case-insensitive compare, which is
+/// close to what Finder and the common Linux file managers do.
+#[cfg(windows)]
+pub fn name_cmp(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> std::cmp::Ordering {
+    use std::os::windows::ffi::OsStrExt;
+    let a_wide: Vec<u16> = a.encode_wide().chain(std::iter::once(0)).collect();
+    let b_wide: Vec<u16> = b.encode_wide().chain(std::iter::once(0)).collect();
+    let order =
+        unsafe { windows_sys::Win32::UI::Shell::StrCmpLogicalW(a_wide.as_ptr(), b_wide.as_ptr()) };
+    order.cmp(&0)
+}
+
+#[cfg(not(windows))]
+pub fn name_cmp(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> std::cmp::Ordering {
+    natord::compare_ignore_case(&a.to_string_lossy(), &b.to_string_lossy())
+}
+
 /// Order files by the configured key. Ties (and missing metadata) fall
-/// back to natural name order, so results are always deterministic.
+/// back to name order, so results are always deterministic.
 pub fn sort_paths(mut entries: Vec<FileMeta>, key: SortKey, descending: bool) -> Vec<PathBuf> {
     let by_name = |a: &FileMeta, b: &FileMeta| {
-        natord::compare_ignore_case(
-            &a.path.file_name().unwrap_or_default().to_string_lossy(),
-            &b.path.file_name().unwrap_or_default().to_string_lossy(),
+        name_cmp(
+            a.path.file_name().unwrap_or_default(),
+            b.path.file_name().unwrap_or_default(),
         )
     };
 
     entries.sort_by(|a, b| match key {
-        SortKey::NaturalName => by_name(a, b),
-        SortKey::Name => a
-            .path
-            .file_name()
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .cmp(&b.path.file_name().unwrap_or_default().to_ascii_lowercase())
-            .then_with(|| by_name(a, b)),
+        SortKey::Name => by_name(a, b),
         SortKey::DateModified => a.modified.cmp(&b.modified).then_with(|| by_name(a, b)),
         SortKey::Size => a.size.cmp(&b.size).then_with(|| by_name(a, b)),
     });
@@ -206,11 +219,11 @@ pub fn scan_directory(dir: &Path) -> Result<Vec<PathBuf>, NavError> {
         })
         .collect();
 
-    // Natural, case-insensitive ordering: img2 before img10, like file managers.
+    // Same ordering as the platform's file manager.
     files.sort_by(|a, b| {
-        natord::compare_ignore_case(
-            &a.file_name().unwrap_or_default().to_string_lossy(),
-            &b.file_name().unwrap_or_default().to_string_lossy(),
+        name_cmp(
+            a.file_name().unwrap_or_default(),
+            b.file_name().unwrap_or_default(),
         )
     });
 
@@ -554,12 +567,33 @@ mod tests {
     }
 
     #[test]
-    fn sort_natural_orders_numbers() {
+    fn name_sort_orders_numeric_runs_by_value() {
         let entries = vec![meta("img10.png", 0, 0), meta("img2.png", 0, 0)];
-        let sorted = sort_paths(entries, SortKey::NaturalName, false);
+        let sorted = sort_paths(entries, SortKey::Name, false);
         assert_eq!(
             sorted,
             [PathBuf::from("img2.png"), PathBuf::from("img10.png")]
+        );
+    }
+
+    // Explorer puts punctuation before digits. This is the ordering the
+    // user actually sees in the shell, so match it exactly.
+    #[cfg(windows)]
+    #[test]
+    fn name_sort_matches_explorer_punctuation_order() {
+        let entries = vec![
+            meta("0a.png", 0, 0),
+            meta("_b.png", 0, 0),
+            meta("[c.png", 0, 0),
+        ];
+        let sorted = sort_paths(entries, SortKey::Name, false);
+        assert_eq!(
+            sorted,
+            [
+                PathBuf::from("[c.png"),
+                PathBuf::from("_b.png"),
+                PathBuf::from("0a.png")
+            ]
         );
     }
 }

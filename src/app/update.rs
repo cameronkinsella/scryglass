@@ -61,12 +61,14 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
     match message {
         Message::FileDropped(path) => open_path(path),
 
-        Message::DirectoryScanned(start_file, Ok(files)) => match Nav::new(files, &start_file) {
-            Ok(nav) => open_viewer(app, nav, Source::Fs),
-            Err(e) => push_toast(app, ToastKind::Error, format!("Couldn't open: {e}")),
-        },
+        Message::DirectoryScanned(start_file, opened_dir, Ok(files)) => {
+            match Nav::new(files, &start_file) {
+                Ok(nav) => open_viewer(app, nav, Source::Fs, opened_dir),
+                Err(e) => push_toast(app, ToastKind::Error, format!("Couldn't open: {e}")),
+            }
+        }
 
-        Message::DirectoryScanned(_start_file, Err(err)) => {
+        Message::DirectoryScanned(_start_file, _opened_dir, Err(err)) => {
             push_toast(app, ToastKind::Error, format!("Couldn't open: {err}"))
         }
 
@@ -74,7 +76,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             let entries = index.image_entries();
             let start = entries.first().cloned();
             match start.and_then(|s| Nav::new(entries, &s).ok()) {
-                Some(nav) => open_viewer(app, nav, Source::Archive(index)),
+                Some(nav) => open_viewer(app, nav, Source::Archive(index), true),
                 None => push_toast(
                     app,
                     ToastKind::Error,
@@ -437,6 +439,16 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 return Task::none();
             };
             viewer.nav.replace_files(files);
+
+            // A folder or archive open should land on the first image of
+            // the configured sort, not wherever the pre-sort start file
+            // ended up.
+            if viewer.resort_to_first {
+                viewer.resort_to_first = false;
+                if viewer.nav.cursor() != 0 {
+                    return complete_navigation(app, 0, true);
+                }
+            }
 
             let mut tasks = Vec::new();
             if show_filmstrip {
@@ -1646,7 +1658,7 @@ fn push_toast(app: &mut App, kind: ToastKind, text: String) -> Task<Message> {
 }
 
 /// Build a fresh viewer over `nav` and fire the initial loads.
-fn open_viewer(app: &mut App, nav: Nav, source: Source) -> Task<Message> {
+fn open_viewer(app: &mut App, nav: Nav, source: Source, opened_container: bool) -> Task<Message> {
     let depth = app.config.prefetch_depth;
     let budget = app.config.cache_budget_mb * 1024 * 1024;
     let window_w = app.window_size.width;
@@ -1706,11 +1718,12 @@ fn open_viewer(app: &mut App, nav: Nav, source: Source) -> Task<Message> {
     // placeholders are warm everywhere, not just near the cursor.
     tasks.extend(fire_thumbnailer(&pipeline, &mut viewer, 3));
 
+    viewer.resort_to_first = opened_container;
     app.session = Session::Viewing(Box::new(viewer));
 
-    // Folders open in natural order instantly. A configured custom sort
+    // Folders open in name order instantly. A configured custom sort
     // applies as soon as its metadata is gathered.
-    if app.config.sort_key != crate::config::SortKey::NaturalName || app.config.sort_desc {
+    if app.config.sort_key != crate::config::SortKey::Name || app.config.sort_desc {
         tasks.push(fire_resort(app));
     }
     if app.config.show_info {
@@ -1754,18 +1767,20 @@ pub fn open_path(path: PathBuf) -> Task<Message> {
                 (dir, Some(path))
             };
 
+            let opened_dir = start.is_none();
             match nav::scan_directory(&dir) {
                 Ok(files) => match start.or_else(|| files.first().cloned()) {
-                    Some(start) => (start, Ok(files)),
+                    Some(start) => (start, opened_dir, Ok(files)),
                     None => (
                         dir,
+                        opened_dir,
                         Err(String::from("directory contains no supported images")),
                     ),
                 },
-                Err(e) => (start.unwrap_or(dir), Err(e.to_string())),
+                Err(e) => (start.unwrap_or(dir), opened_dir, Err(e.to_string())),
             }
         },
-        |(path, result)| Message::DirectoryScanned(path, result),
+        |(path, opened_dir, result)| Message::DirectoryScanned(path, opened_dir, result),
     )
 }
 
