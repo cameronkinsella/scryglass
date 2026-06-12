@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 description = "A lightweight, blazing-fast image viewer"
 license = "MIT"
+repository = "https://github.com/cameronkinsella/scryglass"
+readme = "README.md"
+keywords = ["image", "viewer", "photo", "gui", "iced"]
+categories = ["multimedia::images", "gui"]
+exclude = [".github"]
 
 [package.metadata.binstall]
 # Let cargo-binstall grab release artifacts instead of building from source.
@@ -68,6 +73,7 @@ natord = "1.0.9"
 [target.'cfg(windows)'.build-dependencies]
 # Embeds the icon and version info into the exe.
 winresource = "0.1"
+
 [dev-dependencies]
 tempfile = "3"
 zune-core = "0.5.1"
