@@ -25,10 +25,20 @@ pub fn is_video(path: &Path) -> bool {
         .is_some_and(|e| EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
 }
 
+/// Initialize FFmpeg once, with routine decoder chatter silenced, because
+/// libav's default callback prints warnings (e.g. mp3float's "could not
+/// update timestamps for skipped samples") straight to the console.
+/// Real failures still log at error level.
+fn init_ffmpeg() -> Result<(), ffmpeg::Error> {
+    ffmpeg::init()?;
+    ffmpeg::log::set_level(ffmpeg::log::Level::Error);
+    Ok(())
+}
+
 /// Decode the first frame, scaled to fit `max_dim`, for the filmstrip.
 /// Blocking, run on a worker.
 pub fn first_frame_thumb(path: &Path, max_dim: u32) -> Option<crate::media::ThumbData> {
-    ffmpeg::init().ok()?;
+    init_ffmpeg().ok()?;
     let mut input = ffmpeg::format::input(path).ok()?;
     let stream = input.streams().best(ffmpeg::media::Type::Video)?;
     let index = stream.index();
@@ -405,7 +415,7 @@ fn run_pipeline(
     tx: mpsc::SyncSender<VideoFrame>,
     pcm_tx: mpsc::SyncSender<f32>,
 ) -> Result<(), ffmpeg::Error> {
-    ffmpeg::init()?;
+    init_ffmpeg()?;
     let mut input = ffmpeg::format::input(path)?;
 
     if input.duration() > 0 {
