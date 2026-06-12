@@ -64,6 +64,10 @@ windows-sys = { version = "0.59", features = ["Win32_UI_Shell", "Win32_Foundatio
 [target.'cfg(not(windows))'.dependencies]
 # Name-sort fallback where StrCmpLogicalW isn't available.
 natord = "1.0.9"
+
+[target.'cfg(windows)'.build-dependencies]
+# Embeds the icon and version info into the exe.
+winresource = "0.1"
 [dev-dependencies]
 tempfile = "3"
 zune-core = "0.5.1"

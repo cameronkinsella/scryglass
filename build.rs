@@ -1,4 +1,5 @@
-//! Build-time guards and link flags for the static-FFmpeg path.
+//! Windows resources (icon, version info) and build-time guards plus
+//! link flags for the static-FFmpeg path.
 
 use std::env;
 use std::path::PathBuf;
@@ -6,8 +7,20 @@ use std::path::PathBuf;
 fn main() {
     println!("cargo:rerun-if-env-changed=FFMPEG_DIR");
 
-    let video_static = env::var("CARGO_FEATURE_VIDEO_STATIC").is_ok();
     let windows = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
+
+    #[cfg(windows)]
+    if windows {
+        let mut res = winresource::WindowsResource::new();
+        res.set_icon("assets/icon.ico");
+        res.set("ProductName", "scryglass");
+        res.set("FileDescription", "scryglass image viewer");
+        if let Err(e) = res.compile() {
+            println!("cargo:warning=resource embedding failed: {e}");
+        }
+    }
+
+    let video_static = env::var("CARGO_FEATURE_VIDEO_STATIC").is_ok();
     if !video_static || !windows {
         return;
     }
