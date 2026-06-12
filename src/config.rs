@@ -328,7 +328,6 @@ mod tests {
         assert!(AppConfig::is_supported_extension("webp"));
         assert!(AppConfig::is_supported_extension("tiff"));
         assert!(AppConfig::is_supported_extension("tif"));
-        assert!(AppConfig::is_supported_extension("avif"));
     }
 
     #[test]

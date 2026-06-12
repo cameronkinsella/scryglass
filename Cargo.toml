@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "A lightweight, blazing-fast image viewer"
 license = "MIT"
-# TODO: set repository before publishing (cargo-binstall reads it).
 
 [package.metadata.binstall]
 # Let cargo-binstall grab release artifacts instead of building from source.
@@ -12,7 +11,12 @@ pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ targe
 pkg-fmt = "zip"
 
 [dependencies]
-iced = { version = "0.14", features = ["image", "tokio", "canvas"] }
+# image-without-codecs: the media pipeline owns all decoding and hands
+# iced raw RGBA handles, so iced's own codec features stay off. The
+# runtime crate is a direct dependency because the facade hides the
+# allocate API behind its full image feature.
+iced = { version = "0.14", features = ["image-without-codecs", "tokio", "canvas"] }
+iced_runtime = "0.14"
 anyhow = "1"
 thiserror = "2"
 gif = "0.14"
@@ -24,7 +28,20 @@ serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.1.2"
 dirs = "6.0.0"
 tokio = { version = "1.52.3", features = ["fs", "io-util", "macros", "rt", "sync", "time"] }
-image = "0.25.10"
+# Trimmed feature set: the decoders the registry claims plus qoi, the
+# disk thumbnail codec. The default set would add AV1/AVIF encoding via
+# rav1e, which nothing here uses.
+image = { version = "0.25.10", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "bmp",
+    "webp",
+    "tiff",
+    "ico",
+    "qoi",
+    "rayon",
+] }
 kamadak-exif = "0.6.1"
 zip = "8.6.0"
 tar = "0.4.46"
@@ -47,7 +64,6 @@ windows-sys = { version = "0.59", features = ["Win32_UI_Shell", "Win32_Foundatio
 [target.'cfg(not(windows))'.dependencies]
 # Name-sort fallback where StrCmpLogicalW isn't available.
 natord = "1.0.9"
-
 [dev-dependencies]
 tempfile = "3"
 zune-core = "0.5.1"

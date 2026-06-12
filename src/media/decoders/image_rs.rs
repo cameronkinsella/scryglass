@@ -1,5 +1,5 @@
 //! Decoder for the formats handled by the `image` crate:
-//! PNG, JPEG, BMP, WebP, TIFF, ICO, and AVIF.
+//! PNG, JPEG, BMP, WebP, TIFF, and ICO.
 //!
 //! EXIF orientation is read from the decoder and applied to the pixels, so
 //! portrait photos display upright. Images larger than the GPU texture cap
@@ -23,7 +23,7 @@ impl ImageFormat for ImageRs {
         // routed to the animating GifPlayer before reaching the registry,
         // so this only serves GIFs inside archives.
         &[
-            "png", "jpg", "jpeg", "bmp", "webp", "tiff", "tif", "ico", "avif", "gif",
+            "png", "jpg", "jpeg", "bmp", "webp", "tiff", "tif", "ico", "gif",
         ]
     }
 
@@ -98,8 +98,7 @@ fn sniff(magic: &[u8]) -> bool {
     let tiff = magic.starts_with(&[0x49, 0x49, 0x2A, 0x00])
         || magic.starts_with(&[0x4D, 0x4D, 0x00, 0x2A]);
     let ico = magic.starts_with(&[0x00, 0x00, 0x01, 0x00]);
-    let avif = &magic[4..8] == b"ftyp" && &magic[8..12] == b"avif";
-    png || jpeg || gif || bmp || webp || tiff || ico || avif
+    png || jpeg || gif || bmp || webp || tiff || ico
 }
 
 #[cfg(test)]

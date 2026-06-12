@@ -4,9 +4,10 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use iced::time::Instant;
-use iced::widget::image::{Allocation, Handle};
+use iced::widget::image::Handle;
 
 use crate::anim::AnimPlayer;
+use crate::cache::Allocation;
 use crate::media::cache::ImageCache;
 use crate::media::pipeline::Source;
 use crate::nav::Nav;

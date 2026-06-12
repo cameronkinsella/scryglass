@@ -9,9 +9,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use iced::Task;
-use iced::widget::image::{Allocation, Handle};
+use iced::widget::image::Handle;
 
 use crate::cache;
+use crate::cache::Allocation;
 use crate::media::animation::{AnimatedImage, FrameCanvas};
 
 /// Messages produced and consumed by `AnimPlayer`.
