@@ -92,6 +92,9 @@ pub struct App {
     modal: Option<Modal>,
     /// Probed size of the disk thumbnail store (settings display).
     disk_cache_size: Option<u64>,
+    /// When an open started (directory scan or archive indexing), until
+    /// its listing arrives. Drives the spinner for slow archives.
+    opening_since: Option<iced::time::Instant>,
     /// Live toast notifications, oldest first.
     toasts: Vec<Toast>,
     /// Monotonic toast ID source.
@@ -163,14 +166,19 @@ pub fn boot() -> (App, Task<Message>) {
         help_open: false,
         modal: None,
         disk_cache_size: None,
+        opening_since: None,
         toasts: Vec::new(),
         next_toast_id: 0,
     };
     recalc_viewport(&mut app);
 
-    let open = initial_open_arg(std::env::args_os())
-        .map(update::open_path)
-        .unwrap_or_else(Task::none);
+    let open = match initial_open_arg(std::env::args_os()) {
+        Some(path) => {
+            app.opening_since = Some(iced::time::Instant::now());
+            update::open_path(path)
+        }
+        None => Task::none(),
+    };
 
     (app, Task::batch([housekeeping, video_cleanup, open]))
 }
@@ -268,8 +276,13 @@ pub fn subscription(app: &App) -> Subscription<Message> {
         iced::window::close_requests().map(Message::CloseRequested),
     ];
 
+    // The opening spinner runs before any viewer exists.
+    if app.opening_since.is_some() {
+        subs.push(iced::time::every(Duration::from_millis(33)).map(|_| Message::SpinnerTick));
+    }
+
     if let Some(viewer) = app.viewer() {
-        if viewer.pending_since.is_some() {
+        if viewer.pending_since.is_some() && app.opening_since.is_none() {
             subs.push(iced::time::every(Duration::from_millis(33)).map(|_| Message::SpinnerTick));
         }
 

@@ -21,6 +21,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
     };
 
     let content = match &app.session {
+        // Keep the drop prompt out of the way while an open is scanning.
+        Session::Empty if app.opening_since.is_some() => ui::image_display::empty_viewport(),
         Session::Empty => ui::image_display::drop_prompt(),
         Session::Viewing(viewer) => {
             // Invariant: the image area only ever shows the file in the
@@ -262,7 +264,16 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // spinner takes over so nothing covers the picture. With the footer
     // hidden (or fullscreen), a corner spinner keeps progress visible.
     let footer_visible = app.config.show_footer && !app.fullscreen;
+    let opening = app
+        .opening_since
+        .filter(|since| since.elapsed() >= SPINNER_DELAY);
     let spinner_overlay: Element<'_, Message> = match app.viewer() {
+        // An archive or directory scan is in flight. There may be no
+        // viewer yet, so this takes priority over the per-image cases.
+        _ if opening.is_some() => {
+            let elapsed = opening.map(|since| since.elapsed()).unwrap_or_default();
+            center(ui::spinner::spinner(elapsed)).into()
+        }
         Some(viewer)
             if matches!(viewer.displayed, DisplayedImage::None)
                 && viewer

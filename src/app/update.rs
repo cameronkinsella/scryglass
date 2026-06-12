@@ -59,9 +59,13 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
     }
 
     match message {
-        Message::FileDropped(path) => open_path(path),
+        Message::FileDropped(path) => {
+            app.opening_since = Some(Instant::now());
+            open_path(path)
+        }
 
         Message::DirectoryScanned(start_file, opened_dir, Ok(files)) => {
+            app.opening_since = None;
             match Nav::new(files, &start_file) {
                 Ok(nav) => open_viewer(app, nav, Source::Fs, opened_dir),
                 Err(e) => push_toast(app, ToastKind::Error, format!("Couldn't open: {e}")),
@@ -69,10 +73,12 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
 
         Message::DirectoryScanned(_start_file, _opened_dir, Err(err)) => {
+            app.opening_since = None;
             push_toast(app, ToastKind::Error, format!("Couldn't open: {err}"))
         }
 
         Message::ArchiveScanned(archive_path, Ok(index)) => {
+            app.opening_since = None;
             let entries = index.image_entries();
             let start = entries.first().cloned();
             match start.and_then(|s| Nav::new(entries, &s).ok()) {
@@ -91,11 +97,14 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             }
         }
 
-        Message::ArchiveScanned(_archive_path, Err(err)) => push_toast(
-            app,
-            ToastKind::Error,
-            format!("Couldn't open archive: {err}"),
-        ),
+        Message::ArchiveScanned(_archive_path, Err(err)) => {
+            app.opening_since = None;
+            push_toast(
+                app,
+                ToastKind::Error,
+                format!("Couldn't open archive: {err}"),
+            )
+        }
 
         Message::MediaLoaded { path, result } => {
             let zoom_mode = app.config.zoom_mode;
@@ -494,7 +503,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             )
         }
 
-        Message::FileDialogResult(Some(path)) => open_path(path),
+        Message::FileDialogResult(Some(path)) => {
+            app.opening_since = Some(Instant::now());
+            open_path(path)
+        }
         Message::FileDialogResult(None) => Task::none(),
 
         Message::CloseFile => {
