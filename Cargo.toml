@@ -52,7 +52,8 @@ zip = "8.6.0"
 tar = "0.4.46"
 flate2 = "1.1.9"
 sevenz-rust2 = "0.21.0"
-unrar = { version = "0.5.8", optional = true }
+# The maintained fork of unrar.rs, aliased so call sites stay `unrar::`.
+unrar = { package = "unrar-ng", version = "0.7.7", optional = true }
 jxl-oxide = { version = "0.12.6", optional = true }
 resvg = { version = "0.47.0", default-features = false, features = ["text"], optional = true }
 rawler = { version = "0.7.2", optional = true }
