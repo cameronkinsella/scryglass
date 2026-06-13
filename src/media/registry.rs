@@ -61,6 +61,8 @@ impl Registry {
         formats.push(Box::new(super::decoders::raw::Raw));
         #[cfg(feature = "heif")]
         formats.push(Box::new(super::decoders::heif::Heif));
+        #[cfg(feature = "video")]
+        formats.push(Box::new(super::decoders::avif::Avif));
         Self { formats }
     }
 

@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags: [ "v*" ]
   workflow_dispatch:
 
 permissions:
@@ -12,8 +12,9 @@ env:
   CARGO_TERM_COLOR: always
   # Pin vcpkg so FFmpeg and libheif versions only change deliberately.
   VCPKG_COMMIT: 06a7fdd564234908731c59ac46a624f808e87b1c
-  # Core LGPL FFmpeg plus decode-only libheif. No x265, no GPL anywhere.
-  VCPKG_PACKAGES: ffmpeg[core,avcodec,avformat,swscale,swresample] libheif[core]
+  # Core LGPL FFmpeg with dav1d for AV1, plus decode-only libheif.
+  # No x265, no GPL anywhere (dav1d is BSD-2).
+  VCPKG_PACKAGES: ffmpeg[core,avcodec,avformat,swscale,swresample,dav1d] libheif[core]
 
 jobs:
   build:
@@ -65,7 +66,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.target }}
+          key: release-${{ matrix.target }}-${{ hashFiles('.github/workflows/release.yml', '.github/vcpkg-triplets/*') }}
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -121,18 +122,31 @@ jobs:
         env:
           PKG_CONFIG_ALL_STATIC: "1"
         run: |
-          export FFMPEG_DIR="$VCPKG_ROOT/installed/${{ matrix.triplet }}"
-          export PKG_CONFIG_PATH="$FFMPEG_DIR/lib/pkgconfig"
+          export MEDIA_PREFIX="$VCPKG_ROOT/installed/${{ matrix.triplet }}"
+          export PKG_CONFIG_PATH="$MEDIA_PREFIX/lib/pkgconfig"
+
           if [ "$RUNNER_OS" = "macOS" ]; then
             # Match the pinned vcpkg deployment target.
             export MACOSX_DEPLOYMENT_TARGET=11.0
+
+            # Do not force ffmpeg-sys-next down FFMPEG_DIR on macOS.
+            # Use pkg-config metadata so static deps like dav1d are linked.
+            unset FFMPEG_DIR
+
+            if ! pkg-config --libs --static libavcodec | tr ' ' '\n' | grep -E '(^-ldav1d$|libdav1d)' >/dev/null; then
+              echo "libavcodec.pc did not expose dav1d"
+              pkg-config --libs --static libavcodec
+              exit 1
+            fi
           fi
+
           if [ "${{ matrix.target }}" = "x86_64-apple-darwin" ]; then
             # libde265's x86 SIMD dispatch references clang's compiler-rt
             # builtins (__cpu_model), which Rust's link line never pulls in.
             rtlib="$(clang --print-resource-dir)/lib/darwin/libclang_rt.osx.a"
             export RUSTFLAGS="-C link-arg=$rtlib"
           fi
+
           cargo build --release --all-features --target ${{ matrix.target }}
 
       - name: Check for stray media DLL imports (Windows)
@@ -143,7 +157,7 @@ jobs:
           Import-Module "$vsPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation -DevCmdArguments "-arch=x64"
           $deps = dumpbin /dependents "target\${{ matrix.target }}\release\scryglass.exe"
-          if ($deps -match "avcodec|avformat|heif|de265") {
+          if ($deps -match "avcodec|avformat|heif|de265|dav1d") {
             $deps
             throw "exe imports media DLLs, static link failed"
           }

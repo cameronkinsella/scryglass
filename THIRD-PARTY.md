@@ -20,6 +20,8 @@ vcpkg with the exact configuration pinned in
 - **libheif**: LGPL-3.0-or-later. Built with the `core` feature set only.
 - **libde265** (HEVC decoding for HEIF): LGPL-3.0-or-later. Decode only.
   The x265 encoder is not present in distributed binaries.
+- **dav1d** (AV1 decoding for AVIF stills and AV1 video, linked into
+  FFmpeg): BSD-2-Clause.
 - **UnRAR** (RAR extraction, vendored by the `unrar-ng` crate): freeware
   license, reproduced verbatim below as its terms require.
 

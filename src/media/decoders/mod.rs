@@ -2,6 +2,8 @@
 
 pub mod image_rs;
 
+#[cfg(feature = "video")]
+pub mod avif;
 #[cfg(feature = "heif")]
 pub mod heif;
 #[cfg(feature = "jxl")]

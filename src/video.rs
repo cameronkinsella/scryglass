@@ -35,9 +35,18 @@ fn init_ffmpeg() -> Result<(), ffmpeg::Error> {
     Ok(())
 }
 
-/// Decode the first frame, scaled to fit `max_dim`, for the filmstrip.
-/// Blocking, run on a worker.
-pub fn first_frame_thumb(path: &Path, max_dim: u32) -> Option<crate::media::ThumbData> {
+/// A decoded first frame in RGBA, with the source's native dimensions.
+pub struct FirstFrame {
+    pub width: u32,
+    pub height: u32,
+    pub native_size: (u32, u32),
+    pub pixels: Vec<u8>,
+}
+
+/// Decode the first video frame of `path` as RGBA, optionally scaled to
+/// fit `max_dim`. Blocking, run on a worker. Also serves AVIF stills,
+/// which are AV1 keyframes in a HEIF container.
+pub fn first_frame(path: &Path, max_dim: Option<u32>) -> Option<FirstFrame> {
     init_ffmpeg().ok()?;
     let mut input = ffmpeg::format::input(path).ok()?;
     let stream = input.streams().best(ffmpeg::media::Type::Video)?;
@@ -61,17 +70,20 @@ pub fn first_frame_thumb(path: &Path, max_dim: u32) -> Option<crate::media::Thum
         }
 
         let (width, height) = (decoder.width(), decoder.height());
-        let scale = (max_dim as f32 / width.max(height) as f32).min(1.0);
-        let thumb_w = ((width as f32 * scale) as u32).max(1);
-        let thumb_h = ((height as f32 * scale) as u32).max(1);
+        let scale = match max_dim {
+            Some(dim) => (dim as f32 / width.max(height) as f32).min(1.0),
+            None => 1.0,
+        };
+        let out_w = ((width as f32 * scale) as u32).max(1);
+        let out_h = ((height as f32 * scale) as u32).max(1);
 
         let mut scaler = ffmpeg::software::scaling::Context::get(
             decoder.format(),
             width,
             height,
             ffmpeg::format::Pixel::RGBA,
-            thumb_w,
-            thumb_h,
+            out_w,
+            out_h,
             ffmpeg::software::scaling::Flags::BILINEAR,
         )
         .ok()?;
@@ -79,22 +91,34 @@ pub fn first_frame_thumb(path: &Path, max_dim: u32) -> Option<crate::media::Thum
         scaler.run(&frame, &mut rgba_frame).ok()?;
 
         let stride = rgba_frame.stride(0);
-        let row_bytes = thumb_w as usize * 4;
+        let row_bytes = out_w as usize * 4;
         let data = rgba_frame.data(0);
-        let mut pixels = Vec::with_capacity(row_bytes * thumb_h as usize);
-        for row in 0..thumb_h as usize {
+        let mut pixels = Vec::with_capacity(row_bytes * out_h as usize);
+        for row in 0..out_h as usize {
             let offset = row * stride;
             pixels.extend_from_slice(&data[offset..offset + row_bytes]);
         }
 
-        return Some(crate::media::ThumbData {
-            width: thumb_w,
-            height: thumb_h,
+        return Some(FirstFrame {
+            width: out_w,
+            height: out_h,
+            native_size: (width, height),
             pixels,
-            original_size: (width, height),
         });
     }
     None
+}
+
+/// Decode the first frame, scaled to fit `max_dim`, for the filmstrip.
+/// Blocking, run on a worker.
+pub fn first_frame_thumb(path: &Path, max_dim: u32) -> Option<crate::media::ThumbData> {
+    let frame = first_frame(path, Some(max_dim))?;
+    Some(crate::media::ThumbData {
+        width: frame.width,
+        height: frame.height,
+        pixels: frame.pixels,
+        original_size: frame.native_size,
+    })
 }
 
 /// A decoded frame ready for GPU upload.

@@ -20,51 +20,58 @@ Or build from source (`cargo install scryglass`), see Build & Run below
 for the optional native features.
 
 Release binaries ship with all features on every platform: video
-playback (FFmpeg statically linked) and HEIC/HEIF decoding included.
+playback (FFmpeg statically linked), AV1/AVIF, and HEIC/HEIF decoding
+included.
 
 ## Features
 
-- **Instant, flicker-free navigation**: every keypress moves immediately, blurred placeholders cover slow loads, and images render as pre-allocated GPU textures
+- **Instant, flicker-free navigation**: every keypress moves immediately, blurred placeholders cover slow loads, and
+  images render as pre-allocated GPU textures
 - **Built for slow storage**: all I/O runs off-thread with cancellation, so stalled reads never freeze the UI
-- **Smart caching**: background prefetch into a byte-budgeted LRU cache, plus persistent disk thumbnails with deleted-file purging, 90-day expiry, and a 512 MB cap
+- **Smart caching**: background prefetch into a byte-budgeted LRU cache, plus persistent disk thumbnails with
+  deleted-file purging, 90-day expiry, and a 512 MB cap
 - **Archives as folders**: browse zip/cbz, tar, 7z/cb7, and rar/cbr directly, including the animations and videos inside
 - **Animation playback**: GIF, APNG, and animated WebP at native frame rate with correct frame compositing
-- **Video player** (`video` feature): in-process FFmpeg decode with audio-synced playback, seeking, volume, looping, and auto-hiding controls
-- **Flexible zoom**: six zoom modes, scroll-wheel zoom toward the cursor, drag-to-pan, and a crisp-pixels mode for pixel art
+- **Video player** (`video` feature): in-process FFmpeg decode with audio-synced playback, seeking, volume, looping, and
+  auto-hiding controls
+- **Flexible zoom**: six zoom modes, scroll-wheel zoom toward the cursor, drag-to-pan, and a crisp-pixels mode for pixel
+  art
 - **EXIF aware**: orientation applied, embedded thumbnails for instant previews, and an info panel with camera metadata
 - **File management**: recycle-bin delete and in-place rename, with an optional read-only mode
 - **Native sorting**: files order exactly like your file manager, with date and size options
-- **Comfortable**: dark and light themes, a virtualized filmstrip, position slider, context menu, persistent settings, and a full keyboard map (`?` shows it)
+- **Comfortable**: dark and light themes, a virtualized filmstrip, position slider, context menu, persistent settings,
+  and a full keyboard map (`?` shows it)
 
 ## Supported Formats
 
-| Type | Formats |
-|---|---|
-| Images | PNG, JPEG, GIF, BMP, WebP, TIFF, ICO, JPEG XL, SVG |
-| Animations | GIF, APNG, animated WebP |
+| Type       | Formats                                                                 |
+|------------|-------------------------------------------------------------------------|
+| Images     | PNG, JPEG, GIF, BMP, WebP, TIFF, ICO, JPEG XL, SVG                      |
+| Animations | GIF, APNG, animated WebP                                                |
 | Camera RAW | embedded previews from CR2, CR3, NEF, ARW, DNG, ORF, RW2, RAF, PEF, SRW |
-| HEIC/HEIF | `heif` feature |
-| Video | MP4, MKV, WebM, MOV, AVI, M4V (`video` feature) |
-| Archives | zip, cbz, tar, tar.gz, tgz, 7z, cb7, rar, cbr |
+| HEIC/HEIF  | `heif` feature                                                          |
+| AVIF       | `video` feature (decoded through FFmpeg)                                |
+| Video      | MP4, MKV, WebM, MOV, AVI, M4V including AV1 (`video` feature)           |
+| Archives   | zip, cbz, tar, tar.gz, tgz, 7z, cb7, rar, cbr                           |
 
 ## Keyboard & Mouse
 
-| Input | Action |
-|---|---|
-| `→` / `D`, `←` / `A` | Next / previous image (hold to scroll) |
-| `Home` / `End` | First / last image |
-| Scroll wheel, `+` / `−` | Zoom (toward cursor / center) |
-| `Ctrl+0`, double-click | Reset zoom |
-| `Ctrl+1` | Zoom to 100% |
-| Left-drag | Pan (when zoomed in) |
-| `F` / `F11` | Fullscreen |
-| `I` | Info panel |
-| `R` / `Shift+R` | Rotate view |
-| `Delete`, `F2` | Recycle / rename |
-| `Space`, `J` / `L`, `M`, `↑` / `↓` | Video: play/pause, seek, mute, volume |
-| `?` | Shortcut help |
-| Right-click | Context menu |
-| `Esc` | Close dialogs / leave fullscreen / dismiss menus |
+| Input                              | Action                                           |
+|------------------------------------|--------------------------------------------------|
+| `→` / `D`, `←` / `A`               | Next / previous image (hold to scroll)           |
+| `Home` / `End`                     | First / last image                               |
+| Scroll wheel, `+` / `−`            | Zoom (toward cursor / center)                    |
+| `Ctrl+0`, double-click             | Reset zoom                                       |
+| `Ctrl+1`                           | Zoom to 100%                                     |
+| Left-drag                          | Pan (when zoomed in)                             |
+| `F` / `F11`                        | Fullscreen                                       |
+| `I`                                | Info panel                                       |
+| `R` / `Shift+R`                    | Rotate view                                      |
+| `Delete`, `F2`                     | Recycle / rename                                 |
+| `Space`, `J` / `L`, `M`, `↑` / `↓` | Video: play/pause, seek, mute, volume            |
+| `?`                                | Shortcut help                                    |
+| Right-click                        | Context menu                                     |
+| `Esc`                              | Close dialogs / leave fullscreen / dismiss menus |
 
 ## Build & Run
 
@@ -93,7 +100,7 @@ For a fully self-contained binary with every feature: no DLLs, no
 runtime dependencies at all, link FFmpeg statically instead:
 
 ```
-vcpkg install ffmpeg[core,avcodec,avformat,swscale,swresample]:x64-windows-static-md
+vcpkg install ffmpeg[core,avcodec,avformat,swscale,swresample,dav1d]:x64-windows-static-md
 $env:FFMPEG_DIR = "<vcpkg>\installed\x64-windows-static-md"
 cargo build --release --all-features
 ```
@@ -106,10 +113,10 @@ code doesn't compile against older headers). HEIF is already static via
 vcpkg, so the result is one ~55 MB exe.
 
 Licensing: this configuration is LGPL-clean (no x264/x265 inside FFmpeg;
-HEVC *decoding* uses FFmpeg's native LGPL decoder). LGPL's relink
-requirement is satisfied by this project being open source. The codec
-set is FFmpeg's built-ins. Broad coverage, but AV1 video would need the
-`dav1d` vcpkg feature added.
+HEVC *decoding* uses FFmpeg's native LGPL decoder, AV1 uses dav1d which
+is BSD-2). LGPL's relink requirement is satisfied by this project being
+open source. For AV1 and AVIF support, add `dav1d` to the FFmpeg feature
+list in the vcpkg install, as the release workflow does.
 
 ## Configuration
 
@@ -128,7 +135,9 @@ scryglass follows the Elm Architecture (iced pattern):
 - **`update()`**: handles messages, fires async tasks
 - **`view()`**: pure rendering, no side effects
 
-Images are loaded through iced's `image::allocate()` API, which returns GPU-resident `Allocation` objects. Holding an `Allocation` guarantees the texture renders immediately: no decode delay, no flicker. All I/O (directory scans, decodes, metadata, config writes) runs off the UI thread, and every load is cancellable the moment you navigate away.
+Images are loaded through iced's `image::allocate()` API, which returns GPU-resident `Allocation` objects. Holding an
+`Allocation` guarantees the texture renders immediately: no decode delay, no flicker. All I/O (directory scans, decodes,
+metadata, config writes) runs off the UI thread, and every load is cancellable the moment you navigate away.
 
 ## License
 

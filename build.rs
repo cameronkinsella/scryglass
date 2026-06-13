@@ -21,6 +21,14 @@ fn main() {
     }
 
     let video_static = env::var("CARGO_FEATURE_VIDEO_STATIC").is_ok();
+
+    // FFmpeg's dav1d decoder needs libdav1d on the link line too. The
+    // bindings only list FFmpeg's own libraries when FFMPEG_DIR is set,
+    // not their external dependencies.
+    if video_static {
+        println!("cargo:rustc-link-lib=static=dav1d");
+    }
+
     if !video_static || !windows {
         return;
     }
