@@ -1,0 +1,33 @@
+name: Tag version bumps
+
+on:
+  push:
+    branches: [master]
+    paths: [Cargo.toml]
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Tag new versions and start the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          tag="v${version}"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "$tag already exists, nothing to do"
+            exit 0
+          fi
+          git tag "$tag"
+          git push origin "$tag"
+          # Tags pushed with the workflow token do not fire tag-triggered
+          # workflows, so start the release run on the tag directly.
+          # Dispatch is the documented exception to that recursion rule.
+          gh workflow run release.yml --ref "$tag"
