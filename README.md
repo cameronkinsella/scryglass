@@ -23,6 +23,11 @@ Release binaries ship with all features on every platform: video
 playback (FFmpeg statically linked), AV1/AVIF, and HEIC/HEIF decoding
 included.
 
+To make scryglass your default viewer on Windows, turn on file
+associations in its Settings, then pick it under Settings > Apps >
+Default apps. This registers every supported image, video, and comic
+format for the current user, no admin needed.
+
 ## Features
 
 - **Instant, flicker-free navigation**: every keypress moves immediately, blurred placeholders cover slow loads, and

@@ -63,12 +63,176 @@ pub fn show_properties(path: &Path) {
 }
 
 // ---------------------------------------------------------------------------
+// File associations ("Default apps" registration)
+// ---------------------------------------------------------------------------
+
+/// Register this exe as an "Open with" candidate for every supported
+/// format, per-user (no admin). Windows requires the user to pick the
+/// default themselves in Settings, applications can only volunteer.
+pub fn register_file_associations() -> anyhow::Result<()> {
+    #[cfg(target_os = "windows")]
+    return windows::register_file_associations();
+
+    #[cfg(not(target_os = "windows"))]
+    anyhow::bail!("file association registration is Windows-only for now");
+}
+
+/// Remove everything `register_file_associations` wrote.
+pub fn unregister_file_associations() -> anyhow::Result<()> {
+    #[cfg(target_os = "windows")]
+    return windows::unregister_file_associations();
+
+    #[cfg(not(target_os = "windows"))]
+    anyhow::bail!("file association registration is Windows-only for now");
+}
+
+/// Whether this app is currently registered with the OS.
+pub fn file_associations_registered() -> bool {
+    #[cfg(target_os = "windows")]
+    return windows::file_associations_registered();
+
+    #[cfg(not(target_os = "windows"))]
+    false
+}
+
+/// The ProgID groups we register: (progid, friendly name, extensions).
+/// Extensions come from the live decoder registry, so new formats flow
+/// through automatically. Plain archives (zip, 7z, rar) are left out; only
+/// the comic variants are registered.
+// Lives outside the windows module so the partition logic is tested on
+// every platform.
+#[cfg(any(target_os = "windows", test))]
+pub fn association_groups() -> Vec<(&'static str, &'static str, Vec<&'static str>)> {
+    let images: Vec<&'static str> = crate::media::registry::global().extensions().collect();
+    let videos: Vec<&'static str> = crate::video::EXTENSIONS.to_vec();
+    let mut comics = vec!["cbz", "cb7"];
+    if cfg!(feature = "rar") {
+        comics.push("cbr");
+    }
+
+    let mut groups = vec![("scryglass.image", "Image", images)];
+    if !videos.is_empty() {
+        groups.push(("scryglass.video", "Video", videos));
+    }
+    groups.push(("scryglass.comic", "Comic book archive", comics));
+    groups
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn association_groups_cover_core_formats() {
+        let groups = association_groups();
+        let find = |ext: &str| {
+            groups
+                .iter()
+                .find(|(_, _, exts)| exts.contains(&ext))
+                .map(|(progid, _, _)| *progid)
+        };
+
+        assert_eq!(find("png"), Some("scryglass.image"));
+        assert_eq!(find("cbz"), Some("scryglass.comic"));
+        // Plain archives stay unclaimed on purpose.
+        assert_eq!(find("zip"), None);
+        assert_eq!(find("rar"), None);
+        #[cfg(feature = "video")]
+        assert_eq!(find("mp4"), Some("scryglass.video"));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Windows implementation
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
 mod windows {
     use std::path::Path;
+
+    use anyhow::Context;
+    use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
+
+    /// HKCU paths owned by the registration. Everything written lives
+    /// under these, so unregistration is two subtree deletes plus one
+    /// value.
+    const CAPABILITIES: &str = r"Software\scryglass\Capabilities";
+    const APP_ROOT: &str = r"Software\scryglass";
+    const REGISTERED_APPS: &str = r"Software\RegisteredApplications";
+
+    pub fn register_file_associations() -> anyhow::Result<()> {
+        let exe = std::env::current_exe().context("locating the running exe")?;
+        let exe = exe.display();
+        let open_command = format!("\"{exe}\" \"%1\"");
+        let icon = format!("\"{exe}\",0");
+
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+
+        for (progid, friendly, extensions) in super::association_groups() {
+            let (key, _) = hkcu
+                .create_subkey(format!(r"Software\Classes\{progid}"))
+                .with_context(|| format!("creating ProgID {progid}"))?;
+            key.set_value("", &format!("scryglass {friendly}"))?;
+            key.set_value("FriendlyTypeName", &format!("scryglass {friendly}"))?;
+            let (icon_key, _) = key.create_subkey("DefaultIcon")?;
+            icon_key.set_value("", &icon)?;
+            let (cmd, _) = key.create_subkey(r"shell\open\command")?;
+            cmd.set_value("", &open_command)?;
+
+            let (assoc, _) = hkcu.create_subkey(format!(r"{CAPABILITIES}\FileAssociations"))?;
+            for ext in extensions {
+                assoc.set_value(format!(".{ext}"), &progid)?;
+            }
+        }
+
+        let (caps, _) = hkcu.create_subkey(CAPABILITIES)?;
+        caps.set_value("ApplicationName", &"scryglass")?;
+        caps.set_value(
+            "ApplicationDescription",
+            &"A lightweight, blazing-fast image viewer",
+        )?;
+
+        let (registered, _) = hkcu.create_subkey(REGISTERED_APPS)?;
+        registered.set_value("scryglass", &CAPABILITIES)?;
+
+        notify_shell();
+        Ok(())
+    }
+
+    pub fn file_associations_registered() -> bool {
+        RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey(REGISTERED_APPS)
+            .and_then(|key| key.get_value::<String, _>("scryglass"))
+            .is_ok()
+    }
+
+    pub fn unregister_file_associations() -> anyhow::Result<()> {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+
+        if let Ok(registered) =
+            hkcu.open_subkey_with_flags(REGISTERED_APPS, winreg::enums::KEY_SET_VALUE)
+        {
+            let _ = registered.delete_value("scryglass");
+        }
+        let _ = hkcu.delete_subkey_all(APP_ROOT);
+        for (progid, _, _) in super::association_groups() {
+            let _ = hkcu.delete_subkey_all(format!(r"Software\Classes\{progid}"));
+        }
+
+        notify_shell();
+        Ok(())
+    }
+
+    /// Tell Explorer the association set changed so menus refresh
+    /// without a logoff.
+    fn notify_shell() {
+        use windows_sys::Win32::UI::Shell;
+        const SHCNE_ASSOCCHANGED: i32 = 0x0800_0000;
+        unsafe {
+            Shell::SHChangeNotify(SHCNE_ASSOCCHANGED, 0, std::ptr::null(), std::ptr::null());
+        }
+    }
 
     /// Reveal a file in Explorer, reusing an existing window if possible.
     /// Uses `SHOpenFolderAndSelectItems` which highlights the file.

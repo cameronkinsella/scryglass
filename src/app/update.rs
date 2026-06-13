@@ -1005,7 +1005,29 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             app.open_menu = None;
             app.modal = Some(Modal::Settings);
             app.disk_cache_size = None;
+            app.associations_registered = crate::platform::file_associations_registered();
             probe_disk_cache_size(&app.pipeline)
+        }
+
+        Message::ToggleFileAssociations => {
+            let result = if app.associations_registered {
+                crate::platform::unregister_file_associations().map(|_| false)
+            } else {
+                crate::platform::register_file_associations().map(|_| true)
+            };
+            match result {
+                Ok(registered) => {
+                    app.associations_registered = registered;
+                    let note = if registered {
+                        "Done. To make scryglass the default, pick it under \
+                         Windows Settings > Default apps."
+                    } else {
+                        "scryglass no longer appears in the Open with menu."
+                    };
+                    push_toast(app, ToastKind::Info, note.into())
+                }
+                Err(e) => push_toast(app, ToastKind::Error, format!("Couldn't update: {e}")),
+            }
         }
 
         Message::DiskCacheSize(bytes) => {

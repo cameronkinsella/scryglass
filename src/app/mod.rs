@@ -25,7 +25,6 @@ pub use message::Message;
 pub use update::update;
 pub use view::view;
 
-use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -92,6 +91,9 @@ pub struct App {
     modal: Option<Modal>,
     /// Probed size of the disk thumbnail store (settings display).
     disk_cache_size: Option<u64>,
+    /// Whether the app is in the OS Open with menu (settings display,
+    /// refreshed when the dialog opens).
+    associations_registered: bool,
     /// When an open started (directory scan or archive indexing), until
     /// its listing arrives. Drives the spinner for slow archives.
     opening_since: Option<iced::time::Instant>,
@@ -133,7 +135,7 @@ pub enum Modal {
 ///
 /// If a file or directory path was passed on the command line (e.g. via
 /// "Open with…" in a file manager), opening it starts immediately.
-pub fn boot() -> (App, Task<Message>) {
+pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Message>) {
     let config = AppConfig::load();
     let disk_thumbs = DiskThumbs::create(config.disk_thumbs);
 
@@ -166,13 +168,14 @@ pub fn boot() -> (App, Task<Message>) {
         help_open: false,
         modal: None,
         disk_cache_size: None,
+        associations_registered: crate::platform::file_associations_registered(),
         opening_since: None,
         toasts: Vec::new(),
         next_toast_id: 0,
     };
     recalc_viewport(&mut app);
 
-    let open = match initial_open_arg(std::env::args_os()) {
+    let open = match initial_open_path(initial_path) {
         Some(path) => {
             app.opening_since = Some(iced::time::Instant::now());
             update::open_path(path)
@@ -183,11 +186,9 @@ pub fn boot() -> (App, Task<Message>) {
     (app, Task::batch([housekeeping, video_cleanup, open]))
 }
 
-/// The first CLI argument as a path, if it points to an existing file
-/// or directory.
-fn initial_open_arg(mut args: impl Iterator<Item = OsString>) -> Option<PathBuf> {
-    let _exe = args.next();
-    let path = PathBuf::from(args.next()?);
+/// The CLI path, if it points to an existing file or directory.
+fn initial_open_path(path: Option<PathBuf>) -> Option<PathBuf> {
+    let path = path?;
     (path.is_file() || path.is_dir()).then_some(path)
 }
 
@@ -381,49 +382,32 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    fn args(items: &[&std::path::Path]) -> impl Iterator<Item = OsString> {
-        std::iter::once(OsString::from("scryglass.exe"))
-            .chain(items.iter().map(|p| p.as_os_str().to_owned()))
-            .collect::<Vec<_>>()
-            .into_iter()
-    }
-
     #[test]
-    fn initial_open_arg_returns_existing_file() {
+    fn initial_open_path_returns_existing_file() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("photo.png");
         fs::write(&file, b"").unwrap();
-        assert_eq!(initial_open_arg(args(&[&file])), Some(file));
+        assert_eq!(initial_open_path(Some(file.clone())), Some(file));
     }
 
     #[test]
-    fn initial_open_arg_returns_existing_directory() {
+    fn initial_open_path_returns_existing_directory() {
         let dir = TempDir::new().unwrap();
         assert_eq!(
-            initial_open_arg(args(&[dir.path()])),
+            initial_open_path(Some(dir.path().to_path_buf())),
             Some(dir.path().to_path_buf())
         );
     }
 
     #[test]
-    fn initial_open_arg_rejects_missing_path() {
+    fn initial_open_path_rejects_missing_path() {
         let dir = TempDir::new().unwrap();
         let missing = dir.path().join("nope.png");
-        assert_eq!(initial_open_arg(args(&[&missing])), None);
+        assert_eq!(initial_open_path(Some(missing)), None);
     }
 
     #[test]
-    fn initial_open_arg_without_args_returns_none() {
-        assert_eq!(initial_open_arg(args(&[])), None);
-    }
-
-    #[test]
-    fn initial_open_arg_ignores_extra_args() {
-        let dir = TempDir::new().unwrap();
-        let file = dir.path().join("a.png");
-        fs::write(&file, b"").unwrap();
-        let extra = dir.path().join("b.png");
-        fs::write(&extra, b"").unwrap();
-        assert_eq!(initial_open_arg(args(&[&file, &extra])), Some(file));
+    fn initial_open_path_without_path_returns_none() {
+        assert_eq!(initial_open_path(None), None);
     }
 }

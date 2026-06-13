@@ -10,8 +10,13 @@ use crate::ui::theme;
 /// Render the settings card.
 ///
 /// `disk_cache_size` is the probed size of the persistent thumbnail
-/// store (`None` while probing).
-pub fn settings<'a>(config: &AppConfig, disk_cache_size: Option<u64>) -> Element<'a, Message> {
+/// store (`None` while probing). `associations_registered` is whether
+/// the app currently sits in the OS Open with menu.
+pub fn settings<'a>(
+    config: &AppConfig,
+    disk_cache_size: Option<u64>,
+    associations_registered: bool,
+) -> Element<'a, Message> {
     let switch = |label: &str, on: bool, msg: fn(bool) -> Message| {
         toggler(on)
             .label(label.to_string())
@@ -88,6 +93,26 @@ pub fn settings<'a>(config: &AppConfig, disk_cache_size: Option<u64>) -> Element
         ]
         .align_y(iced::Alignment::Center),
     );
+
+    // Windows "Open with" needs a one-time per-user registration.
+    if cfg!(target_os = "windows") {
+        let (caption, action) = if associations_registered {
+            ("scryglass is in the Open with menu for images", "Remove")
+        } else {
+            ("Offer scryglass when opening images", "Set up")
+        };
+        rows = rows.push(rule::horizontal(1));
+        rows = rows.push(
+            row![
+                text(caption).size(13).width(Length::Fill),
+                button(text(action).size(13))
+                    .on_press(Message::ToggleFileAssociations)
+                    .padding([3, 12])
+                    .style(button::secondary),
+            ]
+            .align_y(iced::Alignment::Center),
+        );
+    }
 
     rows = rows.push(rule::horizontal(1));
     rows = rows.push(

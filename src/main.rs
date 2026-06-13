@@ -16,6 +16,8 @@ mod video;
 #[path = "video_stub.rs"]
 mod video;
 
+use std::path::PathBuf;
+
 /// Decode the embedded window icon. The icon API that takes encoded
 /// bytes sits behind iced's codec feature, which is off, so decode with
 /// the image crate the pipeline already uses.
@@ -30,8 +32,11 @@ fn window_icon() -> Option<iced::window::Icon> {
 fn main() -> anyhow::Result<()> {
     // Restore the last window size. The close handler persists it.
     let initial = config::AppConfig::load();
+    // A file passed by the OS (file association, "Open with", or the shell).
+    let initial_path = std::env::args_os().nth(1).map(PathBuf::from);
+    let boot = move || app::boot(initial_path.clone());
 
-    iced::application(app::boot, app::update, app::view)
+    iced::application(boot, app::update, app::view)
         .title(app::title)
         .theme(app::theme)
         .subscription(app::subscription)

@@ -183,6 +183,8 @@ pub enum Message {
     ToggleConfirmDelete,
     /// Settings: toggle the persistent thumbnail store (applies on restart).
     ToggleDiskThumbs,
+    /// Settings: add or remove the app from the OS Open with menu.
+    ToggleFileAssociations,
     /// Bitmap clipboard copy finished.
     CopyImageFinished(Result<(), String>),
     /// The OS asked to close the window, save config first.
