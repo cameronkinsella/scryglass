@@ -19,9 +19,12 @@ cargo binstall scryglass
 Or build from source (`cargo install scryglass`), see Build & Run below
 for the optional native features.
 
-Release binaries ship with all features on every platform: video
-playback (FFmpeg statically linked), AV1/AVIF, and HEIC/HEIF decoding
-included.
+Release binaries from the [releases page](https://github.com/cameronkinsella/scryglass/releases)
+ship with all features on every platform: video playback (FFmpeg
+statically linked), AV1/AVIF, and HEIC/HEIF decoding included. Releases
+also carry a Linux AppImage and a macOS dmg. The
+dmg is unsigned, so macOS quarantines it on first launch: right-click
+the app and pick Open once, or install through cargo-binstall instead.
 
 To make scryglass your default viewer on Windows, turn on file
 associations in its Settings, then pick it under Settings > Apps >
@@ -80,48 +83,19 @@ format for the current user, no admin needed.
 
 ## Build & Run
 
-Requires Rust edition 2024.
+Requires a current stable Rust toolchain with Rust 2024 edition support.
+The default feature set is pure Rust except for the optional RAR support,
+which builds vendored unrar C++ sources.
 
 ```
-cargo build                    # compile (default features)
-cargo run -- <path>            # open a file, folder, or archive
-cargo build --features video   # include video playback (see below)
-cargo build --features heif    # include HEIC/HEIF (needs system libheif)
-cargo test                     # run tests
+cargo build                         # default image/archive viewer
+cargo run -- <path>                 # open a file, folder, or archive
+cargo build --no-default-features   # smallest dependency surface
+cargo test                          # run tests
 ```
 
-Building with `video` links FFmpeg's libraries. On Linux, install the dev
-packages (`libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
-libswresample-dev`) plus `clang`. On Windows, install LLVM and an FFmpeg
-*shared* build (e.g. `winget install LLVM.LLVM Gyan.FFmpeg.Shared`),
-then set `FFMPEG_DIR` to the FFmpeg folder containing `include/` and
-`lib/`, and `LIBCLANG_PATH` to LLVM's `bin` directory. At runtime the
-FFmpeg DLLs must be on PATH or beside the executable (LGPL dynamic
-linking).
-
-### Single-file executable (`video-static`)
-
-For a fully self-contained binary with every feature: no DLLs, no
-runtime dependencies at all, link FFmpeg statically instead:
-
-```
-vcpkg install ffmpeg[core,avcodec,avformat,swscale,swresample,dav1d]:x64-windows-static-md
-$env:FFMPEG_DIR = "<vcpkg>\installed\x64-windows-static-md"
-cargo build --release --all-features
-```
-
-`--all-features` includes `video-static`, which switches the FFmpeg link
-to static, and the build fails loudly if `FFMPEG_DIR` points at a shared
-build, so you can't silently produce a DLL-dependent exe. Building the
-vcpkg port needs a recent Windows SDK (10.0.22000+, since FFmpeg 8's D3D12
-code doesn't compile against older headers). HEIF is already static via
-vcpkg, so the result is one ~55 MB exe.
-
-Licensing: this configuration is LGPL-clean (no x264/x265 inside FFmpeg;
-HEVC *decoding* uses FFmpeg's native LGPL decoder, AV1 uses dav1d which
-is BSD-2). LGPL's relink requirement is satisfied by this project being
-open source. For AV1 and AVIF support, add `dav1d` to the FFmpeg feature
-list in the vcpkg install, as the release workflow does.
+Advanced native builds (`video`, `heif`, and static FFmpeg/media
+linking) are covered in [BUILD.md](BUILD.md).
 
 ## Configuration
 
