@@ -365,3 +365,54 @@ pub fn is_context_menu_message(msg: &Message) -> bool {
             | Message::PrevReleased
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn modal_blocks_keyboard_viewer_interactions() {
+        assert!(is_viewer_interaction(&Message::Next));
+        assert!(is_viewer_interaction(&Message::ZoomStep(1)));
+        assert!(is_viewer_interaction(&Message::RequestRename));
+        assert!(!is_viewer_interaction(&Message::RenameInput(
+            "photo.png".to_string()
+        )));
+        assert!(!is_viewer_interaction(&Message::ModalSubmit));
+    }
+
+    #[test]
+    fn passive_messages_do_not_close_menus() {
+        assert!(is_menu_message(&Message::SpinnerTick));
+        assert!(is_menu_message(&Message::WindowResized(iced::Size::new(
+            800.0, 600.0
+        ))));
+        assert!(is_menu_message(&Message::DismissToast(7)));
+        assert!(is_menu_message(&Message::FileDialogResult(None)));
+    }
+
+    #[test]
+    fn active_viewer_messages_close_menus() {
+        assert!(!is_menu_message(&Message::Next));
+        assert!(!is_menu_message(&Message::Prev));
+        assert!(!is_menu_message(&Message::ScrollZoom(1.0)));
+        assert!(!is_menu_message(&Message::ZoomActual));
+    }
+
+    #[test]
+    fn context_menu_keeps_its_own_flow_and_passive_updates() {
+        assert!(is_context_menu_message(&Message::CopyFilename));
+        assert!(is_context_menu_message(&Message::OpenImageLocation));
+        assert!(is_context_menu_message(&Message::SpinnerTick));
+        assert!(is_context_menu_message(&Message::WindowResized(
+            iced::Size::new(800.0, 600.0)
+        )));
+    }
+
+    #[test]
+    fn non_context_actions_close_context_menu() {
+        assert!(!is_context_menu_message(&Message::Next));
+        assert!(!is_context_menu_message(&Message::ToggleZoomMenu));
+        assert!(!is_context_menu_message(&Message::OpenSettings));
+    }
+}

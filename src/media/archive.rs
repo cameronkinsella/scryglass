@@ -14,7 +14,9 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow};
+#[cfg(feature = "rar")]
+use anyhow::Context;
+use anyhow::{Result, anyhow};
 
 use crate::config::AppConfig;
 

@@ -51,18 +51,19 @@ pub struct Registry {
 
 impl Registry {
     fn new() -> Self {
-        let mut formats: Vec<Box<dyn ImageFormat>> =
-            vec![Box::new(super::decoders::image_rs::ImageRs)];
-        #[cfg(feature = "jxl")]
-        formats.push(Box::new(super::decoders::jxl::Jxl));
-        #[cfg(feature = "svg")]
-        formats.push(Box::new(super::decoders::svg::Svg));
-        #[cfg(feature = "raw")]
-        formats.push(Box::new(super::decoders::raw::Raw));
-        #[cfg(feature = "heif")]
-        formats.push(Box::new(super::decoders::heif::Heif));
-        #[cfg(feature = "video")]
-        formats.push(Box::new(super::decoders::avif::Avif));
+        let formats: Vec<Box<dyn ImageFormat>> = vec![
+            Box::new(super::decoders::image_rs::ImageRs),
+            #[cfg(feature = "jxl")]
+            Box::new(super::decoders::jxl::Jxl),
+            #[cfg(feature = "svg")]
+            Box::new(super::decoders::svg::Svg),
+            #[cfg(feature = "raw")]
+            Box::new(super::decoders::raw::Raw),
+            #[cfg(feature = "heif")]
+            Box::new(super::decoders::heif::Heif),
+            #[cfg(feature = "video")]
+            Box::new(super::decoders::avif::Avif),
+        ];
         Self { formats }
     }
 
