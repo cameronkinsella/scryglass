@@ -7,7 +7,10 @@
 use iced::keyboard::key::Named;
 use iced::keyboard::{Key, Modifiers};
 
-use crate::app::Message;
+use crate::app::{
+    ContextMenuMessage, Message, ModalMessage, OpenMessage, ToolbarMessage, VideoMessage,
+    ViewerMessage,
+};
 
 /// Map a (non-repeat) key press to a message.
 pub fn map_press(key: &Key, modifiers: Modifiers) -> Option<Message> {
@@ -15,36 +18,40 @@ pub fn map_press(key: &Key, modifiers: Modifiers) -> Option<Message> {
     let shift = modifiers.shift();
 
     match key {
-        Key::Named(Named::Escape) => Some(Message::Escape),
-        Key::Named(Named::Home) => Some(Message::First),
-        Key::Named(Named::End) => Some(Message::Last),
-        Key::Named(Named::F11) => Some(Message::ToggleFullscreen),
-        Key::Named(Named::Delete) => Some(Message::RequestDelete),
-        Key::Named(Named::F2) => Some(Message::RequestRename),
-        Key::Named(Named::Enter) => Some(Message::ModalSubmit),
+        Key::Named(Named::Escape) => Some(Message::Viewer(ViewerMessage::Escape)),
+        Key::Named(Named::Home) => Some(Message::Viewer(ViewerMessage::First)),
+        Key::Named(Named::End) => Some(Message::Viewer(ViewerMessage::Last)),
+        Key::Named(Named::F11) => Some(Message::Viewer(ViewerMessage::ToggleFullscreen)),
+        Key::Named(Named::Delete) => Some(Message::Modal(ModalMessage::RequestDelete)),
+        Key::Named(Named::F2) => Some(Message::Modal(ModalMessage::RequestRename)),
+        Key::Named(Named::Enter) => Some(Message::Modal(ModalMessage::Submit)),
         // Video transport (no-ops when nothing is playing).
-        Key::Named(Named::Space) => Some(Message::VideoPlayPause),
-        Key::Named(Named::ArrowUp) => Some(Message::VideoNudgeVolume(0.1)),
-        Key::Named(Named::ArrowDown) => Some(Message::VideoNudgeVolume(-0.1)),
+        Key::Named(Named::Space) => Some(Message::VideoControls(VideoMessage::PlayPause)),
+        Key::Named(Named::ArrowUp) => Some(Message::VideoControls(VideoMessage::NudgeVolume(0.1))),
+        Key::Named(Named::ArrowDown) => {
+            Some(Message::VideoControls(VideoMessage::NudgeVolume(-0.1)))
+        }
 
         Key::Character(c) => match c.as_str() {
-            "f" | "F" if !ctrl => Some(Message::ToggleFullscreen),
-            "i" | "I" if !ctrl => Some(Message::ToggleInfo),
-            "t" | "T" if !ctrl => Some(Message::ToggleToolbar),
-            "r" if !ctrl => Some(Message::Rotate(1)),
-            "R" if !ctrl => Some(Message::Rotate(3)),
-            "?" => Some(Message::ToggleHelp),
-            "+" | "=" => Some(Message::ZoomStep(1)),
-            "-" => Some(Message::ZoomStep(-1)),
-            "0" if ctrl => Some(Message::ResetZoom),
-            "1" if ctrl => Some(Message::ZoomActual),
+            "f" | "F" if !ctrl => Some(Message::Viewer(ViewerMessage::ToggleFullscreen)),
+            "i" | "I" if !ctrl => Some(Message::Viewer(ViewerMessage::ToggleInfo)),
+            "t" | "T" if !ctrl => Some(Message::Toolbar(ToolbarMessage::ToggleToolbar)),
+            "r" if !ctrl => Some(Message::Viewer(ViewerMessage::Rotate(1))),
+            "R" if !ctrl => Some(Message::Viewer(ViewerMessage::Rotate(3))),
+            "?" => Some(Message::Viewer(ViewerMessage::ToggleHelp)),
+            "+" | "=" => Some(Message::Viewer(ViewerMessage::ZoomStep(1))),
+            "-" => Some(Message::Viewer(ViewerMessage::ZoomStep(-1))),
+            "0" if ctrl => Some(Message::Viewer(ViewerMessage::ResetZoom)),
+            "1" if ctrl => Some(Message::Viewer(ViewerMessage::ZoomActual)),
             // Shift+Ctrl+C arrives as the shifted character "C".
-            "c" | "C" if ctrl && shift => Some(Message::CopyFilePath),
-            "c" if ctrl => Some(Message::CopyImage),
-            "o" | "O" if ctrl => Some(Message::OpenFile),
-            "m" | "M" if !ctrl => Some(Message::VideoToggleMute),
-            "j" | "J" if !ctrl => Some(Message::VideoSeekBy(-10.0)),
-            "l" | "L" if !ctrl => Some(Message::VideoSeekBy(10.0)),
+            "c" | "C" if ctrl && shift => {
+                Some(Message::ContextMenu(ContextMenuMessage::CopyFilePath))
+            }
+            "c" if ctrl => Some(Message::ContextMenu(ContextMenuMessage::CopyImage)),
+            "o" | "O" if ctrl => Some(Message::Open(OpenMessage::OpenFile)),
+            "m" | "M" if !ctrl => Some(Message::VideoControls(VideoMessage::ToggleMute)),
+            "j" | "J" if !ctrl => Some(Message::VideoControls(VideoMessage::SeekBy(-10.0))),
+            "l" | "L" if !ctrl => Some(Message::VideoControls(VideoMessage::SeekBy(10.0))),
             _ => None,
         },
         _ => None,
@@ -74,11 +81,11 @@ mod tests {
     fn fullscreen_keys() {
         assert!(matches!(
             map_press(&Key::Named(Named::F11), Modifiers::default()),
-            Some(Message::ToggleFullscreen)
+            Some(Message::Viewer(ViewerMessage::ToggleFullscreen))
         ));
         assert!(matches!(
             map_press(&ch("f"), Modifiers::default()),
-            Some(Message::ToggleFullscreen)
+            Some(Message::Viewer(ViewerMessage::ToggleFullscreen))
         ));
     }
 
@@ -86,19 +93,19 @@ mod tests {
     fn zoom_keys() {
         assert!(matches!(
             map_press(&ch("+"), Modifiers::default()),
-            Some(Message::ZoomStep(1))
+            Some(Message::Viewer(ViewerMessage::ZoomStep(1)))
         ));
         assert!(matches!(
             map_press(&ch("-"), Modifiers::default()),
-            Some(Message::ZoomStep(-1))
+            Some(Message::Viewer(ViewerMessage::ZoomStep(-1)))
         ));
         assert!(matches!(
             map_press(&ch("0"), cmd()),
-            Some(Message::ResetZoom)
+            Some(Message::Viewer(ViewerMessage::ResetZoom))
         ));
         assert!(matches!(
             map_press(&ch("1"), cmd()),
-            Some(Message::ZoomActual)
+            Some(Message::Viewer(ViewerMessage::ZoomActual))
         ));
         // Bare digits do nothing.
         assert!(map_press(&ch("0"), Modifiers::default()).is_none());
@@ -108,11 +115,11 @@ mod tests {
     fn home_end_navigate() {
         assert!(matches!(
             map_press(&Key::Named(Named::Home), Modifiers::default()),
-            Some(Message::First)
+            Some(Message::Viewer(ViewerMessage::First))
         ));
         assert!(matches!(
             map_press(&Key::Named(Named::End), Modifiers::default()),
-            Some(Message::Last)
+            Some(Message::Viewer(ViewerMessage::Last))
         ));
     }
 
@@ -120,11 +127,11 @@ mod tests {
     fn rotation_distinguishes_shift() {
         assert!(matches!(
             map_press(&ch("r"), Modifiers::default()),
-            Some(Message::Rotate(1))
+            Some(Message::Viewer(ViewerMessage::Rotate(1)))
         ));
         assert!(matches!(
             map_press(&ch("R"), Modifiers::SHIFT),
-            Some(Message::Rotate(3))
+            Some(Message::Viewer(ViewerMessage::Rotate(3)))
         ));
     }
 
@@ -132,7 +139,7 @@ mod tests {
     fn help_key() {
         assert!(matches!(
             map_press(&ch("?"), Modifiers::SHIFT),
-            Some(Message::ToggleHelp)
+            Some(Message::Viewer(ViewerMessage::ToggleHelp))
         ));
     }
 
@@ -140,7 +147,7 @@ mod tests {
     fn info_panel_key() {
         assert!(matches!(
             map_press(&ch("i"), Modifiers::default()),
-            Some(Message::ToggleInfo)
+            Some(Message::Viewer(ViewerMessage::ToggleInfo))
         ));
     }
 
@@ -148,7 +155,7 @@ mod tests {
     fn escape_maps() {
         assert!(matches!(
             map_press(&Key::Named(Named::Escape), Modifiers::default()),
-            Some(Message::Escape)
+            Some(Message::Viewer(ViewerMessage::Escape))
         ));
     }
 
@@ -156,19 +163,19 @@ mod tests {
     fn clipboard_and_open_shortcuts() {
         assert!(matches!(
             map_press(&ch("c"), cmd()),
-            Some(Message::CopyImage)
+            Some(Message::ContextMenu(ContextMenuMessage::CopyImage))
         ));
         assert!(matches!(
             map_press(&ch("C"), cmd() | Modifiers::SHIFT),
-            Some(Message::CopyFilePath)
+            Some(Message::ContextMenu(ContextMenuMessage::CopyFilePath))
         ));
         assert!(matches!(
             map_press(&ch("o"), cmd()),
-            Some(Message::OpenFile)
+            Some(Message::Open(OpenMessage::OpenFile))
         ));
         assert!(matches!(
             map_press(&ch("t"), Modifiers::default()),
-            Some(Message::ToggleToolbar)
+            Some(Message::Toolbar(ToolbarMessage::ToggleToolbar))
         ));
         // Bare C must not copy.
         assert!(map_press(&ch("c"), Modifiers::default()).is_none());

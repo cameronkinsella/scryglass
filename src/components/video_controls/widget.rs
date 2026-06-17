@@ -7,7 +7,7 @@ use std::time::Duration;
 use iced::widget::{button, container, row, slider, text};
 use iced::{Alignment, Element, Length};
 
-use crate::app::Message;
+use crate::app::VideoMessage;
 use crate::ui::{icons, theme};
 
 /// Inputs for the control bar.
@@ -23,8 +23,8 @@ pub struct VideoControls {
 }
 
 /// Render the transport bar, anchored to the bottom of the image area.
-pub fn video_controls<'a>(state: VideoControls) -> Element<'a, Message> {
-    let icon_button = |icon: iced::widget::Text<'a>, msg: Message| {
+pub fn video_controls<'a>(state: VideoControls) -> Element<'a, VideoMessage> {
+    let icon_button = |icon: iced::widget::Text<'a>, msg: VideoMessage| {
         button(icon.size(16))
             .on_press(msg)
             .padding([2, 8])
@@ -57,9 +57,9 @@ pub fn video_controls<'a>(state: VideoControls) -> Element<'a, Message> {
     let seek = slider(
         0.0..=total_secs.max(0.1),
         shown_secs,
-        Message::VideoSeekDrag,
+        VideoMessage::SeekDrag,
     )
-    .on_release(Message::VideoSeekRelease)
+    .on_release(VideoMessage::SeekRelease)
     .step(0.1)
     .width(Length::Fill);
 
@@ -71,13 +71,13 @@ pub fn video_controls<'a>(state: VideoControls) -> Element<'a, Message> {
     let volume = slider(
         0.0..=1.0,
         if state.muted { 0.0 } else { state.volume },
-        Message::VideoSetVolume,
+        VideoMessage::SetVolume,
     )
     .step(0.05)
     .width(Length::Fixed(80.0));
 
     let loop_button = button(icons::arrow_repeat().size(16))
-        .on_press(Message::VideoToggleLoop)
+        .on_press(VideoMessage::ToggleLoop)
         .padding([2, 8])
         .style(if state.looping {
             theme::menu_tab_active
@@ -87,10 +87,10 @@ pub fn video_controls<'a>(state: VideoControls) -> Element<'a, Message> {
 
     let bar = container(
         row![
-            icon_button(play_icon, Message::VideoPlayPause),
+            icon_button(play_icon, VideoMessage::PlayPause),
             time,
             seek,
-            icon_button(volume_icon, Message::VideoToggleMute),
+            icon_button(volume_icon, VideoMessage::ToggleMute),
             volume,
             loop_button,
         ]

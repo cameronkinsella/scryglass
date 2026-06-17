@@ -3,7 +3,7 @@
 use iced::widget::{button, center, column, container, row, rule, text, toggler};
 use iced::{Element, Length};
 
-use crate::app::Message;
+use crate::app::SettingsMessage;
 use crate::config::AppConfig;
 use crate::ui::theme;
 
@@ -16,8 +16,8 @@ pub fn settings<'a>(
     config: &AppConfig,
     disk_cache_size: Option<u64>,
     associations_registered: bool,
-) -> Element<'a, Message> {
-    let switch = |label: &str, on: bool, msg: fn(bool) -> Message| {
+) -> Element<'a, SettingsMessage> {
+    let switch = |label: &str, on: bool, msg: fn(bool) -> SettingsMessage| {
         toggler(on)
             .label(label.to_string())
             .on_toggle(msg)
@@ -26,22 +26,23 @@ pub fn settings<'a>(
             .width(Length::Fill)
     };
 
-    let stepper = |label: &str, value: String, dec: Option<Message>, inc: Option<Message>| {
-        let small = |t: &str, msg: Option<Message>| {
-            button(text(t.to_string()).size(13))
-                .on_press_maybe(msg)
-                .padding([1, 8])
-                .style(button::secondary)
+    let stepper =
+        |label: &str, value: String, dec: Option<SettingsMessage>, inc: Option<SettingsMessage>| {
+            let small = |t: &str, msg: Option<SettingsMessage>| {
+                button(text(t.to_string()).size(13))
+                    .on_press_maybe(msg)
+                    .padding([1, 8])
+                    .style(button::secondary)
+            };
+            row![
+                text(label.to_string()).size(13).width(Length::Fill),
+                small("−", dec),
+                text(value).size(13).width(Length::Fixed(64.0)).center(),
+                small("+", inc),
+            ]
+            .spacing(4)
+            .align_y(iced::Alignment::Center)
         };
-        row![
-            text(label.to_string()).size(13).width(Length::Fill),
-            small("−", dec),
-            text(value).size(13).width(Length::Fixed(64.0)).center(),
-            small("+", inc),
-        ]
-        .spacing(4)
-        .align_y(iced::Alignment::Center)
-    };
 
     let depth = config.prefetch_depth;
     let budget = config.cache_budget_mb;
@@ -51,27 +52,27 @@ pub fn settings<'a>(
         switch(
             "Read-only mode (no delete or rename)",
             config.read_only,
-            |_| { Message::ToggleReadOnly }
+            |_| SettingsMessage::ToggleReadOnly
         ),
         switch("Confirm before deleting", config.confirm_delete, |_| {
-            Message::ToggleConfirmDelete
+            SettingsMessage::ToggleConfirmDelete
         }),
         rule::horizontal(1),
         stepper(
             "Prefetch depth",
             depth.to_string(),
-            (depth > 1).then(|| Message::SetPrefetchDepth(depth - 1)),
-            (depth < 10).then(|| Message::SetPrefetchDepth(depth + 1)),
+            (depth > 1).then(|| SettingsMessage::SetPrefetchDepth(depth - 1)),
+            (depth < 10).then(|| SettingsMessage::SetPrefetchDepth(depth + 1)),
         ),
         stepper(
             "Image cache budget",
             format!("{budget} MB"),
-            (budget > 128).then(|| Message::SetCacheBudget(budget - 128)),
-            (budget < 4096).then(|| Message::SetCacheBudget(budget + 128)),
+            (budget > 128).then(|| SettingsMessage::SetCacheBudget(budget - 128)),
+            (budget < 4096).then(|| SettingsMessage::SetCacheBudget(budget + 128)),
         ),
         rule::horizontal(1),
         switch("Persistent thumbnails", config.disk_thumbs, |_| {
-            Message::ToggleDiskThumbs
+            SettingsMessage::ToggleDiskThumbs
         }),
     ]
     .spacing(10)
@@ -87,7 +88,7 @@ pub fn settings<'a>(
                 .size(13)
                 .width(Length::Fill),
             button(text("Clear").size(13))
-                .on_press(Message::ClearDiskThumbs)
+                .on_press(SettingsMessage::ClearDiskThumbs)
                 .padding([3, 12])
                 .style(button::secondary),
         ]
@@ -106,7 +107,7 @@ pub fn settings<'a>(
             row![
                 text(caption).size(13).width(Length::Fill),
                 button(text(action).size(13))
-                    .on_press(Message::ToggleFileAssociations)
+                    .on_press(SettingsMessage::ToggleFileAssociations)
                     .padding([3, 12])
                     .style(button::secondary),
             ]
@@ -118,7 +119,7 @@ pub fn settings<'a>(
     rows = rows.push(
         container(
             button(text("Close").size(13))
-                .on_press(Message::ModalCancel)
+                .on_press(SettingsMessage::Close)
                 .padding([4, 16])
                 .style(button::primary),
         )

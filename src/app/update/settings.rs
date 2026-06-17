@@ -1,18 +1,18 @@
 use iced::Task;
 
-use crate::app::{App, Message};
+use crate::app::{App, Message, SettingsMessage};
 use crate::media::pipeline::Pipeline;
 
 /// Persist the current config in the background. Saving is fire-and-forget:
 /// the viewer must never wait on it.
-pub(super) fn save_config(app: &App) -> Task<Message> {
+pub(crate) fn save_config(app: &App) -> Task<Message> {
     Task::future(app.config.clone().save()).discard()
 }
 
 /// Measure the disk thumbnail store, off-thread.
-pub(super) fn probe_disk_cache_size(pipeline: &Pipeline) -> Task<Message> {
+pub(crate) fn probe_disk_cache_size(pipeline: &Pipeline) -> Task<Message> {
     let Some(disk) = pipeline.disk() else {
-        return Task::done(Message::DiskCacheSize(0));
+        return Task::done(Message::Settings(SettingsMessage::DiskCacheSize(0)));
     };
     Task::perform(
         async move {
@@ -20,6 +20,6 @@ pub(super) fn probe_disk_cache_size(pipeline: &Pipeline) -> Task<Message> {
                 .await
                 .unwrap_or(0)
         },
-        Message::DiskCacheSize,
+        |bytes| Message::Settings(SettingsMessage::DiskCacheSize(bytes)),
     )
 }

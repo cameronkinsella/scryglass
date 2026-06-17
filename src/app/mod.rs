@@ -16,13 +16,26 @@
 //! driven by OS key-repeat events.
 
 mod message;
+mod shortcuts;
 pub mod state;
-mod update;
+pub(crate) mod update;
 mod view;
-mod viewer_math;
+pub(crate) mod viewer_math;
 
+pub use crate::components::context_menu::Message as ContextMenuMessage;
+pub use crate::components::filmstrip::Message as FilmstripMessage;
+pub use crate::components::modal::Message as ModalMessage;
+pub use crate::components::nav_slider::Message as SliderMessage;
+pub use crate::components::settings::Message as SettingsMessage;
+pub use crate::components::toolbar::Message as ToolbarMessage;
+pub use crate::components::video_controls::Message as VideoControlsMessage;
+pub use crate::components::video_controls::Message as VideoMessage;
+pub use crate::components::viewer::Message as ViewerMessage;
 pub use message::Message;
+pub use update::media::Message as MediaMessage;
+pub use update::open::Message as OpenMessage;
 pub use update::update;
+pub use update::window::Message as WindowMessage;
 pub use view::view;
 
 use std::path::PathBuf;
@@ -33,79 +46,80 @@ use iced::keyboard::key::Named;
 use iced::{Event, Size, Subscription, Task, event, keyboard, mouse, window};
 
 use crate::anim::AnimMessage;
+use crate::components::info_panel;
+use crate::components::toasts::Toast;
+use crate::components::toolbar::OpenMenu;
 use crate::config::AppConfig;
 use crate::media::disk_thumbs::DiskThumbs;
 use crate::media::pipeline::Pipeline;
 use crate::ui;
-use crate::ui::toast::Toast;
-use crate::ui::toolbar::OpenMenu;
 
 use state::{Session, Viewer};
 
 /// How long the arrow key must be held before continuous scrolling begins.
-const HOLD_THRESHOLD: Duration = Duration::from_millis(300);
+pub(crate) const HOLD_THRESHOLD: Duration = Duration::from_millis(300);
 
 /// Scroll-wheel zoom step multiplier (each notch = ×1.1 or ÷1.1).
-const ZOOM_STEP: f32 = 1.1;
+pub(crate) const ZOOM_STEP: f32 = 1.1;
 
 /// Minimum zoom factor.
-const ZOOM_MIN: f32 = 0.01;
+pub(crate) const ZOOM_MIN: f32 = 0.01;
 
 /// Maximum zoom factor.
-const ZOOM_MAX: f32 = 50.0;
+pub(crate) const ZOOM_MAX: f32 = 50.0;
 
 /// Height of the toolbar in logical pixels.
-const TOOLBAR_HEIGHT: f32 = 30.0;
+pub(crate) const TOOLBAR_HEIGHT: f32 = 30.0;
 
 /// Grace period before the loading spinner appears, so fast loads finish
 /// without any flash of UI.
-const SPINNER_DELAY: Duration = Duration::from_millis(150);
+pub(crate) const SPINNER_DELAY: Duration = Duration::from_millis(150);
 
 /// How long the video controls stay up after the last mouse movement.
-const VIDEO_CONTROLS_TIMEOUT: Duration = Duration::from_millis(2500);
+pub(crate) const VIDEO_CONTROLS_TIMEOUT: Duration = Duration::from_millis(2500);
 
 /// Application state: the single source of truth.
 pub struct App {
-    session: Session,
+    pub(crate) session: Session,
     /// Persisted settings (zoom mode, layout visibility, prefetch depth).
-    config: AppConfig,
+    pub(crate) config: AppConfig,
     /// Load orchestrator: cancellation generations and priority lanes.
-    pipeline: Pipeline,
+    pub(crate) pipeline: Pipeline,
     /// Which toolbar dropdown menu is open (if any).
-    open_menu: Option<OpenMenu>,
+    pub(crate) open_menu: Option<OpenMenu>,
     /// Size of the viewport (content area below toolbar, above footer).
     /// Updated on every window resize.
-    viewport_size: Size,
+    pub(crate) viewport_size: Size,
     /// Last known cursor position (updated on every CursorMoved event).
-    last_cursor_pos: iced::Point,
+    pub(crate) last_cursor_pos: iced::Point,
     /// Last known window size (for recalculating viewport on layout toggles).
-    window_size: Size,
+    pub(crate) window_size: Size,
     /// Context menu position (window coords). `Some` when visible.
-    context_menu_pos: Option<iced::Point>,
+    pub(crate) context_menu_pos: Option<iced::Point>,
     /// Whether the window is borderless fullscreen (chrome hidden).
-    fullscreen: bool,
+    pub(crate) fullscreen: bool,
     /// Whether the shortcut help overlay is open.
-    help_open: bool,
+    pub(crate) help_open: bool,
     /// A blocking dialog over the viewer, if one is open. Keyboard-driven
     /// viewer interactions are inert while this is `Some`.
-    modal: Option<Modal>,
+    pub(crate) modal: Option<Modal>,
     /// Probed size of the disk thumbnail store (settings display).
-    disk_cache_size: Option<u64>,
+    pub(crate) disk_cache_size: Option<u64>,
     /// Whether the app is in the OS Open with menu (settings display,
     /// refreshed when the dialog opens).
-    associations_registered: bool,
+    pub(crate) associations_registered: bool,
     /// When an open started (directory scan or archive indexing), until
     /// its listing arrives. Drives the spinner for slow archives.
-    opening_since: Option<iced::time::Instant>,
+    pub(crate) opening_since: Option<iced::time::Instant>,
     /// Live toast notifications, oldest first.
-    toasts: Vec<Toast>,
+    pub(crate) toasts: Vec<Toast>,
     /// Monotonic toast ID source.
-    next_toast_id: u64,
+    pub(crate) next_toast_id: u64,
 }
 
 impl App {
     /// The active viewer, if any.
-    fn viewer(&self) -> Option<&Viewer> {
+    pub(crate) fn viewer(&self) -> Option<&Viewer> {
         match &self.session {
             Session::Viewing(viewer) => Some(viewer),
             Session::Empty => None,
@@ -113,7 +127,7 @@ impl App {
     }
 
     /// The active viewer, mutably, if any.
-    fn viewer_mut(&mut self) -> Option<&mut Viewer> {
+    pub(crate) fn viewer_mut(&mut self) -> Option<&mut Viewer> {
         match &mut self.session {
             Session::Viewing(viewer) => Some(viewer),
             Session::Empty => None,
@@ -237,14 +251,14 @@ pub fn title(app: &App) -> String {
 }
 
 /// Recalculate the viewport size based on window size and visible chrome.
-fn recalc_viewport(app: &mut App) {
+pub(crate) fn recalc_viewport(app: &mut App) {
     if app.fullscreen {
         // Fullscreen hides all chrome: the image owns the whole window.
         app.viewport_size = app.window_size;
         return;
     }
     let chrome_width = if app.config.show_info {
-        ui::info_panel::WIDTH
+        info_panel::WIDTH
     } else {
         0.0
     };
@@ -274,17 +288,23 @@ pub fn subscription(app: &App) -> Subscription<Message> {
     let mut subs = vec![
         event::listen_with(handle_event),
         // Close requests route through update() so config saves first.
-        iced::window::close_requests().map(Message::CloseRequested),
+        iced::window::close_requests().map(|id| Message::Window(WindowMessage::CloseRequested(id))),
     ];
 
     // The opening spinner runs before any viewer exists.
     if app.opening_since.is_some() {
-        subs.push(iced::time::every(Duration::from_millis(33)).map(|_| Message::SpinnerTick));
+        subs.push(
+            iced::time::every(Duration::from_millis(33))
+                .map(|_| Message::Media(MediaMessage::SpinnerTick)),
+        );
     }
 
     if let Some(viewer) = app.viewer() {
         if viewer.pending_since.is_some() && app.opening_since.is_none() {
-            subs.push(iced::time::every(Duration::from_millis(33)).map(|_| Message::SpinnerTick));
+            subs.push(
+                iced::time::every(Duration::from_millis(33))
+                    .map(|_| Message::Media(MediaMessage::SpinnerTick)),
+            );
         }
 
         if viewer.pending_since.is_none()
@@ -297,7 +317,10 @@ pub fn subscription(app: &App) -> Subscription<Message> {
         // Video pacing: pull frames due for display ~60×/s while a
         // session is active (paused sessions still need control redraws).
         if viewer.video.is_some() {
-            subs.push(iced::time::every(Duration::from_millis(16)).map(|_| Message::VideoTick));
+            subs.push(
+                iced::time::every(Duration::from_millis(16))
+                    .map(|_| Message::VideoControls(VideoControlsMessage::Tick)),
+            );
         }
     }
 
@@ -321,11 +344,11 @@ fn handle_event(event: Event, _status: event::Status, _id: window::Id) -> Option
         // --- Keyboard: initial press ---
         Event::Keyboard(keyboard::Event::KeyPressed {
             key, repeat: false, ..
-        }) if is_forward_key(key) => Some(Message::Next),
+        }) if is_forward_key(key) => Some(Message::Viewer(ViewerMessage::Next)),
 
         Event::Keyboard(keyboard::Event::KeyPressed {
             key, repeat: false, ..
-        }) if is_backward_key(key) => Some(Message::Prev),
+        }) if is_backward_key(key) => Some(Message::Viewer(ViewerMessage::Prev)),
 
         // --- Keyboard: everything else goes through the shortcut table.
         // `modified_key` includes shift effects, so "?" and "R" arrive
@@ -335,42 +358,54 @@ fn handle_event(event: Event, _status: event::Status, _id: window::Id) -> Option
             modifiers,
             repeat: false,
             ..
-        }) => ui::shortcuts::map_press(modified_key, *modifiers),
+        }) => shortcuts::map_press(modified_key, *modifiers),
 
         // --- Keyboard: OS key-repeat ---
         Event::Keyboard(keyboard::Event::KeyPressed {
             key, repeat: true, ..
-        }) if is_forward_key(key) => Some(Message::NextRepeat),
+        }) if is_forward_key(key) => Some(Message::Viewer(ViewerMessage::NextRepeat)),
 
         Event::Keyboard(keyboard::Event::KeyPressed {
             key, repeat: true, ..
-        }) if is_backward_key(key) => Some(Message::PrevRepeat),
+        }) if is_backward_key(key) => Some(Message::Viewer(ViewerMessage::PrevRepeat)),
 
         // --- Keyboard: key released ---
         Event::Keyboard(keyboard::Event::KeyReleased { key, .. }) if is_forward_key(key) => {
-            Some(Message::NextReleased)
+            Some(Message::Viewer(ViewerMessage::NextReleased))
         }
 
         Event::Keyboard(keyboard::Event::KeyReleased { key, .. }) if is_backward_key(key) => {
-            Some(Message::PrevReleased)
+            Some(Message::Viewer(ViewerMessage::PrevReleased))
         }
 
         // --- Mouse: back/forward buttons (single navigation, no hold) ---
-        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Forward)) => Some(Message::Next),
-        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Back)) => Some(Message::Prev),
+        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Forward)) => {
+            Some(Message::Viewer(ViewerMessage::Next))
+        }
+        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Back)) => {
+            Some(Message::Viewer(ViewerMessage::Prev))
+        }
 
         // --- Mouse: cursor moved (for drag panning) ---
-        Event::Mouse(mouse::Event::CursorMoved { position }) => Some(Message::DragMove(*position)),
-        Event::Mouse(mouse::Event::CursorLeft) => Some(Message::CursorLeft),
+        Event::Mouse(mouse::Event::CursorMoved { position }) => {
+            Some(Message::Viewer(ViewerMessage::DragMove(*position)))
+        }
+        Event::Mouse(mouse::Event::CursorLeft) => Some(Message::Viewer(ViewerMessage::CursorLeft)),
 
         // --- Mouse: left button released (end drag) ---
-        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(Message::DragEnd),
+        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+            Some(Message::Viewer(ViewerMessage::DragEnd))
+        }
 
         // --- File drop ---
-        Event::Window(window::Event::FileDropped(path)) => Some(Message::FileDropped(path.clone())),
+        Event::Window(window::Event::FileDropped(path)) => {
+            Some(Message::Open(OpenMessage::FileDropped(path.clone())))
+        }
 
         // --- Window resized ---
-        Event::Window(window::Event::Resized(size)) => Some(Message::WindowResized(*size)),
+        Event::Window(window::Event::Resized(size)) => {
+            Some(Message::Window(WindowMessage::Resized(*size)))
+        }
 
         _ => None,
     }

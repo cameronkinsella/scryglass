@@ -7,12 +7,12 @@ use iced::widget::image::Handle;
 
 use crate::app::state::{CachedImage, DisplayedImage, Viewer};
 use crate::app::viewer_math::compute_zoom;
-use crate::app::{Message, VIDEO_CONTROLS_TIMEOUT};
+use crate::app::{MediaMessage, Message, VIDEO_CONTROLS_TIMEOUT, VideoMessage};
 use crate::cache;
+use crate::components::toasts::ToastKind;
 use crate::config::ZoomMode;
 use crate::media::archive::ArchiveIndex;
 use crate::media::pipeline::Source;
-use crate::ui::toast::ToastKind;
 
 use super::push_toast;
 use super::settings::save_config;
@@ -21,7 +21,7 @@ use crate::app::App;
 /// Begin video playback for the current file: open a session directly
 /// for filesystem files, or extract the archive entry to a temp file
 /// first (FFmpeg needs a real file, the spinner covers the wait).
-pub(super) fn start_video(
+pub(crate) fn start_video(
     viewer: &mut Viewer,
     current: PathBuf,
     volume: f32,
@@ -52,7 +52,7 @@ pub(super) fn start_video(
 
 /// Extract an archive video entry to a uniquely-named temp file,
 /// off-thread. The whole entry is written out before playback starts.
-pub(super) fn fire_video_extract(index: Arc<ArchiveIndex>, entry: PathBuf) -> Task<Message> {
+pub(crate) fn fire_video_extract(index: Arc<ArchiveIndex>, entry: PathBuf) -> Task<Message> {
     Task::perform(
         async move {
             let e = entry.clone();
@@ -72,11 +72,11 @@ pub(super) fn fire_video_extract(index: Arc<ArchiveIndex>, entry: PathBuf) -> Ta
             .and_then(|r| r);
             (entry, result)
         },
-        |(entry, result)| Message::VideoExtracted { entry, result },
+        |(entry, result)| Message::VideoControls(VideoMessage::Extracted { entry, result }),
     )
 }
 
-pub(super) fn tick(app: &mut App) -> Task<Message> {
+pub(crate) fn tick(app: &mut App) -> Task<Message> {
     let Some(viewer) = app.viewer_mut() else {
         return Task::none();
     };
@@ -100,18 +100,18 @@ pub(super) fn tick(app: &mut App) -> Task<Message> {
     let (width, height) = (frame.width, frame.height);
     let handle = Handle::from_rgba(width, height, frame.rgba);
     cache::allocate_handle(handle).map(move |upload| match upload {
-        Ok(allocation) => Message::VideoFrame {
+        Ok(allocation) => Message::VideoControls(VideoMessage::Frame {
             path: path.clone(),
             image: CachedImage {
                 allocation,
                 original_size: (width, height),
             },
-        },
-        Err(_) => Message::SpinnerTick,
+        }),
+        Err(_) => Message::Media(MediaMessage::SpinnerTick),
     })
 }
 
-pub(super) fn extracted(
+pub(crate) fn extracted(
     app: &mut App,
     entry: PathBuf,
     result: Result<PathBuf, String>,
@@ -151,7 +151,7 @@ pub(super) fn extracted(
     }
 }
 
-pub(super) fn frame(app: &mut App, path: PathBuf, image: CachedImage) -> Task<Message> {
+pub(crate) fn frame(app: &mut App, path: PathBuf, image: CachedImage) -> Task<Message> {
     let zoom_mode = app.config.zoom_mode;
     let viewport = app.viewport_size;
     let Some(viewer) = app.viewer_mut() else {
@@ -175,7 +175,7 @@ pub(super) fn frame(app: &mut App, path: PathBuf, image: CachedImage) -> Task<Me
     Task::none()
 }
 
-pub(super) fn play_pause(app: &mut App) -> Task<Message> {
+pub(crate) fn play_pause(app: &mut App) -> Task<Message> {
     if let Some(viewer) = app.viewer_mut()
         && let Some(session) = viewer.video.as_mut()
     {
@@ -188,7 +188,7 @@ pub(super) fn play_pause(app: &mut App) -> Task<Message> {
     Task::none()
 }
 
-pub(super) fn seek_drag(app: &mut App, secs: f64) -> Task<Message> {
+pub(crate) fn seek_drag(app: &mut App, secs: f64) -> Task<Message> {
     if let Some(viewer) = app.viewer_mut()
         && viewer.video.is_some()
     {
@@ -197,7 +197,7 @@ pub(super) fn seek_drag(app: &mut App, secs: f64) -> Task<Message> {
     Task::none()
 }
 
-pub(super) fn seek_release(app: &mut App) -> Task<Message> {
+pub(crate) fn seek_release(app: &mut App) -> Task<Message> {
     let Some(viewer) = app.viewer_mut() else {
         return Task::none();
     };
@@ -209,7 +209,7 @@ pub(super) fn seek_release(app: &mut App) -> Task<Message> {
     Task::none()
 }
 
-pub(super) fn seek_by(app: &mut App, delta: f64) -> Task<Message> {
+pub(crate) fn seek_by(app: &mut App, delta: f64) -> Task<Message> {
     let Some(viewer) = app.viewer_mut() else {
         return Task::none();
     };
@@ -224,7 +224,7 @@ pub(super) fn seek_by(app: &mut App, delta: f64) -> Task<Message> {
     Task::none()
 }
 
-pub(super) fn set_volume(app: &mut App, volume: f32) -> Task<Message> {
+pub(crate) fn set_volume(app: &mut App, volume: f32) -> Task<Message> {
     app.config.video_volume = volume.clamp(0.0, 1.0);
     app.config.video_muted = false;
     if let Some(viewer) = app.viewer_mut()
@@ -235,12 +235,12 @@ pub(super) fn set_volume(app: &mut App, volume: f32) -> Task<Message> {
     save_config(app)
 }
 
-pub(super) fn nudge_volume(app: &mut App, delta: f32) -> Task<Message> {
+pub(crate) fn nudge_volume(app: &mut App, delta: f32) -> Task<Message> {
     let volume = (app.config.video_volume + delta).clamp(0.0, 1.0);
     set_volume(app, volume)
 }
 
-pub(super) fn toggle_mute(app: &mut App) -> Task<Message> {
+pub(crate) fn toggle_mute(app: &mut App) -> Task<Message> {
     let Some(viewer) = app.viewer_mut() else {
         return Task::none();
     };
@@ -255,7 +255,7 @@ pub(super) fn toggle_mute(app: &mut App) -> Task<Message> {
     save_config(app)
 }
 
-pub(super) fn toggle_loop(app: &mut App) -> Task<Message> {
+pub(crate) fn toggle_loop(app: &mut App) -> Task<Message> {
     if let Some(viewer) = app.viewer_mut()
         && let Some(session) = viewer.video.as_mut()
     {

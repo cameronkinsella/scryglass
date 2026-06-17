@@ -5,6 +5,7 @@
 mod anim;
 mod app;
 mod cache;
+mod components;
 mod config;
 mod media;
 mod nav;

@@ -1,22 +1,10 @@
-//! UI widgets: toolbar, image display, footer, filmstrip, slider, and context menu.
+//! Shared visual primitives and formatting helpers.
 
 pub mod checkerboard;
-pub mod context_menu;
-pub mod dialogs;
-pub mod filmstrip;
-pub mod footer;
-pub mod help;
 pub mod icons;
 pub mod image_display;
-pub mod info_panel;
-pub mod nav_slider;
-pub mod settings;
-pub mod shortcuts;
 pub mod spinner;
 pub mod theme;
-pub mod toast;
-pub mod toolbar;
-pub mod video_controls;
 
 /// Format image dimensions for display (e.g. "256 × 512 pixels").
 pub fn format_dimensions(width: u32, height: u32) -> String {

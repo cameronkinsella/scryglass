@@ -6,7 +6,7 @@
 use iced::widget::{button, column, container, row, rule, text, toggler};
 use iced::{Element, Length, Padding, Point, Size};
 
-use crate::app::Message;
+use crate::app::{ContextMenuMessage, Message, ModalMessage, ToolbarMessage};
 use crate::ui::theme;
 
 /// Approximate rendered size of the context menu panel, used for edge
@@ -58,7 +58,7 @@ pub fn context_menu<'a>(
 
     let toolbar_toggle: Element<'a, Message> = toggler(show_toolbar)
         .label("Toolbar")
-        .on_toggle(|_| Message::ToggleToolbar)
+        .on_toggle(|_| Message::Toolbar(ToolbarMessage::ToggleToolbar))
         .size(14)
         .text_size(13)
         .into();
@@ -68,20 +68,36 @@ pub fn context_menu<'a>(
     let mut entries = column![
         toolbar_row,
         rule::horizontal(1),
-        item(icons::image, "Copy image", Message::CopyImage),
-        item(icons::file_earmark, "Copy file", Message::CopyFile),
-        item(icons::clipboard, "Copy file path", Message::CopyFilePath),
-        item(icons::file_earmark, "Copy filename", Message::CopyFilename),
+        item(
+            icons::image,
+            "Copy image",
+            Message::ContextMenu(ContextMenuMessage::CopyImage),
+        ),
+        item(
+            icons::file_earmark,
+            "Copy file",
+            Message::ContextMenu(ContextMenuMessage::CopyFile),
+        ),
+        item(
+            icons::clipboard,
+            "Copy file path",
+            Message::ContextMenu(ContextMenuMessage::CopyFilePath),
+        ),
+        item(
+            icons::file_earmark,
+            "Copy filename",
+            Message::ContextMenu(ContextMenuMessage::CopyFilename),
+        ),
         rule::horizontal(1),
         item(
             icons::folder,
             "Open image location",
-            Message::OpenImageLocation
+            Message::ContextMenu(ContextMenuMessage::OpenImageLocation),
         ),
         item(
             icons::info_circle,
             "Image properties",
-            Message::ImageProperties
+            Message::ContextMenu(ContextMenuMessage::ImageProperties),
         ),
     ]
     .width(220);
@@ -90,8 +106,16 @@ pub fn context_menu<'a>(
     if can_modify {
         entries = entries
             .push(rule::horizontal(1))
-            .push(item(icons::pencil_square, "Rename", Message::RequestRename))
-            .push(item(icons::trash, "Delete", Message::RequestDelete));
+            .push(item(
+                icons::pencil_square,
+                "Rename",
+                Message::Modal(ModalMessage::RequestRename),
+            ))
+            .push(item(
+                icons::trash,
+                "Delete",
+                Message::Modal(ModalMessage::RequestDelete),
+            ));
     }
 
     let panel = container(entries)

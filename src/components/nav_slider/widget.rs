@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use iced::widget::{container, image, row, slider, space, text};
 use iced::{Alignment, Element, Length, Padding, Size};
 
-use crate::app::Message;
 use crate::app::state::Thumb;
+use crate::app::{Message, SliderMessage};
 use crate::media::cache::ImageCache;
 use crate::ui::theme;
 
@@ -26,13 +26,13 @@ const BUBBLE_WIDTH: f32 = 150.0;
 ///
 /// `value` is the position to render the thumb at: the drag target while
 /// scrubbing, the cursor otherwise.
-pub fn nav_slider<'a>(value: usize, len: usize) -> Element<'a, Message> {
+pub fn nav_slider<'a>(value: usize, len: usize) -> Element<'a, SliderMessage> {
     let max = if len > 1 { (len - 1) as u32 } else { 0 };
 
     let s = slider(0..=max, value as u32, |v| {
-        Message::SliderChanged(v as usize)
+        SliderMessage::Changed(v as usize)
     })
-    .on_release(Message::SliderReleased)
+    .on_release(SliderMessage::Released)
     .step(1u32)
     .width(Length::Fill)
     .height(24);

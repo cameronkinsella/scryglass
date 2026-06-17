@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use iced::widget::{button, container, image, mouse_area, row, scrollable, space};
 use iced::{Element, Length, Padding};
 
-use crate::app::Message;
+use crate::app::FilmstripMessage;
 use crate::app::state::Thumb;
 use crate::media::cache::ImageCache;
 use crate::ui::theme;
@@ -58,10 +58,10 @@ pub fn filmstrip<'a>(
     thumbs: &'a ImageCache<Thumb>,
     scroll_x: f32,
     viewport_w: f32,
-) -> Element<'a, Message> {
+) -> Element<'a, FilmstripMessage> {
     let range = visible_range(scroll_x, viewport_w, files.len());
 
-    let mut cells: Vec<Element<'a, Message>> = Vec::with_capacity(range.len() + 2);
+    let mut cells: Vec<Element<'a, FilmstripMessage>> = Vec::with_capacity(range.len() + 2);
 
     if range.start > 0 {
         cells.push(
@@ -74,7 +74,7 @@ pub fn filmstrip<'a>(
     for (i, path) in files[range.clone()].iter().enumerate() {
         let index = range.start + i;
 
-        let content: Element<'a, Message> = match thumbs.peek(path) {
+        let content: Element<'a, FilmstripMessage> = match thumbs.peek(path) {
             Some(thumb) => image(thumb.handle.clone())
                 .content_fit(iced::ContentFit::Cover)
                 .width(Length::Fixed(THUMB_SIZE))
@@ -88,7 +88,7 @@ pub fn filmstrip<'a>(
         };
 
         let cell = button(content)
-            .on_press(Message::FilmstripClicked(index))
+            .on_press(FilmstripMessage::Clicked(index))
             .padding(ITEM_PADDING)
             .style(if index == cursor {
                 theme::thumb_current
@@ -125,7 +125,7 @@ pub fn filmstrip<'a>(
             scrollable::Scrollbar::new().width(4).scroller_width(4),
         ))
         .id(filmstrip_id())
-        .on_scroll(|viewport| Message::FilmstripScrolled(viewport.absolute_offset().x))
+        .on_scroll(|viewport| FilmstripMessage::Scrolled(viewport.absolute_offset().x))
         .width(Length::Fill);
 
     // Wrap in mouse_area to intercept vertical scroll and convert to horizontal.
@@ -134,7 +134,7 @@ pub fn filmstrip<'a>(
             iced::mouse::ScrollDelta::Lines { y, .. } => y,
             iced::mouse::ScrollDelta::Pixels { y, .. } => y / 60.0,
         };
-        Message::FilmstripScroll(y)
+        FilmstripMessage::Scroll(y)
     });
 
     container(scrollable_area)

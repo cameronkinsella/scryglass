@@ -5,19 +5,18 @@ use iced::{Size, Task};
 
 use crate::app::state::{CachedImage, DisplayedImage, LoadedMedia, Thumb, Viewer};
 use crate::app::viewer_math::compute_zoom;
-use crate::app::{App, Message};
+use crate::app::{App, MediaMessage, Message};
 use crate::cache;
 use crate::config::ZoomMode;
 use crate::media::pipeline::{Lane, Pipeline, Source, ThumbUrgency};
 use crate::media::registry::DecodeOpts;
 use crate::media::{DecodedMedia, MediaError};
-use crate::ui;
 
 /// Rotate the displayed texture to match the desired view rotation.
 /// Rotation happens on the pixels (off-thread) so every bit of zoom, pan,
 /// and crop math keeps working on the rotated dimensions unchanged. The
 /// cache keeps the unrotated original.
-pub(super) fn fire_rotate(viewer: &mut Viewer) -> Task<Message> {
+pub(crate) fn fire_rotate(viewer: &mut Viewer) -> Task<Message> {
     if viewer.rotation == viewer.displayed_rotation {
         return Task::none();
     }
@@ -40,16 +39,16 @@ pub(super) fn fire_rotate(viewer: &mut Viewer) -> Task<Message> {
         let p = path.clone();
         cache::allocate_handle(Handle::from_rgba(width, height, pixels)).map(move |upload| {
             match upload {
-                Ok(allocation) => Message::ViewRotated {
+                Ok(allocation) => Message::Media(MediaMessage::ViewRotated {
                     path: p.clone(),
                     baked,
                     image: CachedImage {
                         allocation,
                         original_size: (width, height),
                     },
-                },
+                }),
                 // Upload failures leave the previous texture in place.
-                Err(_) => Message::SpinnerTick,
+                Err(_) => Message::Media(MediaMessage::SpinnerTick),
             }
         })
     })
@@ -80,7 +79,7 @@ fn rotate_pixels(handle: &Handle, turns: u8) -> Option<(u32, u32, Vec<u8>)> {
 }
 
 /// Fetch EXIF fields for the current image (info panel).
-pub(super) fn fire_exif(app: &mut App) -> Task<Message> {
+pub(crate) fn fire_exif(app: &mut App) -> Task<Message> {
     let Some(viewer) = app.viewer_mut() else {
         return Task::none();
     };
@@ -92,18 +91,21 @@ pub(super) fn fire_exif(app: &mut App) -> Task<Message> {
     viewer.exif = None;
     let load = crate::media::pipeline::load_info(viewer.source.clone(), path.clone());
     Task::perform(load, move |fields| {
-        Message::ExifLoaded(path.clone(), fields)
+        Message::Media(MediaMessage::ExifLoaded(path.clone(), fields))
     })
 }
 
 /// Fire thumbnail probes for every filmstrip cell currently in view.
-pub(super) fn fire_visible_thumbs(
+pub(crate) fn fire_visible_thumbs(
     pipeline: &Pipeline,
     viewer: &mut Viewer,
     viewport_w: f32,
 ) -> Vec<Task<Message>> {
-    let range =
-        ui::filmstrip::visible_range(viewer.filmstrip_scroll_x, viewport_w, viewer.nav.len());
+    let range = crate::components::filmstrip::visible_range(
+        viewer.filmstrip_scroll_x,
+        viewport_w,
+        viewer.nav.len(),
+    );
     let paths: Vec<PathBuf> = viewer.nav.files()[range].to_vec();
     paths
         .into_iter()
@@ -112,7 +114,7 @@ pub(super) fn fire_visible_thumbs(
 }
 
 /// Put a loaded image on screen, computing zoom from its true dimensions.
-pub(super) fn show_loaded(
+pub(crate) fn show_loaded(
     viewer: &mut Viewer,
     path: &std::path::Path,
     image: CachedImage,
@@ -135,7 +137,7 @@ pub(super) fn show_loaded(
 /// Put a blurred thumbnail on screen while the full image decodes. Zoom is
 /// computed from the true dimensions, so geometry is identical when the
 /// full image swaps in, no jump. The load stays pending (spinner included).
-pub(super) fn show_placeholder(
+pub(crate) fn show_placeholder(
     viewer: &mut Viewer,
     path: &std::path::Path,
     thumb: Thumb,
@@ -154,7 +156,7 @@ pub(super) fn show_placeholder(
 /// Show the cached thumbnail for `path` if there is one, otherwise clear
 /// the image area. Returns true when a placeholder was shown. Either way
 /// the image area now refers to `path`, never to a previous image.
-pub(super) fn show_placeholder_or_clear(
+pub(crate) fn show_placeholder_or_clear(
     viewer: &mut Viewer,
     path: &std::path::Path,
     zoom_mode: ZoomMode,
@@ -172,7 +174,7 @@ pub(super) fn show_placeholder_or_clear(
 
 /// Fire a thumbnail job for `path` unless one is cached, in flight, or
 /// known to fail.
-pub(super) fn fire_thumb(
+pub(crate) fn fire_thumb(
     pipeline: &Pipeline,
     viewer: &mut Viewer,
     path: PathBuf,
@@ -217,34 +219,38 @@ pub(super) fn fire_thumb(
             .await
             .expect("video thumb task panicked")
         };
-        return Task::perform(probe, move |(path, result)| Message::ThumbLoaded {
-            path,
+        return Task::perform(probe, move |(path, result)| {
+            Message::Media(MediaMessage::ThumbLoaded {
+                path,
+                urgency,
+                result: result.map(|data| Thumb {
+                    handle: Handle::from_rgba(data.width, data.height, data.pixels),
+                    size: (data.width, data.height),
+                    original_size: data.original_size,
+                }),
+            })
+        });
+    }
+
+    viewer.in_flight_thumbs.insert(path.clone());
+    let load = pipeline.load_thumb(viewer.source.clone(), path.clone(), urgency);
+    Task::perform(load, move |result| {
+        Message::Media(MediaMessage::ThumbLoaded {
+            path: path.clone(),
             urgency,
             result: result.map(|data| Thumb {
                 handle: Handle::from_rgba(data.width, data.height, data.pixels),
                 size: (data.width, data.height),
                 original_size: data.original_size,
             }),
-        });
-    }
-
-    viewer.in_flight_thumbs.insert(path.clone());
-    let load = pipeline.load_thumb(viewer.source.clone(), path.clone(), urgency);
-    Task::perform(load, move |result| Message::ThumbLoaded {
-        path: path.clone(),
-        urgency,
-        result: result.map(|data| Thumb {
-            handle: Handle::from_rgba(data.width, data.height, data.pixels),
-            size: (data.width, data.height),
-            original_size: data.original_size,
-        }),
+        })
     })
 }
 
 /// Start (or continue) background thumbnailing: up to `chains` parallel
 /// job streams that work outward from the cursor until every file in the
 /// directory has a thumbnail.
-pub(super) fn fire_thumbnailer(
+pub(crate) fn fire_thumbnailer(
     pipeline: &Pipeline,
     viewer: &mut Viewer,
     chains: usize,
@@ -261,7 +267,7 @@ pub(super) fn fire_thumbnailer(
 
 /// Fire a pipeline load for `path` unless it's already cached or in flight.
 /// The resulting RGBA is uploaded to the GPU and lands as `MediaLoaded`.
-pub(super) fn fire_load(
+pub(crate) fn fire_load(
     pipeline: &Pipeline,
     viewer: &mut Viewer,
     path: PathBuf,
@@ -307,10 +313,10 @@ pub(super) fn fire_load(
                         thumb: thumb.clone(),
                     })
                     .map_err(|e| MediaError::Decode(format!("gpu upload failed: {e:?}")));
-                Message::MediaLoaded {
+                Message::Media(MediaMessage::Loaded {
                     path: p.clone(),
                     result,
-                }
+                })
             })
         }
         Ok(DecodedMedia::Animated(anim)) => {
@@ -321,20 +327,20 @@ pub(super) fn fire_load(
                 size: (t.width, t.height),
                 original_size: t.original_size,
             });
-            Task::done(Message::MediaLoaded {
+            Task::done(Message::Media(MediaMessage::Loaded {
                 path: path.clone(),
                 result: Ok(LoadedMedia::Animated { anim, thumb }),
-            })
+            }))
         }
-        Err(e) => Task::done(Message::MediaLoaded {
+        Err(e) => Task::done(Message::Media(MediaMessage::Loaded {
             path: path.clone(),
             result: Err(e),
-        }),
+        })),
     })
 }
 
 /// Warm the prefetch window around the cursor.
-pub(super) fn fire_prefetch(
+pub(crate) fn fire_prefetch(
     pipeline: &Pipeline,
     viewer: &mut Viewer,
     depth: usize,
@@ -349,7 +355,7 @@ pub(super) fn fire_prefetch(
 
 /// Resolve the current image's byte size: instantly from the archive
 /// index, or via an async stat for filesystem images.
-pub(super) fn probe_size(viewer: &mut Viewer, path: PathBuf) -> Task<Message> {
+pub(crate) fn probe_size(viewer: &mut Viewer, path: PathBuf) -> Task<Message> {
     match &viewer.source {
         Source::Fs => probe_file_size(path),
         Source::Archive(index) => {
@@ -370,6 +376,6 @@ fn probe_file_size(path: PathBuf) -> Task<Message> {
                 .unwrap_or(0);
             (path, size)
         },
-        |(path, size)| Message::FileSizeProbed(path, size),
+        |(path, size)| Message::Media(MediaMessage::FileSizeProbed(path, size)),
     )
 }

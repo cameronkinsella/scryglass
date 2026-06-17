@@ -5,7 +5,7 @@
 use iced::widget::{button, center, column, container, row, text, text_input};
 use iced::{Element, Length};
 
-use crate::app::Message;
+use crate::app::ModalMessage;
 use crate::ui::theme;
 
 /// Stable ID so the rename input can be focused when the dialog opens.
@@ -14,7 +14,7 @@ pub fn rename_input_id() -> iced::widget::Id {
 }
 
 /// "Move to Recycle Bin?" confirmation.
-pub fn confirm_delete<'a>(file_name: &str) -> Element<'a, Message> {
+pub fn confirm_delete<'a>(file_name: &str) -> Element<'a, ModalMessage> {
     let card = column![
         text("Move to Recycle Bin?").size(15),
         text(file_name.to_string())
@@ -22,11 +22,11 @@ pub fn confirm_delete<'a>(file_name: &str) -> Element<'a, Message> {
             .style(theme::secondary_text),
         row![
             button(text("Delete").size(13))
-                .on_press(Message::ConfirmDeleteNow)
+                .on_press(ModalMessage::ConfirmDeleteNow)
                 .padding([5, 14])
                 .style(button::danger),
             button(text("Cancel").size(13))
-                .on_press(Message::ModalCancel)
+                .on_press(ModalMessage::Cancel)
                 .padding([5, 14])
                 .style(button::secondary),
         ]
@@ -39,22 +39,22 @@ pub fn confirm_delete<'a>(file_name: &str) -> Element<'a, Message> {
 }
 
 /// Inline rename dialog with a focused text input.
-pub fn rename_dialog<'a>(input: &str) -> Element<'a, Message> {
+pub fn rename_dialog<'a>(input: &str) -> Element<'a, ModalMessage> {
     let card = column![
         text("Rename").size(15),
         text_input("File name", input)
             .id(rename_input_id())
-            .on_input(Message::RenameInput)
-            .on_submit(Message::CommitRename)
+            .on_input(ModalMessage::RenameInput)
+            .on_submit(ModalMessage::CommitRename)
             .size(13)
             .width(Length::Fixed(280.0)),
         row![
             button(text("Rename").size(13))
-                .on_press(Message::CommitRename)
+                .on_press(ModalMessage::CommitRename)
                 .padding([5, 14])
                 .style(button::primary),
             button(text("Cancel").size(13))
-                .on_press(Message::ModalCancel)
+                .on_press(ModalMessage::Cancel)
                 .padding([5, 14])
                 .style(button::secondary),
         ]
@@ -66,7 +66,7 @@ pub fn rename_dialog<'a>(input: &str) -> Element<'a, Message> {
     overlay(card.into())
 }
 
-fn overlay(card: Element<'_, Message>) -> Element<'_, Message> {
+fn overlay(card: Element<'_, ModalMessage>) -> Element<'_, ModalMessage> {
     center(container(card).style(theme::panel))
         .width(Length::Fill)
         .height(Length::Fill)

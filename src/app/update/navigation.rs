@@ -6,12 +6,11 @@ use iced::time::Instant;
 
 use crate::anim::AnimPlayer;
 use crate::app::state::{Direction, Session, Viewer};
-use crate::app::{App, Message};
+use crate::app::{App, MediaMessage, Message, OpenMessage};
 use crate::config::ZoomMode;
 use crate::media::archive::{self, ArchiveIndex};
 use crate::media::pipeline::{Lane, Source, ThumbUrgency};
 use crate::nav::{self, Nav};
-use crate::ui;
 
 use super::NavTarget;
 use super::media_tasks::{
@@ -23,7 +22,7 @@ use super::video_flow::start_video;
 /// Re-sort the open folder by the configured key off-thread. Metadata
 /// (date/size) is fetched only when the key needs it, archives use their
 /// index and never touch the filesystem.
-pub(super) fn fire_resort(app: &App) -> Task<Message> {
+pub(crate) fn fire_resort(app: &App) -> Task<Message> {
     let Some(viewer) = app.viewer() else {
         return Task::none();
     };
@@ -67,12 +66,12 @@ pub(super) fn fire_resort(app: &App) -> Task<Message> {
             .await
             .unwrap_or_default()
         },
-        Message::Resorted,
+        |files| Message::Media(MediaMessage::Resorted(files)),
     )
 }
 
 /// Build a fresh viewer over `nav` and fire the initial loads.
-pub(super) fn open_viewer(
+pub(crate) fn open_viewer(
     app: &mut App,
     nav: Nav,
     source: Source,
@@ -170,7 +169,7 @@ pub(crate) fn open_path(path: PathBuf) -> Task<Message> {
                 .and_then(|r| r.map_err(|e| e.to_string()));
                 (path, result)
             },
-            |(path, result)| Message::ArchiveScanned(path, result),
+            |(path, result)| Message::Open(OpenMessage::ArchiveScanned(path, result)),
         );
     }
 
@@ -199,13 +198,15 @@ pub(crate) fn open_path(path: PathBuf) -> Task<Message> {
                 Err(e) => (start.unwrap_or(dir), opened_dir, Err(e.to_string())),
             }
         },
-        |(path, opened_dir, result)| Message::DirectoryScanned(path, opened_dir, result),
+        |(path, opened_dir, result)| {
+            Message::Open(OpenMessage::DirectoryScanned(path, opened_dir, result))
+        },
     )
 }
 
 /// Move the cursor (one step or to an absolute index), then update the
 /// display from cache and fire loads. Never waits on anything.
-pub(super) fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
+pub(crate) fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
     let pipeline = app.pipeline.clone();
     let Some(viewer) = app.viewer_mut() else {
         return Task::none();
@@ -257,7 +258,7 @@ pub(super) fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
 /// Mid-drag scrub step onto an already-loaded file: move display, title,
 /// and cursor together with minimal side effects: no generation bump, no
 /// prefetch, no probes, no filmstrip centering. Those run once on release.
-pub(super) fn scrub_to(app: &mut App, index: usize) -> Task<Message> {
+pub(crate) fn scrub_to(app: &mut App, index: usize) -> Task<Message> {
     let zoom_mode = app.config.zoom_mode;
     let viewport = app.viewport_size;
     let Some(viewer) = app.viewer_mut() else {
@@ -293,7 +294,7 @@ pub(super) fn scrub_to(app: &mut App, index: usize) -> Task<Message> {
 }
 
 /// A pending navigation's target just became displayable, finish the move.
-pub(super) fn resolve_pending_nav(app: &mut App) -> Task<Message> {
+pub(crate) fn resolve_pending_nav(app: &mut App) -> Task<Message> {
     let Some(viewer) = app.viewer_mut() else {
         return Task::none();
     };
@@ -312,7 +313,7 @@ pub(super) fn resolve_pending_nav(app: &mut App) -> Task<Message> {
 
 /// Move the cursor to `target_index`, which must have something
 /// displayable, then update display, prefetch, caches, and filmstrip.
-pub(super) fn complete_navigation(
+pub(crate) fn complete_navigation(
     app: &mut App,
     target_index: usize,
     bump_generation: bool,
@@ -395,10 +396,10 @@ pub(super) fn complete_navigation(
 
     if show_filmstrip {
         // Keep the filmstrip centered on the cursor and its thumbs warm.
-        let center = ui::filmstrip::centering_offset(viewer.nav.cursor(), window_w);
+        let center = crate::components::filmstrip::centering_offset(viewer.nav.cursor(), window_w);
         viewer.filmstrip_scroll_x = center;
         tasks.push(iced::widget::operation::scroll_to(
-            ui::filmstrip::filmstrip_id(),
+            crate::components::filmstrip::filmstrip_id(),
             iced::widget::scrollable::AbsoluteOffset { x: center, y: 0.0 },
         ));
         tasks.extend(fire_visible_thumbs(&pipeline, viewer, window_w));

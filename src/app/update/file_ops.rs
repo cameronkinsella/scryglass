@@ -3,16 +3,16 @@ use std::path::PathBuf;
 use iced::Task;
 use iced::widget::image::Handle;
 
+use crate::components::toasts::ToastKind;
 use crate::media::pipeline::Pipeline;
-use crate::ui::toast::ToastKind;
 
 use super::push_toast;
-use crate::app::{App, Message};
+use crate::app::{App, Message, ModalMessage};
 
 /// The current file, if file operations are allowed on it: requires a
 /// filesystem source and read-only mode off. Refusals return the toast
 /// task explaining why.
-pub(super) fn file_op_target(app: &mut App) -> Result<PathBuf, Task<Message>> {
+pub(crate) fn file_op_target(app: &mut App) -> Result<PathBuf, Task<Message>> {
     let Some(viewer) = app.viewer() else {
         return Err(Task::none());
     };
@@ -37,7 +37,7 @@ pub(super) fn file_op_target(app: &mut App) -> Result<PathBuf, Task<Message>> {
 }
 
 /// Move a file to the recycle bin, off-thread.
-pub(super) fn fire_delete(app: &mut App, path: PathBuf) -> Task<Message> {
+pub(crate) fn fire_delete(app: &mut App, path: PathBuf) -> Task<Message> {
     app.modal = None;
     Task::perform(
         async move {
@@ -48,12 +48,12 @@ pub(super) fn fire_delete(app: &mut App, path: PathBuf) -> Task<Message> {
                 .and_then(|r| r.map_err(|e| e.to_string()));
             (path, result)
         },
-        |(path, result)| Message::DeleteFinished(path, result),
+        |(path, result)| Message::Modal(ModalMessage::DeleteFinished(path, result)),
     )
 }
 
 /// Put the displayed image on the clipboard as bitmap data.
-pub(super) fn copy_bitmap(handle: &Handle) -> Result<(), String> {
+pub(crate) fn copy_bitmap(handle: &Handle) -> Result<(), String> {
     let Handle::Rgba {
         width,
         height,
@@ -75,7 +75,7 @@ pub(super) fn copy_bitmap(handle: &Handle) -> Result<(), String> {
 
 /// Drop a deleted/renamed file's entry from the persistent thumbnail
 /// store so the thumbnail can't outlive the file.
-pub(super) fn purge_disk_thumb(pipeline: &Pipeline, path: &std::path::Path) -> Task<Message> {
+pub(crate) fn purge_disk_thumb(pipeline: &Pipeline, path: &std::path::Path) -> Task<Message> {
     let Some(disk) = pipeline.disk() else {
         return Task::none();
     };
@@ -92,7 +92,7 @@ pub(super) fn purge_disk_thumb(pipeline: &Pipeline, path: &std::path::Path) -> T
 
 /// Validate a rename input: non-empty, no path/invalid characters, and a
 /// supported image extension (anything else would vanish from the list).
-pub(super) fn validate_rename(input: &str) -> Result<String, String> {
+pub(crate) fn validate_rename(input: &str) -> Result<String, String> {
     let name = input.trim();
     if name.is_empty() {
         return Err("Name can't be empty".into());

@@ -8,7 +8,7 @@
 use iced::widget::{button, column, container, row, rule, text, toggler};
 use iced::{Alignment, Element, Length, Padding};
 
-use crate::app::Message;
+use crate::app::{Message, OpenMessage, SettingsMessage, ToolbarMessage, ViewerMessage};
 use crate::config::{SortKey, ZoomMode};
 use crate::ui::{icons, theme};
 
@@ -45,10 +45,26 @@ pub fn menu_bar<'a>(open_menu: Option<OpenMenu>) -> Element<'a, Message> {
     };
 
     let bar = row![
-        tab("File", OpenMenu::File, Message::ToggleFileMenu),
-        tab("Zoom", OpenMenu::Zoom, Message::ToggleZoomMenu),
-        tab("Sort", OpenMenu::Sort, Message::ToggleSortMenu),
-        tab("Layout", OpenMenu::Layout, Message::ToggleLayoutMenu),
+        tab(
+            "File",
+            OpenMenu::File,
+            Message::Toolbar(ToolbarMessage::ToggleFileMenu),
+        ),
+        tab(
+            "Zoom",
+            OpenMenu::Zoom,
+            Message::Toolbar(ToolbarMessage::ToggleZoomMenu),
+        ),
+        tab(
+            "Sort",
+            OpenMenu::Sort,
+            Message::Toolbar(ToolbarMessage::ToggleSortMenu),
+        ),
+        tab(
+            "Layout",
+            OpenMenu::Layout,
+            Message::Toolbar(ToolbarMessage::ToggleLayoutMenu),
+        ),
     ]
     .padding([2, 4]);
 
@@ -103,12 +119,12 @@ pub fn dropdown<'a>(
         OpenMenu::File => {
             let panel = container(
                 column![
-                    item("Open…", Message::OpenFile),
-                    item("Close", Message::CloseFile),
+                    item("Open…", Message::Open(OpenMessage::OpenFile)),
+                    item("Close", Message::Open(OpenMessage::CloseFile)),
                     rule::horizontal(1),
-                    item("Settings…", Message::OpenSettings),
+                    item("Settings…", Message::Settings(SettingsMessage::Open)),
                     rule::horizontal(1),
-                    item("Quit", Message::Quit),
+                    item("Quit", Message::Open(OpenMessage::Quit)),
                 ]
                 .width(160),
             )
@@ -131,7 +147,7 @@ pub fn dropdown<'a>(
                     checkable(
                         mode.label(),
                         mode == current_zoom_mode,
-                        Message::SetZoomMode(mode),
+                        Message::Toolbar(ToolbarMessage::SetZoomMode(mode)),
                     )
                     .into(),
                 );
@@ -141,7 +157,7 @@ pub fn dropdown<'a>(
                 checkable(
                     "Crisp pixels when zoomed",
                     crisp_pixels,
-                    Message::ToggleCrispPixels,
+                    Message::Toolbar(ToolbarMessage::ToggleCrispPixels),
                 )
                 .into(),
             );
@@ -162,11 +178,24 @@ pub fn dropdown<'a>(
         OpenMenu::Sort => {
             let mut items: Vec<Element<'a, Message>> = Vec::new();
             for &key in SortKey::ALL {
-                items
-                    .push(checkable(key.label(), key == sort_key, Message::SetSortKey(key)).into());
+                items.push(
+                    checkable(
+                        key.label(),
+                        key == sort_key,
+                        Message::Toolbar(ToolbarMessage::SetSortKey(key)),
+                    )
+                    .into(),
+                );
             }
             items.push(rule::horizontal(1).into());
-            items.push(checkable("Descending", sort_desc, Message::ToggleSortDirection).into());
+            items.push(
+                checkable(
+                    "Descending",
+                    sort_desc,
+                    Message::Toolbar(ToolbarMessage::ToggleSortDirection),
+                )
+                .into(),
+            );
 
             let panel = container(column(items).spacing(1).width(180))
                 .padding(Padding::from(4))
@@ -193,15 +222,23 @@ pub fn dropdown<'a>(
             let panel = container(
                 column![
                     toggle("Filmstrip", layout_vis.show_filmstrip, |_| {
-                        Message::ToggleFilmstrip
+                        Message::Toolbar(ToolbarMessage::ToggleFilmstrip)
                     }),
-                    toggle("Slider", layout_vis.show_slider, |_| Message::ToggleSlider),
-                    toggle("Footer", layout_vis.show_footer, |_| Message::ToggleFooter),
-                    toggle("Info panel", layout_vis.show_info, |_| Message::ToggleInfo),
+                    toggle("Slider", layout_vis.show_slider, |_| {
+                        Message::Toolbar(ToolbarMessage::ToggleSlider)
+                    }),
+                    toggle("Footer", layout_vis.show_footer, |_| {
+                        Message::Toolbar(ToolbarMessage::ToggleFooter)
+                    }),
+                    toggle("Info panel", layout_vis.show_info, |_| {
+                        Message::Viewer(ViewerMessage::ToggleInfo)
+                    }),
                     toggle("Checkerboard", layout_vis.show_checkerboard, |_| {
-                        Message::ToggleCheckerboard
+                        Message::Viewer(ViewerMessage::ToggleCheckerboard)
                     }),
-                    toggle("Light theme", light_theme, |_| Message::ToggleTheme),
+                    toggle("Light theme", light_theme, |_| {
+                        Message::Toolbar(ToolbarMessage::ToggleTheme)
+                    }),
                 ]
                 .spacing(6)
                 .padding([6, 12])
