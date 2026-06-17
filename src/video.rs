@@ -8,6 +8,7 @@
 //! Seeking opens a fresh session at the target (`avformat` seek before
 //! decode begins). No external processes are involved anywhere.
 
+use std::num::{NonZeroU16, NonZeroU32};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
@@ -670,23 +671,23 @@ impl Iterator for PcmChannel {
 }
 
 impl rodio::Source for PcmChannel {
-    fn current_frame_len(&self) -> Option<usize> {
+    fn current_span_len(&self) -> Option<usize> {
         None
     }
-    fn channels(&self) -> u16 {
-        2
+    fn channels(&self) -> NonZeroU16 {
+        NonZeroU16::new(2).expect("stereo channel count is non-zero")
     }
-    fn sample_rate(&self) -> u32 {
-        AUDIO_RATE
+    fn sample_rate(&self) -> NonZeroU32 {
+        NonZeroU32::new(AUDIO_RATE).expect("audio rate is non-zero")
     }
     fn total_duration(&self) -> Option<Duration> {
         None
     }
 }
 
-/// Play decoded PCM through rodio, publishing the sink position as the
-/// master clock. The `OutputStream` must live on its own thread (it is
-/// not `Send`), so commands arrive over a channel.
+/// Play decoded PCM through rodio, publishing the player position as the
+/// master clock. The device sink lives on its own thread, so commands
+/// arrive over a channel.
 fn spawn_audio_output(
     pcm_rx: mpsc::Receiver<f32>,
     stop: Arc<AtomicBool>,
@@ -697,7 +698,7 @@ fn spawn_audio_output(
     let (tx, rx) = mpsc::channel::<AudioCmd>();
 
     std::thread::spawn(move || {
-        let Ok((_stream, handle)) = rodio::OutputStream::try_default() else {
+        let Ok(mut device_sink) = rodio::DeviceSinkBuilder::open_default_sink() else {
             // No audio device: drain the channel so the decoder never
             // blocks, and let the wall clock pace playback.
             while !stop.load(Ordering::Relaxed) {
@@ -706,27 +707,25 @@ fn spawn_audio_output(
             }
             return;
         };
-        let Ok(sink) = rodio::Sink::try_new(&handle) else {
-            return;
-        };
-        sink.set_volume(volume);
-        sink.append(PcmChannel { rx: pcm_rx });
+        device_sink.log_on_drop(false);
+        let player = rodio::Player::connect_new(device_sink.mixer());
+        player.set_volume(volume);
+        player.append(PcmChannel { rx: pcm_rx });
 
         loop {
             if stop.load(Ordering::Relaxed) {
-                sink.stop();
                 return;
             }
             while let Ok(cmd) = rx.try_recv() {
                 match cmd {
-                    AudioCmd::Volume(v) => sink.set_volume(v),
-                    AudioCmd::Pause => sink.pause(),
-                    AudioCmd::Play => sink.play(),
+                    AudioCmd::Volume(v) => player.set_volume(v),
+                    AudioCmd::Pause => player.pause(),
+                    AudioCmd::Play => player.play(),
                 }
             }
-            // Silent files feed no samples: the sink stays at zero and
+            // Silent files feed no samples: the player stays at zero and
             // the session falls back to its wall clock.
-            let pos = sink.get_pos();
+            let pos = player.get_pos();
             if pos > Duration::ZERO {
                 has_audio.store(true, Ordering::Relaxed);
                 clock_us.store(pos.as_micros() as u64, Ordering::Relaxed);

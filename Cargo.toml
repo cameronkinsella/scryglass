@@ -25,7 +25,7 @@ iced_runtime = "0.14"
 anyhow = "1"
 thiserror = "2"
 gif = "0.14"
-rfd = "0.15"
+rfd = "0.17"
 open = "5"
 arboard = "3"
 iced_fonts = { version = "0.3", features = ["bootstrap"] }
@@ -61,12 +61,12 @@ rawler = { version = "0.7.2", optional = true }
 # against Ubuntu's packaged 1.17 and vcpkg's current release alike.
 libheif-rs = { version = "2.7.0", default-features = false, features = ["v1_17"], optional = true }
 trash = "5.2.6"
-rodio = { version = "0.20", default-features = false, optional = true }
+rodio = { version = "0.22", default-features = false, features = ["playback"], optional = true }
 ffmpeg-next = { version = "8", default-features = false, features = ["codec", "format", "software-resampling", "software-scaling"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_UI_Shell", "Win32_Foundation", "Win32_System_Com", "Win32_System_Console", "Win32_System_Ole", "Win32_System_Registry"] }
-winreg = "0.55"
+windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_Foundation", "Win32_System_Com", "Win32_System_Console", "Win32_System_Ole", "Win32_System_Registry"] }
+winreg = "0.56"
 
 [target.'cfg(not(windows))'.dependencies]
 # Name-sort fallback where StrCmpLogicalW isn't available.
