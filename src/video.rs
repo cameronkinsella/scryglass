@@ -305,7 +305,10 @@ impl VideoSession {
 
     /// Absolute playback position in the file.
     pub fn position(&self) -> Duration {
-        self.base + self.clock()
+        let position = self.base + self.clock();
+        self.duration()
+            .map(|duration| position.min(duration))
+            .unwrap_or(position)
     }
 
     /// Total duration, once the container has been opened.
@@ -348,7 +351,11 @@ impl VideoSession {
 
     /// Whether decoding finished and every frame has been shown.
     pub fn finished(&self) -> bool {
-        self.video_done.load(Ordering::Relaxed) && self.pending.is_none()
+        self.video_done.load(Ordering::Relaxed)
+            && self.pending.is_none()
+            && self
+                .duration()
+                .is_none_or(|duration| self.base + self.clock() >= duration)
     }
 
     pub fn pause(&mut self) {
@@ -711,6 +718,8 @@ fn spawn_audio_output(
         let player = rodio::Player::connect_new(device_sink.mixer());
         player.set_volume(volume);
         player.append(PcmChannel { rx: pcm_rx });
+        let mut playing = true;
+        let mut ended_clock: Option<(Duration, Option<Instant>)> = None;
 
         loop {
             if stop.load(Ordering::Relaxed) {
@@ -719,8 +728,20 @@ fn spawn_audio_output(
             while let Ok(cmd) = rx.try_recv() {
                 match cmd {
                     AudioCmd::Volume(v) => player.set_volume(v),
-                    AudioCmd::Pause => player.pause(),
-                    AudioCmd::Play => player.play(),
+                    AudioCmd::Pause => {
+                        if let Some((position, Some(started))) = ended_clock {
+                            ended_clock = Some((position + started.elapsed(), None));
+                        }
+                        playing = false;
+                        player.pause();
+                    }
+                    AudioCmd::Play => {
+                        if let Some((position, None)) = ended_clock {
+                            ended_clock = Some((position, Some(Instant::now())));
+                        }
+                        playing = true;
+                        player.play();
+                    }
                 }
             }
             // Silent files feed no samples: the player stays at zero and
@@ -729,6 +750,13 @@ fn spawn_audio_output(
             if pos > Duration::ZERO {
                 has_audio.store(true, Ordering::Relaxed);
                 clock_us.store(pos.as_micros() as u64, Ordering::Relaxed);
+            }
+            if player.empty() && has_audio.load(Ordering::Relaxed) {
+                let (position, started) =
+                    ended_clock.get_or_insert_with(|| (pos, playing.then(Instant::now)));
+                let position =
+                    *position + started.map(|started| started.elapsed()).unwrap_or_default();
+                clock_us.store(position.as_micros() as u64, Ordering::Relaxed);
             }
             std::thread::sleep(Duration::from_millis(10));
         }

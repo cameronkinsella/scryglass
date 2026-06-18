@@ -60,7 +60,7 @@ pub fn video_controls<'a>(state: VideoControls) -> Element<'a, VideoMessage> {
         VideoMessage::SeekDrag,
     )
     .on_release(VideoMessage::SeekRelease)
-    .step(0.1)
+    .step(0.000_001)
     .width(Length::Fill);
 
     let volume_icon = if state.muted || state.volume == 0.0 {
