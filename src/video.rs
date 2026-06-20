@@ -191,6 +191,10 @@ pub fn clean_extraction_dir() {
 /// Audio output sample rate. The resampler converts everything to this.
 const AUDIO_RATE: u32 = 48000;
 
+/// A UI-poll gap this long (e.g. a window move/resize loop) counts as a
+/// stall, so playback freezes instead of drifting.
+const STALL: Duration = Duration::from_millis(200);
+
 /// An active playback session. Dropping it stops the decode threads.
 pub struct VideoSession {
     frames: mpsc::Receiver<VideoFrame>,
@@ -205,6 +209,13 @@ pub struct VideoSession {
     /// Wall-clock fallback for silent files: time playing since last resume.
     started: Option<Instant>,
     accumulated: Duration,
+    /// Shared monotonic origin for the UI-liveness timestamp.
+    clock_origin: Instant,
+    /// Last poll() time as millis since `clock_origin`; the audio watchdog
+    /// reads it to spot a suspended UI thread.
+    ui_tick_ms: Arc<AtomicU64>,
+    /// Last poll() instant, to discount a stall from the silent wall clock.
+    last_poll: Option<Instant>,
     /// Whether any frame has been shown. The clock stays at zero until
     /// then, so the slider doesn't creep ahead during decoder warmup and
     /// snap back when the audio clock takes over.
@@ -229,6 +240,10 @@ impl VideoSession {
         let video_done = Arc::new(AtomicBool::new(false));
         let audio_clock_us = Arc::new(AtomicU64::new(0));
         let has_audio = Arc::new(AtomicBool::new(false));
+        // Shared with the audio watchdog so it can spot a suspended UI
+        // thread and freeze playback instead of letting it drift.
+        let clock_origin = Instant::now();
+        let ui_tick_ms = Arc::new(AtomicU64::new(0));
 
         // Audio PCM channel: about half a second of stereo float samples.
         // The decoder blocks when it runs ahead, rodio's thread drains it.
@@ -247,6 +262,8 @@ impl VideoSession {
             stop.clone(),
             audio_clock_us.clone(),
             has_audio.clone(),
+            ui_tick_ms.clone(),
+            clock_origin,
             if muted { 0.0 } else { volume },
         );
 
@@ -261,6 +278,9 @@ impl VideoSession {
             base: start,
             started: None,
             accumulated: Duration::ZERO,
+            clock_origin,
+            ui_tick_ms,
+            last_poll: None,
             first_frame_shown: false,
             pending: None,
             playing: true,
@@ -322,6 +342,26 @@ impl VideoSession {
         if !self.playing {
             return None;
         }
+        // Mark the UI as alive for the audio watchdog. For silent files
+        // (which pace off the wall clock) also discount a long gap, so a
+        // suspended UI thread doesn't make the video race on resume.
+        let now = Instant::now();
+        self.ui_tick_ms.store(
+            now.duration_since(self.clock_origin).as_millis() as u64,
+            Ordering::Relaxed,
+        );
+        if !self.has_audio.load(Ordering::Relaxed)
+            && let Some(last) = self.last_poll
+        {
+            let gap = now.duration_since(last);
+            if gap > STALL
+                && let Some(started) = self.started
+            {
+                self.started = Some(started + gap);
+            }
+        }
+        self.last_poll = Some(now);
+
         let clock = self.clock();
         let mut due = None;
 
@@ -705,6 +745,8 @@ fn spawn_audio_output(
     stop: Arc<AtomicBool>,
     clock_us: Arc<AtomicU64>,
     has_audio: Arc<AtomicBool>,
+    ui_tick_ms: Arc<AtomicU64>,
+    clock_origin: Instant,
     volume: f32,
 ) -> Option<mpsc::Sender<AudioCmd>> {
     let (tx, rx) = mpsc::channel::<AudioCmd>();
@@ -724,6 +766,7 @@ fn spawn_audio_output(
         player.set_volume(volume);
         player.append(PcmChannel { rx: pcm_rx });
         let mut playing = true;
+        let mut auto_paused = false;
         let mut ended_clock: Option<(Duration, Option<Instant>)> = None;
 
         loop {
@@ -747,6 +790,28 @@ fn spawn_audio_output(
                         playing = true;
                         player.play();
                     }
+                }
+            }
+            // Watchdog: a window move or resize modal loop suspends the UI
+            // thread, so pause to freeze audio and the clock with the
+            // picture instead of racing ahead on release.
+            if has_audio.load(Ordering::Relaxed) && playing {
+                let now_ms = clock_origin.elapsed().as_millis() as u64;
+                let last_ms = ui_tick_ms.load(Ordering::Relaxed);
+                let stalled =
+                    last_ms != 0 && now_ms.saturating_sub(last_ms) > STALL.as_millis() as u64;
+                if stalled && !auto_paused {
+                    if let Some((position, Some(started))) = ended_clock {
+                        ended_clock = Some((position + started.elapsed(), None));
+                    }
+                    player.pause();
+                    auto_paused = true;
+                } else if !stalled && auto_paused {
+                    if let Some((position, None)) = ended_clock {
+                        ended_clock = Some((position, Some(Instant::now())));
+                    }
+                    player.play();
+                    auto_paused = false;
                 }
             }
             // Silent files feed no samples: the player stays at zero and
