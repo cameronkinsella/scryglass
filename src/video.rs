@@ -467,10 +467,15 @@ fn run_pipeline(
         .ok_or(ffmpeg::Error::StreamNotFound)?;
     let video_index = video_stream.index();
     let video_tb = f64::from(video_stream.time_base());
-    let mut video_decoder =
-        ffmpeg::codec::context::Context::from_parameters(video_stream.parameters())?
-            .decoder()
-            .video()?;
+    let mut video_context =
+        ffmpeg::codec::context::Context::from_parameters(video_stream.parameters())?;
+    // Frame threading spreads decode across cores. A single thread can't
+    // keep up at 4K, so let libavcodec run one thread per logical CPU
+    // (count 0 means autodetect).
+    video_context.set_threading(ffmpeg::codec::threading::Config::kind(
+        ffmpeg::codec::threading::Type::Frame,
+    ));
+    let mut video_decoder = video_context.decoder().video()?;
 
     let (video_pkt_tx, video_pkt_rx) =
         mpsc::sync_channel::<ffmpeg::codec::packet::Packet>(PACKET_QUEUE);
