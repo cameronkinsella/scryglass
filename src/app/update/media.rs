@@ -188,11 +188,14 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
 
             let mut tasks = Vec::new();
             if show_filmstrip {
-                let center = filmstrip::centering_offset(viewer.nav.cursor(), window_w);
-                viewer.filmstrip_scroll_x = center;
+                // A resort reshuffles the whole strip, so recenter the cursor
+                // like a fresh open.
+                let offset =
+                    filmstrip::open_offset(viewer.nav.cursor(), window_w, viewer.nav.len());
+                viewer.filmstrip_scroll_x = offset;
                 tasks.push(iced::widget::operation::scroll_to(
                     filmstrip::filmstrip_id(),
-                    iced::widget::scrollable::AbsoluteOffset { x: center, y: 0.0 },
+                    iced::widget::scrollable::AbsoluteOffset { x: offset, y: 0.0 },
                 ));
                 tasks.extend(fire_visible_thumbs(&pipeline, viewer, window_w));
             }

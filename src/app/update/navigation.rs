@@ -138,6 +138,21 @@ pub(crate) fn open_viewer(
     // placeholders are warm everywhere, not just near the cursor.
     tasks.extend(fire_thumbnailer(&pipeline, &mut viewer, 3));
 
+    // Open centered on the cursor when it would otherwise be off-screen
+    // (deep into the directory), flush left or right at the edges.
+    if app.config.show_filmstrip {
+        let offset = crate::components::filmstrip::open_offset(
+            viewer.nav.cursor(),
+            window_w,
+            viewer.nav.len(),
+        );
+        viewer.filmstrip_scroll_x = offset;
+        tasks.push(iced::widget::operation::scroll_to(
+            crate::components::filmstrip::filmstrip_id(),
+            iced::widget::scrollable::AbsoluteOffset { x: offset, y: 0.0 },
+        ));
+    }
+
     viewer.resort_to_first = opened_container;
     app.session = Session::Viewing(Box::new(viewer));
 
@@ -403,13 +418,21 @@ pub(crate) fn complete_navigation(
     viewer.cache.evict_over_budget(&pinned);
 
     if show_filmstrip {
-        // Keep the filmstrip centered on the cursor and its thumbs warm.
-        let center = crate::components::filmstrip::centering_offset(viewer.nav.cursor(), window_w);
-        viewer.filmstrip_scroll_x = center;
-        tasks.push(iced::widget::operation::scroll_to(
-            crate::components::filmstrip::filmstrip_id(),
-            iced::widget::scrollable::AbsoluteOffset { x: center, y: 0.0 },
-        ));
+        // Move the strip only enough to keep the cursor on screen; otherwise
+        // hold it where it is. Warm whatever thumbs become visible.
+        let offset = crate::components::filmstrip::keep_visible_offset(
+            viewer.filmstrip_scroll_x,
+            viewer.nav.cursor(),
+            window_w,
+            viewer.nav.len(),
+        );
+        if offset != viewer.filmstrip_scroll_x {
+            viewer.filmstrip_scroll_x = offset;
+            tasks.push(iced::widget::operation::scroll_to(
+                crate::components::filmstrip::filmstrip_id(),
+                iced::widget::scrollable::AbsoluteOffset { x: offset, y: 0.0 },
+            ));
+        }
         tasks.extend(fire_visible_thumbs(&pipeline, viewer, window_w));
     }
 
