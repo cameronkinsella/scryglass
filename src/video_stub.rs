@@ -36,12 +36,20 @@ pub enum YuvRange {
 }
 
 #[allow(dead_code)] // mirrors the real module so shared code compiles
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum YuvFormat {
+    I420,
+    Nv12,
+}
+
+#[allow(dead_code)] // mirrors the real module so shared code compiles
 pub struct VideoFrame {
     pub id: u64,
     pub width: u32,
     pub height: u32,
     pub chroma_width: u32,
     pub chroma_height: u32,
+    pub format: YuvFormat,
     pub y: Vec<u8>,
     pub u: Vec<u8>,
     pub v: Vec<u8>,

@@ -11,7 +11,7 @@ use iced::{Element, Length, Rectangle, mouse, wgpu};
 
 use crate::app::Message;
 use crate::ui::image_display::{DisplayMath, display_math};
-use crate::video::{VideoFrame, YuvMatrix, YuvRange};
+use crate::video::{VideoFrame, YuvFormat, YuvMatrix, YuvRange};
 
 /// Build the video surface element for the current frame at the given
 /// zoom/pan. Fills the image area like the still-image widget does.
@@ -196,6 +196,7 @@ struct YuvTextures {
     height: u32,
     chroma_width: u32,
     chroma_height: u32,
+    format: YuvFormat,
     y: wgpu::Texture,
     u: wgpu::Texture,
     v: wgpu::Texture,
@@ -319,6 +320,7 @@ impl VideoPipeline {
                     || t.height != frame.height
                     || t.chroma_width != frame.chroma_width
                     || t.chroma_height != frame.chroma_height
+                    || t.format != frame.format
             }
             None => true,
         };
@@ -330,21 +332,45 @@ impl VideoPipeline {
 
         let textures = self.textures.as_ref().expect("textures just created");
         if self.last_id != Some(frame.id) {
-            write_plane(queue, &textures.y, frame.width, frame.height, &frame.y);
             write_plane(
                 queue,
-                &textures.u,
-                frame.chroma_width,
-                frame.chroma_height,
-                &frame.u,
+                &textures.y,
+                frame.width,
+                frame.height,
+                frame.width,
+                &frame.y,
             );
-            write_plane(
-                queue,
-                &textures.v,
-                frame.chroma_width,
-                frame.chroma_height,
-                &frame.v,
-            );
+            match frame.format {
+                YuvFormat::I420 => {
+                    write_plane(
+                        queue,
+                        &textures.u,
+                        frame.chroma_width,
+                        frame.chroma_height,
+                        frame.chroma_width,
+                        &frame.u,
+                    );
+                    write_plane(
+                        queue,
+                        &textures.v,
+                        frame.chroma_width,
+                        frame.chroma_height,
+                        frame.chroma_width,
+                        &frame.v,
+                    );
+                }
+                // Interleaved UV in one Rg8 texture: two bytes per sample.
+                YuvFormat::Nv12 => {
+                    write_plane(
+                        queue,
+                        &textures.u,
+                        frame.chroma_width,
+                        frame.chroma_height,
+                        frame.chroma_width * 2,
+                        &frame.u,
+                    );
+                }
+            }
             self.last_id = Some(frame.id);
         }
 
@@ -356,19 +382,37 @@ impl VideoPipeline {
     }
 
     fn create_textures(&self, device: &wgpu::Device, frame: &VideoFrame) -> YuvTextures {
-        let y = plane_texture(device, frame.width, frame.height, "scryglass video y");
-        let u = plane_texture(
-            device,
-            frame.chroma_width,
-            frame.chroma_height,
-            "scryglass video u",
-        );
-        let v = plane_texture(
-            device,
-            frame.chroma_width,
-            frame.chroma_height,
-            "scryglass video v",
-        );
+        let r8 = wgpu::TextureFormat::R8Unorm;
+        let y = plane_texture(device, frame.width, frame.height, r8, "scryglass video y");
+        let (u, v) = match frame.format {
+            YuvFormat::I420 => (
+                plane_texture(
+                    device,
+                    frame.chroma_width,
+                    frame.chroma_height,
+                    r8,
+                    "scryglass video u",
+                ),
+                plane_texture(
+                    device,
+                    frame.chroma_width,
+                    frame.chroma_height,
+                    r8,
+                    "scryglass video v",
+                ),
+            ),
+            // NV12: interleaved UV in one Rg8 texture; v is an unused stub.
+            YuvFormat::Nv12 => (
+                plane_texture(
+                    device,
+                    frame.chroma_width,
+                    frame.chroma_height,
+                    wgpu::TextureFormat::Rg8Unorm,
+                    "scryglass video uv",
+                ),
+                plane_texture(device, 1, 1, r8, "scryglass video v unused"),
+            ),
+        };
         let yv = y.create_view(&wgpu::TextureViewDescriptor::default());
         let uv = u.create_view(&wgpu::TextureViewDescriptor::default());
         let vv = v.create_view(&wgpu::TextureViewDescriptor::default());
@@ -407,6 +451,7 @@ impl VideoPipeline {
             height: frame.height,
             chroma_width: frame.chroma_width,
             chroma_height: frame.chroma_height,
+            format: frame.format,
             bind_linear: bind(&self.sampler_linear),
             bind_nearest: bind(&self.sampler_nearest),
             y,
@@ -444,7 +489,13 @@ fn plane_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-fn plane_texture(device: &wgpu::Device, width: u32, height: u32, label: &str) -> wgpu::Texture {
+fn plane_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+    label: &str,
+) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d {
@@ -455,13 +506,20 @@ fn plane_texture(device: &wgpu::Device, width: u32, height: u32, label: &str) ->
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::R8Unorm,
+        format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     })
 }
 
-fn write_plane(queue: &wgpu::Queue, texture: &wgpu::Texture, width: u32, height: u32, data: &[u8]) {
+fn write_plane(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    width: u32,
+    height: u32,
+    bytes_per_row: u32,
+    data: &[u8],
+) {
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
             texture,
@@ -472,7 +530,7 @@ fn write_plane(queue: &wgpu::Queue, texture: &wgpu::Texture, width: u32, height:
         data,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(width),
+            bytes_per_row: Some(bytes_per_row),
             rows_per_image: Some(height),
         },
         wgpu::Extent3d {
@@ -514,9 +572,14 @@ fn build_uniforms(dst: [f32; 4], src: [f32; 4], frame: &VideoFrame, is_srgb: boo
         YuvRange::Full => 1,
         YuvRange::Limited => 0,
     };
+    let format: u32 = match frame.format {
+        YuvFormat::Nv12 => 1,
+        YuvFormat::I420 => 0,
+    };
     buf[32..36].copy_from_slice(&matrix.to_le_bytes());
     buf[36..40].copy_from_slice(&full.to_le_bytes());
     buf[40..44].copy_from_slice(&(is_srgb as u32).to_le_bytes());
+    buf[44..48].copy_from_slice(&format.to_le_bytes());
     buf
 }
 

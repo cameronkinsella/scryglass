@@ -138,8 +138,17 @@ pub enum YuvRange {
     Full,
 }
 
-/// A decoded frame in planar YUV 4:2:0 (I420), ready for the GPU
-/// converter. Planes are tightly packed, with stride padding removed.
+/// Plane layout of a decoded frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum YuvFormat {
+    /// Three planes: Y, U, V (software decode).
+    I420,
+    /// Two planes: Y plus interleaved UV (hardware download).
+    Nv12,
+}
+
+/// A decoded frame in planar YUV 4:2:0, ready for the GPU converter.
+/// Planes are tightly packed, with stride padding removed.
 pub struct VideoFrame {
     /// Monotonic id, so the GPU side can skip re-uploading the same frame.
     pub id: u64,
@@ -147,8 +156,11 @@ pub struct VideoFrame {
     pub height: u32,
     pub chroma_width: u32,
     pub chroma_height: u32,
+    pub format: YuvFormat,
     pub y: Vec<u8>,
+    /// I420: the U plane. NV12: the interleaved UV plane (2 bytes/sample).
     pub u: Vec<u8>,
+    /// I420: the V plane. NV12: empty.
     pub v: Vec<u8>,
     pub matrix: YuvMatrix,
     pub range: YuvRange,
@@ -168,14 +180,19 @@ impl VideoFrame {
         );
         let full = self.range == YuvRange::Full;
         let bt709 = self.matrix == YuvMatrix::Bt709;
+        let nv12 = self.format == YuvFormat::Nv12;
         let mut out = vec![0u8; w * h * 4];
         for y in 0..h {
             let yrow = y * w;
-            let crow = (y / 2) * cw;
             for x in 0..w {
                 let yn = self.y[yrow + x] as f32 / 255.0;
-                let un = self.u[crow + x / 2] as f32 / 255.0;
-                let vn = self.v[crow + x / 2] as f32 / 255.0;
+                let (un, vn) = if nv12 {
+                    let i = (y / 2) * cw * 2 + (x / 2) * 2;
+                    (self.u[i] as f32 / 255.0, self.u[i + 1] as f32 / 255.0)
+                } else {
+                    let i = (y / 2) * cw + x / 2;
+                    (self.u[i] as f32 / 255.0, self.v[i] as f32 / 255.0)
+                };
                 let (luma, cb, cr) = if full {
                     (yn, un - 0.5, vn - 0.5)
                 } else {
@@ -843,32 +860,34 @@ fn send_video_frame(
 ) -> Result<(), ()> {
     use ffmpeg::format::Pixel;
 
-    // Most 8-bit streams decode straight to I420. Anything else (10-bit,
-    // 4:2:2, 4:4:4, NV12) goes through swscale once into I420, far cheaper
-    // than the old full RGBA conversion and rare in practice.
+    // I420 (software) and NV12 (hardware download) upload straight to the
+    // GPU. Anything else (10-bit, 4:2:2, 4:4:4) converts once into I420,
+    // far cheaper than the old full RGBA conversion and rare in practice.
     let mut converted = ffmpeg::frame::Video::empty();
-    let src = if frame.format() == Pixel::YUV420P {
-        frame
-    } else {
-        if scaler.is_none() {
-            *scaler = ffmpeg::software::scaling::Context::get(
-                frame.format(),
-                frame.width(),
-                frame.height(),
-                Pixel::YUV420P,
-                frame.width(),
-                frame.height(),
-                ffmpeg::software::scaling::Flags::BILINEAR,
-            )
-            .ok();
+    let (src, format) = match frame.format() {
+        Pixel::YUV420P => (frame, YuvFormat::I420),
+        Pixel::NV12 => (frame, YuvFormat::Nv12),
+        _ => {
+            if scaler.is_none() {
+                *scaler = ffmpeg::software::scaling::Context::get(
+                    frame.format(),
+                    frame.width(),
+                    frame.height(),
+                    Pixel::YUV420P,
+                    frame.width(),
+                    frame.height(),
+                    ffmpeg::software::scaling::Flags::BILINEAR,
+                )
+                .ok();
+            }
+            let Some(scaler) = scaler.as_mut() else {
+                return Ok(());
+            };
+            if scaler.run(frame, &mut converted).is_err() {
+                return Ok(());
+            }
+            (&converted, YuvFormat::I420)
         }
-        let Some(scaler) = scaler.as_mut() else {
-            return Ok(());
-        };
-        if scaler.run(frame, &mut converted).is_err() {
-            return Ok(());
-        }
-        &converted
     };
 
     let width = src.width();
@@ -877,18 +896,32 @@ fn send_video_frame(
     let chroma_height = height.div_ceil(2);
 
     let y = copy_plane(src.data(0), src.stride(0), width as usize, height as usize);
-    let u = copy_plane(
-        src.data(1),
-        src.stride(1),
-        chroma_width as usize,
-        chroma_height as usize,
-    );
-    let v = copy_plane(
-        src.data(2),
-        src.stride(2),
-        chroma_width as usize,
-        chroma_height as usize,
-    );
+    let (u, v) = match format {
+        YuvFormat::I420 => (
+            copy_plane(
+                src.data(1),
+                src.stride(1),
+                chroma_width as usize,
+                chroma_height as usize,
+            ),
+            copy_plane(
+                src.data(2),
+                src.stride(2),
+                chroma_width as usize,
+                chroma_height as usize,
+            ),
+        ),
+        // NV12 keeps one interleaved UV plane: two bytes per chroma sample.
+        YuvFormat::Nv12 => (
+            copy_plane(
+                src.data(1),
+                src.stride(1),
+                chroma_width as usize * 2,
+                chroma_height as usize,
+            ),
+            Vec::new(),
+        ),
+    };
 
     let matrix = match src.color_space() {
         ffmpeg::util::color::Space::BT709 => YuvMatrix::Bt709,
@@ -918,6 +951,7 @@ fn send_video_frame(
         height,
         chroma_width,
         chroma_height,
+        format,
         y,
         u,
         v,
