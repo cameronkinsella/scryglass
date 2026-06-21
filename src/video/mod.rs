@@ -18,6 +18,10 @@ use std::time::{Duration, Instant};
 
 use ffmpeg_next as ffmpeg;
 
+mod frame;
+use frame::copy_plane;
+pub use frame::{VideoFrame, YuvFormat, YuvMatrix, YuvRange};
+
 /// Video container extensions offered in the file list.
 pub const EXTENSIONS: &[&str] = &["mp4", "mkv", "webm", "mov", "avi", "m4v"];
 
@@ -122,108 +126,6 @@ pub fn first_frame_thumb(path: &Path, max_dim: u32) -> Option<crate::media::Thum
         pixels: frame.pixels,
         original_size: frame.native_size,
     })
-}
-
-/// YUV-to-RGB matrix the GPU converter should use.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum YuvMatrix {
-    Bt601,
-    Bt709,
-}
-
-/// YUV sample range (limited 16-235 or full 0-255).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum YuvRange {
-    Limited,
-    Full,
-}
-
-/// Plane layout of a decoded frame.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum YuvFormat {
-    /// Three planes: Y, U, V (software decode).
-    I420,
-    /// Two planes: Y plus interleaved UV (hardware download).
-    Nv12,
-}
-
-/// A decoded frame in planar YUV 4:2:0, ready for the GPU converter.
-/// Planes are tightly packed, with stride padding removed.
-pub struct VideoFrame {
-    /// Monotonic id, so the GPU side can skip re-uploading the same frame.
-    pub id: u64,
-    pub width: u32,
-    pub height: u32,
-    pub chroma_width: u32,
-    pub chroma_height: u32,
-    pub format: YuvFormat,
-    pub y: Vec<u8>,
-    /// I420: the U plane. NV12: the interleaved UV plane (2 bytes/sample).
-    pub u: Vec<u8>,
-    /// I420: the V plane. NV12: empty.
-    pub v: Vec<u8>,
-    pub matrix: YuvMatrix,
-    pub range: YuvRange,
-    /// Presentation time relative to the session start (the seek point).
-    pub timestamp: Duration,
-}
-
-impl VideoFrame {
-    /// Convert this frame to RGBA8 on the CPU, for a one-off clipboard
-    /// copy. Mirrors the GPU shader's matrix and range (chroma upsampled
-    /// nearest, which is plenty for a still grab).
-    pub fn to_rgba(&self) -> (u32, u32, Vec<u8>) {
-        let (w, h, cw) = (
-            self.width as usize,
-            self.height as usize,
-            self.chroma_width as usize,
-        );
-        let full = self.range == YuvRange::Full;
-        let bt709 = self.matrix == YuvMatrix::Bt709;
-        let nv12 = self.format == YuvFormat::Nv12;
-        let mut out = vec![0u8; w * h * 4];
-        for y in 0..h {
-            let yrow = y * w;
-            for x in 0..w {
-                let yn = self.y[yrow + x] as f32 / 255.0;
-                let (un, vn) = if nv12 {
-                    let i = (y / 2) * cw * 2 + (x / 2) * 2;
-                    (self.u[i] as f32 / 255.0, self.u[i + 1] as f32 / 255.0)
-                } else {
-                    let i = (y / 2) * cw + x / 2;
-                    (self.u[i] as f32 / 255.0, self.v[i] as f32 / 255.0)
-                };
-                let (luma, cb, cr) = if full {
-                    (yn, un - 0.5, vn - 0.5)
-                } else {
-                    (
-                        (yn - 16.0 / 255.0) * (255.0 / 219.0),
-                        (un - 128.0 / 255.0) * (255.0 / 224.0),
-                        (vn - 128.0 / 255.0) * (255.0 / 224.0),
-                    )
-                };
-                let (r, g, b) = if bt709 {
-                    (
-                        luma + 1.5748 * cr,
-                        luma - 0.1873 * cb - 0.4681 * cr,
-                        luma + 1.8556 * cb,
-                    )
-                } else {
-                    (
-                        luma + 1.402 * cr,
-                        luma - 0.344136 * cb - 0.714136 * cr,
-                        luma + 1.772 * cb,
-                    )
-                };
-                let o = (yrow + x) * 4;
-                out[o] = (r.clamp(0.0, 1.0) * 255.0).round() as u8;
-                out[o + 1] = (g.clamp(0.0, 1.0) * 255.0).round() as u8;
-                out[o + 2] = (b.clamp(0.0, 1.0) * 255.0).round() as u8;
-                out[o + 3] = 255;
-            }
-        }
-        (self.width, self.height, out)
-    }
 }
 
 enum AudioCmd {
@@ -989,16 +891,6 @@ fn send_video_frame(
         timestamp: Duration::from_secs_f64(relative_secs),
     })
     .map_err(|_| ())
-}
-
-/// Copy one image plane row by row, stripping stride padding.
-fn copy_plane(data: &[u8], stride: usize, width: usize, height: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(width * height);
-    for row in 0..height {
-        let offset = row * stride;
-        out.extend_from_slice(&data[offset..offset + width]);
-    }
-    out
 }
 
 /// Resample one decoded audio frame to interleaved f32 stereo and push
