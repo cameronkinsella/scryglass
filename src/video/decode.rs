@@ -120,13 +120,9 @@ fn run_pipeline(
                     return Err(());
                 }
                 let pts = frame.pts().unwrap_or(0) as f64 * video_tb;
-                // Drop frames before the seek target; they exist only for
-                // the reference chain.
-                if pts < base {
+                let Some(relative) = rebase_pts(pts, base, &mut origin) else {
                     continue;
-                }
-                // Rebase the first kept frame to zero so it shows at once.
-                let relative = pts - *origin.get_or_insert(pts);
+                };
                 // Hardware frames live in GPU memory: copy them down to
                 // system memory (NV12) before the planes can be read. A
                 // failed copy drops just that frame.
@@ -172,6 +168,7 @@ fn run_pipeline(
                 ffmpeg::codec::context::Context::from_parameters(stream.parameters())?
                     .decoder()
                     .audio()?;
+            let audio_tb = f64::from(stream.time_base());
             let (pkt_tx, pkt_rx) =
                 mpsc::sync_channel::<ffmpeg::codec::packet::Packet>(PACKET_QUEUE);
             let audio_stop = stop.clone();
@@ -188,6 +185,10 @@ fn run_pipeline(
                     while audio_decoder.receive_frame(&mut frame).is_ok() {
                         if audio_stop.load(Ordering::Relaxed) {
                             return;
+                        }
+                        let pts = frame.pts().unwrap_or(0) as f64 * audio_tb;
+                        if !audio_reached_target(pts, base) {
+                            continue;
                         }
                         if send_audio_frame(&mut resampler, &audio_decoder, &frame, &pcm_tx)
                             .is_err()
@@ -334,4 +335,72 @@ fn send_video_frame(
         timestamp: Duration::from_secs_f64(relative_secs),
     })
     .map_err(|_| ())
+}
+
+/// Map a frame PTS onto the session timeline, or None to drop it. Frames
+/// before a seek target are dropped; the first kept one rebases to zero so
+/// it shows at once.
+fn rebase_pts(pts: f64, base: f64, origin: &mut Option<f64>) -> Option<f64> {
+    if pts < base {
+        return None;
+    }
+    Some(pts - *origin.get_or_insert(pts))
+}
+
+/// True once audio `pts` reaches the seek target `base`. Earlier audio is
+/// the keyframe-rewind tail and is dropped to stay in sync.
+fn audio_reached_target(pts: f64, base: f64) -> bool {
+    pts >= base
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drops_frames_before_the_seek_target() {
+        let mut origin = None;
+        assert_eq!(rebase_pts(1.0, 2.0, &mut origin), None);
+        // A dropped frame must not set the origin, or the first kept frame
+        // would not land at zero.
+        assert_eq!(origin, None);
+    }
+
+    #[test]
+    fn first_kept_frame_is_time_zero() {
+        let mut origin = None;
+        assert_eq!(rebase_pts(2.5, 2.0, &mut origin), Some(0.0));
+        assert_eq!(origin, Some(2.5));
+    }
+
+    #[test]
+    fn later_frames_are_relative_to_the_first() {
+        let mut origin = None;
+        rebase_pts(2.5, 2.0, &mut origin);
+        assert_eq!(rebase_pts(3.0, 2.0, &mut origin), Some(0.5));
+        assert_eq!(rebase_pts(4.0, 2.0, &mut origin), Some(1.5));
+    }
+
+    #[test]
+    fn without_a_seek_playback_starts_at_zero() {
+        let mut origin = None;
+        assert_eq!(rebase_pts(0.0, 0.0, &mut origin), Some(0.0));
+        assert_eq!(rebase_pts(0.5, 0.0, &mut origin), Some(0.5));
+    }
+
+    #[test]
+    fn audio_before_the_seek_target_is_dropped() {
+        assert!(!audio_reached_target(1.0, 2.0));
+    }
+
+    #[test]
+    fn audio_at_or_after_the_target_plays() {
+        assert!(audio_reached_target(2.0, 2.0));
+        assert!(audio_reached_target(2.5, 2.0));
+    }
+
+    #[test]
+    fn without_a_seek_all_audio_plays() {
+        assert!(audio_reached_target(0.0, 0.0));
+    }
 }
