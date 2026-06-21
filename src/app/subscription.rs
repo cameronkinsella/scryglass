@@ -143,3 +143,93 @@ fn handle_event(event: Event, _status: event::Status, _id: window::Id) -> Option
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id() -> window::Id {
+        window::Id::unique()
+    }
+
+    fn handle(event: Event) -> Option<Message> {
+        handle_event(event, event::Status::Ignored, id())
+    }
+
+    #[test]
+    fn forward_keys_are_arrow_right_and_d() {
+        assert!(is_forward_key(&Key::Named(Named::ArrowRight)));
+        assert!(is_forward_key(&Key::Character("d".into())));
+        assert!(!is_forward_key(&Key::Named(Named::ArrowLeft)));
+        assert!(!is_forward_key(&Key::Character("x".into())));
+    }
+
+    #[test]
+    fn backward_keys_are_arrow_left_and_a() {
+        assert!(is_backward_key(&Key::Named(Named::ArrowLeft)));
+        assert!(is_backward_key(&Key::Character("a".into())));
+        assert!(!is_backward_key(&Key::Named(Named::ArrowRight)));
+    }
+
+    #[test]
+    fn mouse_forward_and_back_buttons_navigate() {
+        let fwd = handle(Event::Mouse(mouse::Event::ButtonPressed(
+            mouse::Button::Forward,
+        )));
+        assert!(matches!(fwd, Some(Message::Viewer(ViewerMessage::Next))));
+        let back = handle(Event::Mouse(mouse::Event::ButtonPressed(
+            mouse::Button::Back,
+        )));
+        assert!(matches!(back, Some(Message::Viewer(ViewerMessage::Prev))));
+    }
+
+    #[test]
+    fn cursor_motion_drives_drag_panning() {
+        let moved = handle(Event::Mouse(mouse::Event::CursorMoved {
+            position: iced::Point::new(3.0, 4.0),
+        }));
+        assert!(matches!(
+            moved,
+            Some(Message::Viewer(ViewerMessage::DragMove(_)))
+        ));
+        let left = handle(Event::Mouse(mouse::Event::CursorLeft));
+        assert!(matches!(
+            left,
+            Some(Message::Viewer(ViewerMessage::CursorLeft))
+        ));
+        let up = handle(Event::Mouse(mouse::Event::ButtonReleased(
+            mouse::Button::Left,
+        )));
+        assert!(matches!(up, Some(Message::Viewer(ViewerMessage::DragEnd))));
+    }
+
+    #[test]
+    fn window_resize_maps_to_a_resize_message() {
+        let msg = handle(Event::Window(window::Event::Resized(iced::Size::new(
+            640.0, 480.0,
+        ))));
+        assert!(matches!(
+            msg,
+            Some(Message::Window(WindowMessage::Resized(_)))
+        ));
+    }
+
+    #[test]
+    fn file_drop_maps_to_an_open_message() {
+        let msg = handle(Event::Window(window::Event::FileDropped(
+            std::path::PathBuf::from("x.png"),
+        )));
+        assert!(matches!(
+            msg,
+            Some(Message::Open(OpenMessage::FileDropped(_)))
+        ));
+    }
+
+    #[test]
+    fn unhandled_events_produce_no_message() {
+        let msg = handle(Event::Mouse(mouse::Event::ButtonPressed(
+            mouse::Button::Middle,
+        )));
+        assert!(msg.is_none());
+    }
+}

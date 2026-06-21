@@ -231,4 +231,98 @@ mod tests {
         let _ = update(&mut app, Message::Submit);
         assert!(app.modal.is_none());
     }
+
+    #[test]
+    fn committing_the_same_name_closes_without_renaming() {
+        let mut app = viewing_app(&["photo.png", "b.png"], 0);
+        app.modal = Some(Modal::Rename {
+            input: "photo.png".into(),
+        });
+        let _ = update(&mut app, Message::CommitRename);
+        // The dialog closes, and an unchanged name is a no-op (no rename task).
+        assert!(app.modal.is_none());
+        assert_eq!(
+            app.viewer().unwrap().nav.current().to_string_lossy(),
+            "photo.png"
+        );
+    }
+
+    #[test]
+    fn committing_a_new_name_closes_the_dialog() {
+        let mut app = viewing_app(&["photo.png", "b.png"], 0);
+        app.modal = Some(Modal::Rename {
+            input: "renamed.png".into(),
+        });
+        let _ = update(&mut app, Message::CommitRename);
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn request_delete_without_confirmation_skips_the_modal() {
+        let mut app = viewing_app(&["a.png"], 0);
+        app.config.read_only = false;
+        app.config.confirm_delete = false;
+        let _ = update(&mut app, Message::RequestDelete);
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn submit_on_confirm_delete_clears_the_modal() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        app.modal = Some(Modal::ConfirmDelete("a.png".into()));
+        let _ = update(&mut app, Message::Submit);
+        assert!(app.modal.is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_finished_error_raises_a_toast() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        let before = app.toasts.len();
+        let _ = update(
+            &mut app,
+            Message::DeleteFinished("a.png".into(), Err("nope".into())),
+        );
+        assert!(app.toasts.len() > before);
+    }
+
+    #[tokio::test]
+    async fn delete_finished_advances_to_the_survivor() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        let _ = update(&mut app, Message::DeleteFinished("a.png".into(), Ok(())));
+        assert_eq!(
+            app.viewer().unwrap().nav.current().to_string_lossy(),
+            "b.png"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_the_last_file_empties_the_session() {
+        let mut app = viewing_app(&["only.png"], 0);
+        let _ = update(&mut app, Message::DeleteFinished("only.png".into(), Ok(())));
+        assert!(matches!(app.session, Session::Empty));
+    }
+
+    #[test]
+    fn rename_finished_updates_the_navigation_entry() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        let _ = update(
+            &mut app,
+            Message::RenameFinished("a.png".into(), "renamed.png".into(), Ok(())),
+        );
+        assert_eq!(
+            app.viewer().unwrap().nav.current().to_string_lossy(),
+            "renamed.png"
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_finished_error_raises_a_toast() {
+        let mut app = viewing_app(&["a.png"], 0);
+        let before = app.toasts.len();
+        let _ = update(
+            &mut app,
+            Message::RenameFinished("a.png".into(), "b.png".into(), Err("nope".into())),
+        );
+        assert!(app.toasts.len() > before);
+    }
 }
