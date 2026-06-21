@@ -202,14 +202,13 @@ impl VideoSession {
 
     /// Playback clock relative to the session start.
     fn clock(&self) -> Duration {
-        if self.has_audio.load(Ordering::Relaxed) {
-            Duration::from_micros(self.audio_clock_us.load(Ordering::Relaxed))
-        } else if !self.first_frame_shown {
-            // Decoder warmup: hold at the start instead of free-running.
-            Duration::ZERO
-        } else {
-            self.accumulated + self.started.map(|s| s.elapsed()).unwrap_or(Duration::ZERO)
-        }
+        compute_clock(
+            self.has_audio.load(Ordering::Relaxed),
+            self.first_frame_shown,
+            self.audio_clock_us.load(Ordering::Relaxed),
+            self.accumulated,
+            self.started.map(|s| s.elapsed()).unwrap_or(Duration::ZERO),
+        )
     }
 
     /// Absolute playback position in the file.
@@ -343,5 +342,65 @@ impl VideoSession {
 impl Drop for VideoSession {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The playback clock from its inputs: the audio sink position once audio
+/// is flowing, zero during decoder warmup before the first frame, otherwise
+/// the accumulated wall-clock time plus the current run.
+fn compute_clock(
+    has_audio: bool,
+    first_frame_shown: bool,
+    audio_us: u64,
+    accumulated: Duration,
+    playing_elapsed: Duration,
+) -> Duration {
+    if has_audio {
+        Duration::from_micros(audio_us)
+    } else if !first_frame_shown {
+        Duration::ZERO
+    } else {
+        accumulated + playing_elapsed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audio_position_is_the_clock_when_audio_flows() {
+        let clock = compute_clock(
+            true,
+            true,
+            1_500_000,
+            Duration::from_secs(99),
+            Duration::from_secs(99),
+        );
+        assert_eq!(clock, Duration::from_micros(1_500_000));
+    }
+
+    #[test]
+    fn clock_holds_at_zero_during_warmup() {
+        let clock = compute_clock(
+            false,
+            false,
+            0,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        );
+        assert_eq!(clock, Duration::ZERO);
+    }
+
+    #[test]
+    fn silent_files_run_off_the_wall_clock() {
+        let clock = compute_clock(
+            false,
+            true,
+            0,
+            Duration::from_secs(2),
+            Duration::from_millis(500),
+        );
+        assert_eq!(clock, Duration::from_millis(2500));
     }
 }
