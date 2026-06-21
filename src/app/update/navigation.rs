@@ -120,6 +120,7 @@ pub(crate) fn open_viewer(
             current,
             app.config.video_volume,
             app.config.video_muted,
+            app.config.hardware_decode,
         ));
     } else {
         tasks.push(fire_thumb(
@@ -326,6 +327,7 @@ pub(crate) fn complete_navigation(
     let show_filmstrip = app.config.show_filmstrip;
     let video_volume = app.config.video_volume;
     let video_muted = app.config.video_muted;
+    let hardware = app.config.hardware_decode;
     let pipeline = app.pipeline.clone();
     let Some(viewer) = app.viewer_mut() else {
         return Task::none();
@@ -374,6 +376,7 @@ pub(crate) fn complete_navigation(
             current.clone(),
             video_volume,
             video_muted,
+            hardware,
         ));
     } else if let Some(anim_task) = viewer.anim_player.try_start_from_cache(&current) {
         // Cached animation: blur stands in until frame 0 allocates.

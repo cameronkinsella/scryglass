@@ -95,6 +95,13 @@ pub fn settings<'a>(
         .align_y(iced::Alignment::Center),
     );
 
+    rows = rows.push(rule::horizontal(1));
+    rows = rows.push(switch(
+        "Hardware video decode",
+        config.hardware_decode,
+        |_| SettingsMessage::ToggleHardwareDecode,
+    ));
+
     // Windows "Open with" needs a one-time per-user registration.
     if cfg!(target_os = "windows") {
         let (caption, action) = if associations_registered {

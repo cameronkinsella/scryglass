@@ -1,12 +1,14 @@
 //! Video playback via FFmpeg's libraries (cargo feature `video`).
 //!
-//! One session thread demuxes the file in-process: video packets decode
-//! and rescale to RGBA (frames flow through a bounded channel for
-//! backpressure), audio packets decode and resample to f32 PCM consumed
-//! by a rodio sink on its own thread. The sink's position is the master
-//! clock. Files without audio fall back to a pause-aware wall clock.
-//! Seeking opens a fresh session at the target (`avformat` seek before
-//! decode begins). No external processes are involved anywhere.
+//! One session thread demuxes the file in-process. Video packets decode on
+//! the GPU's fixed-function block when the platform and codec allow,
+//! otherwise multithreaded software, into planar YUV that flows through a
+//! bounded channel for backpressure; the GPU converts it to RGB at display.
+//! Audio packets decode and resample to f32 PCM consumed by a rodio sink on
+//! its own thread. The sink's position is the master clock. Files without
+//! audio fall back to a pause-aware wall clock. Seeking opens a fresh
+//! session at the target (`avformat` seek before decode begins). No
+//! external processes are involved anywhere.
 
 use std::num::{NonZeroU16, NonZeroU32};
 use std::path::{Path, PathBuf};
@@ -302,6 +304,8 @@ pub struct VideoSession {
     pub looping: bool,
     pub volume: f32,
     pub muted: bool,
+    /// Whether hardware decode was requested when this session opened.
+    hardware: bool,
     pub path: PathBuf,
     /// Keeps an extracted archive entry's temp file alive across
     /// seek/loop respawns, deleted when the last holder drops.
@@ -310,7 +314,14 @@ pub struct VideoSession {
 
 impl VideoSession {
     /// Start playback of `path` at `start`, spawning the decode threads.
-    pub fn open(path: PathBuf, start: Duration, volume: f32, muted: bool, looping: bool) -> Self {
+    pub fn open(
+        path: PathBuf,
+        start: Duration,
+        volume: f32,
+        muted: bool,
+        looping: bool,
+        hardware: bool,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let duration_us = Arc::new(AtomicU64::new(0));
         let video_done = Arc::new(AtomicBool::new(false));
@@ -332,6 +343,7 @@ impl VideoSession {
             duration_us.clone(),
             video_done.clone(),
             pcm_tx,
+            hardware,
         );
         let audio = spawn_audio_output(
             pcm_rx,
@@ -363,6 +375,7 @@ impl VideoSession {
             looping,
             volume,
             muted,
+            hardware,
             path,
             temp: None,
         }
@@ -379,6 +392,7 @@ impl VideoSession {
             self.volume,
             self.muted,
             self.looping,
+            self.hardware,
         );
         session
             .duration_us
@@ -535,13 +549,25 @@ fn spawn_decode_thread(
     duration_us: Arc<AtomicU64>,
     video_done: Arc<AtomicBool>,
     pcm_tx: mpsc::SyncSender<f32>,
+    hardware: bool,
 ) -> mpsc::Receiver<VideoFrame> {
     let (tx, rx) = mpsc::sync_channel::<VideoFrame>(4);
 
     std::thread::spawn(move || {
         // The video decode thread marks `video_done` after its flush. A
         // setup error here must mark it too or the UI waits forever.
-        if run_pipeline(&path, start, &stop, &duration_us, &video_done, tx, pcm_tx).is_err() {
+        if run_pipeline(
+            &path,
+            start,
+            &stop,
+            &duration_us,
+            &video_done,
+            tx,
+            pcm_tx,
+            hardware,
+        )
+        .is_err()
+        {
             video_done.store(true, Ordering::Relaxed);
         }
     });
@@ -553,6 +579,91 @@ fn spawn_decode_thread(
 /// ahead across normal A/V interleaving without coupling the streams.
 const PACKET_QUEUE: usize = 512;
 
+// --- Hardware decode ---
+//
+// When the platform and codec support it, decoding runs on the GPU's
+// fixed-function block and frames download to system memory for the shared
+// YUV upload. Any failure (no device, unsupported codec) falls back to
+// software transparently: `get_hw_format` returns a software format and
+// frames never need downloading.
+
+#[cfg(target_os = "windows")]
+const HW_DEVICE: ffmpeg::ffi::AVHWDeviceType =
+    ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA;
+#[cfg(target_os = "windows")]
+const HW_PIXEL: ffmpeg::ffi::AVPixelFormat = ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11;
+
+#[cfg(target_os = "macos")]
+const HW_DEVICE: ffmpeg::ffi::AVHWDeviceType =
+    ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
+#[cfg(target_os = "macos")]
+const HW_PIXEL: ffmpeg::ffi::AVPixelFormat = ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VIDEOTOOLBOX;
+
+#[cfg(target_os = "linux")]
+const HW_DEVICE: ffmpeg::ffi::AVHWDeviceType = ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI;
+#[cfg(target_os = "linux")]
+const HW_PIXEL: ffmpeg::ffi::AVPixelFormat = ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VAAPI;
+
+/// Pick the hardware pixel format if the decoder offers it, otherwise let
+/// libavcodec choose a software format (the transparent fallback).
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+unsafe extern "C" fn get_hw_format(
+    ctx: *mut ffmpeg::ffi::AVCodecContext,
+    fmt: *const ffmpeg::ffi::AVPixelFormat,
+) -> ffmpeg::ffi::AVPixelFormat {
+    unsafe {
+        let mut p = fmt;
+        while *p != ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE {
+            if *p == HW_PIXEL {
+                return HW_PIXEL;
+            }
+            p = p.add(1);
+        }
+        ffmpeg::ffi::avcodec_default_get_format(ctx, fmt)
+    }
+}
+
+/// Attach a hardware device to the decoder context. Returns whether it
+/// took; a false return leaves the context ready for software decode.
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+fn try_init_hw(context: &mut ffmpeg::codec::context::Context) -> bool {
+    unsafe {
+        let mut device: *mut ffmpeg::ffi::AVBufferRef = std::ptr::null_mut();
+        let ret = ffmpeg::ffi::av_hwdevice_ctx_create(
+            &mut device,
+            HW_DEVICE,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            0,
+        );
+        if ret < 0 || device.is_null() {
+            return false;
+        }
+        let raw = context.as_mut_ptr();
+        (*raw).hw_device_ctx = ffmpeg::ffi::av_buffer_ref(device);
+        (*raw).get_format = Some(get_hw_format);
+        // The context holds its own reference now, so drop ours.
+        ffmpeg::ffi::av_buffer_unref(&mut device);
+        true
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn try_init_hw(_context: &mut ffmpeg::codec::context::Context) -> bool {
+    false
+}
+
+/// Whether a decoded frame lives in GPU memory and must be downloaded.
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+fn is_hw_frame(frame: &ffmpeg::frame::Video) -> bool {
+    frame.format() == ffmpeg::format::Pixel::from(HW_PIXEL)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn is_hw_frame(_frame: &ffmpeg::frame::Video) -> bool {
+    false
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_pipeline(
     path: &Path,
@@ -562,6 +673,7 @@ fn run_pipeline(
     video_done: &Arc<AtomicBool>,
     tx: mpsc::SyncSender<VideoFrame>,
     pcm_tx: mpsc::SyncSender<f32>,
+    hardware: bool,
 ) -> Result<(), ffmpeg::Error> {
     init_ffmpeg()?;
     let mut input = ffmpeg::format::input(path)?;
@@ -585,12 +697,16 @@ fn run_pipeline(
     let video_tb = f64::from(video_stream.time_base());
     let mut video_context =
         ffmpeg::codec::context::Context::from_parameters(video_stream.parameters())?;
-    // Frame threading spreads decode across cores. A single thread can't
-    // keep up at 4K, so let libavcodec run one thread per logical CPU
-    // (count 0 means autodetect).
-    video_context.set_threading(ffmpeg::codec::threading::Config::kind(
-        ffmpeg::codec::threading::Type::Frame,
-    ));
+    // Decode on the GPU when possible; the decoder falls back to software
+    // inside `get_hw_format` for unsupported codecs. Frame threading only
+    // helps the software path, so set it when hardware isn't attached. A
+    // single thread can't keep up at 4K (count 0 means one per logical CPU).
+    let hw_active = hardware && try_init_hw(&mut video_context);
+    if !hw_active {
+        video_context.set_threading(ffmpeg::codec::threading::Config::kind(
+            ffmpeg::codec::threading::Type::Frame,
+        ));
+    }
     let mut video_decoder = video_context.decoder().video()?;
 
     let (video_pkt_tx, video_pkt_rx) =
@@ -600,6 +716,7 @@ fn run_pipeline(
     std::thread::spawn(move || {
         let mut scaler: Option<ffmpeg::software::scaling::Context> = None;
         let mut frame = ffmpeg::frame::Video::empty();
+        let mut sw_frame = ffmpeg::frame::Video::empty();
         let mut drain = |decoder: &mut ffmpeg::decoder::Video,
                          scaler: &mut Option<ffmpeg::software::scaling::Context>|
          -> Result<(), ()> {
@@ -609,7 +726,31 @@ fn run_pipeline(
                 }
                 let pts = frame.pts().unwrap_or(0) as f64 * video_tb;
                 let relative = (pts - base).max(0.0);
-                send_video_frame(scaler, &frame, relative, &tx)?;
+                // Hardware frames live in GPU memory: copy them down to
+                // system memory (as NV12) before the planes can be read.
+                // A failed copy drops just that frame.
+                let source = if is_hw_frame(&frame) {
+                    sw_frame = ffmpeg::frame::Video::empty();
+                    let downloaded = unsafe {
+                        ffmpeg::ffi::av_hwframe_transfer_data(
+                            sw_frame.as_mut_ptr(),
+                            frame.as_ptr(),
+                            0,
+                        )
+                    };
+                    if downloaded < 0 {
+                        continue;
+                    }
+                    // Carry color space/range (and other props) over from
+                    // the GPU frame so the converter picks the right matrix.
+                    unsafe {
+                        ffmpeg::ffi::av_frame_copy_props(sw_frame.as_mut_ptr(), frame.as_ptr());
+                    }
+                    &sw_frame
+                } else {
+                    &frame
+                };
+                send_video_frame(scaler, source, relative, &tx)?;
             }
             Ok(())
         };

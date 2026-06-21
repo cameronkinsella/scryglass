@@ -9,6 +9,7 @@ pub enum Message {
     ToggleReadOnly,
     ToggleConfirmDelete,
     ToggleDiskThumbs,
+    ToggleHardwareDecode,
     ToggleFileAssociations,
 }
 use iced::{Element, Task};
@@ -120,6 +121,12 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                 ));
             app.disk_cache_size = None;
             Task::batch([save_config(app), probe_disk_cache_size(&app.pipeline)])
+        }
+
+        // Applies to the next video opened.
+        Message::ToggleHardwareDecode => {
+            app.config.hardware_decode = !app.config.hardware_decode;
+            save_config(app)
         }
     }
 }

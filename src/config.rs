@@ -133,6 +133,9 @@ pub struct AppConfig {
     /// Video playback volume (0-1) and mute, persisted across sessions.
     pub video_volume: f32,
     pub video_muted: bool,
+    /// Decode video on the GPU when the platform and codec support it,
+    /// falling back to software automatically. Disable to force software.
+    pub hardware_decode: bool,
     /// Whether the toolbar is visible.
     pub show_toolbar: bool,
     /// Whether the filmstrip is visible.
@@ -164,6 +167,7 @@ impl Default for AppConfig {
             window_height: 768.0,
             video_volume: 1.0,
             video_muted: false,
+            hardware_decode: true,
             show_toolbar: true,
             show_filmstrip: true,
             show_slider: true,
@@ -259,6 +263,7 @@ mod tests {
             window_height: 480.0,
             video_volume: 0.5,
             video_muted: true,
+            hardware_decode: false,
             show_toolbar: false,
             show_filmstrip: true,
             show_slider: false,

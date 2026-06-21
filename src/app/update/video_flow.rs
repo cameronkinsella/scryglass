@@ -24,6 +24,7 @@ pub(crate) fn start_video(
     current: PathBuf,
     volume: f32,
     muted: bool,
+    hardware: bool,
 ) -> Task<Message> {
     // Show the controls briefly on open, like most players.
     viewer.video_controls_until = Some(Instant::now() + VIDEO_CONTROLS_TIMEOUT);
@@ -35,6 +36,7 @@ pub(crate) fn start_video(
                 volume,
                 muted,
                 false,
+                hardware,
             ));
             Task::none()
         }
@@ -122,6 +124,7 @@ pub(crate) fn extracted(
 ) -> Task<Message> {
     let video_volume = app.config.video_volume;
     let video_muted = app.config.video_muted;
+    let hardware = app.config.hardware_decode;
     let Some(viewer) = app.viewer_mut() else {
         return Task::none();
     };
@@ -147,6 +150,7 @@ pub(crate) fn extracted(
                 video_volume,
                 video_muted,
                 false,
+                hardware,
             );
             session.temp = Some(crate::video::TempFileGuard::new(temp));
             viewer.video = Some(session);

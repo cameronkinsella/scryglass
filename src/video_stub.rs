@@ -75,7 +75,14 @@ pub struct VideoSession {
 }
 
 impl VideoSession {
-    pub fn open(path: PathBuf, _start: Duration, volume: f32, muted: bool, looping: bool) -> Self {
+    pub fn open(
+        path: PathBuf,
+        _start: Duration,
+        volume: f32,
+        muted: bool,
+        looping: bool,
+        _hardware: bool,
+    ) -> Self {
         Self {
             playing: false,
             looping,
