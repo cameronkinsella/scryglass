@@ -20,6 +20,8 @@ mod message;
 mod shortcuts;
 pub mod state;
 mod subscription;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub(crate) mod update;
 mod view;
 pub(crate) mod viewer_math;
@@ -219,4 +221,75 @@ pub(crate) fn recalc_viewport(app: &mut App) {
         (app.window_size.width - chrome_width).max(1.0),
         (app.window_size.height - chrome_height).max(1.0),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::test_support::{empty_app, viewing_app};
+
+    #[test]
+    fn viewer_accessors_track_the_session() {
+        assert!(empty_app().viewer().is_none());
+        let mut viewing = viewing_app(&["a.png"], 0);
+        assert!(viewing.viewer().is_some());
+        assert!(viewing.viewer_mut().is_some());
+    }
+
+    #[test]
+    fn fullscreen_viewport_fills_the_window() {
+        let mut app = empty_app();
+        app.window_size = Size::new(1280.0, 720.0);
+        app.fullscreen = true;
+        recalc_viewport(&mut app);
+        assert_eq!(app.viewport_size, app.window_size);
+    }
+
+    #[test]
+    fn viewport_equals_window_when_all_chrome_is_hidden() {
+        let mut app = empty_app();
+        app.window_size = Size::new(1280.0, 720.0);
+        app.config.show_toolbar = false;
+        app.config.show_info = false;
+        app.config.show_filmstrip = false;
+        app.config.show_slider = false;
+        app.config.show_footer = false;
+        recalc_viewport(&mut app);
+        assert_eq!(app.viewport_size, Size::new(1280.0, 720.0));
+    }
+
+    #[test]
+    fn toolbar_takes_its_height_from_the_viewport() {
+        let mut app = empty_app();
+        app.window_size = Size::new(1280.0, 720.0);
+        app.config.show_toolbar = true;
+        app.config.show_info = false;
+        app.config.show_filmstrip = false;
+        app.config.show_slider = false;
+        app.config.show_footer = false;
+        recalc_viewport(&mut app);
+        assert_eq!(app.viewport_size.width, 1280.0);
+        assert_eq!(app.viewport_size.height, 720.0 - TOOLBAR_HEIGHT);
+    }
+
+    #[test]
+    fn title_is_the_filename_when_the_footer_is_shown() {
+        let mut app = viewing_app(&["photo.png", "b.png"], 0);
+        app.config.show_footer = true;
+        assert_eq!(title(&app), "photo.png");
+    }
+
+    #[test]
+    fn title_without_footer_shows_placeholders_for_unknown_dimensions() {
+        let mut app = viewing_app(&["photo.png"], 0);
+        app.config.show_footer = false;
+        let title = title(&app);
+        assert!(title.contains("photo.png"));
+        assert!(title.contains('…'));
+    }
+
+    #[test]
+    fn title_is_empty_without_a_viewer() {
+        assert_eq!(title(&empty_app()), "");
+    }
 }

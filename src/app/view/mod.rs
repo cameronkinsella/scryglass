@@ -48,3 +48,21 @@ fn help(app: &App) -> Element<'_, Message> {
         empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use iced_test::simulator;
+
+    use super::*;
+    use crate::app::test_support::empty_app;
+
+    #[test]
+    fn empty_app_renders_the_drop_prompt() {
+        let app = empty_app();
+        let mut ui = simulator(view(&app));
+        assert!(
+            ui.find("Drop an image here to begin").is_ok(),
+            "the empty viewer should show the drop prompt"
+        );
+    }
+}

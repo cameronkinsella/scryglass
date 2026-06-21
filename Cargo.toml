@@ -85,6 +85,7 @@ natord = "1.0.9"
 winresource = "0.1"
 
 [dev-dependencies]
+iced_test = "0.14"
 tempfile = "3"
 zune-core = "0.5.1"
 zune-jpegxl = "0.5.2"

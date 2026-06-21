@@ -131,3 +131,55 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
     }
 }
 mod widget;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::test_support::empty_app;
+
+    #[test]
+    fn toggle_read_only_flips_the_flag() {
+        let mut app = empty_app();
+        let before = app.config.read_only;
+        let _ = update(&mut app, Message::ToggleReadOnly);
+        assert_eq!(app.config.read_only, !before);
+    }
+
+    #[test]
+    fn toggle_confirm_delete_flips_the_flag() {
+        let mut app = empty_app();
+        let before = app.config.confirm_delete;
+        let _ = update(&mut app, Message::ToggleConfirmDelete);
+        assert_eq!(app.config.confirm_delete, !before);
+    }
+
+    #[test]
+    fn toggle_hardware_decode_flips_the_flag() {
+        let mut app = empty_app();
+        let before = app.config.hardware_decode;
+        let _ = update(&mut app, Message::ToggleHardwareDecode);
+        assert_eq!(app.config.hardware_decode, !before);
+    }
+
+    #[test]
+    fn prefetch_depth_clamps_to_one_through_ten() {
+        let mut app = empty_app();
+        let _ = update(&mut app, Message::SetPrefetchDepth(0));
+        assert_eq!(app.config.prefetch_depth, 1);
+        let _ = update(&mut app, Message::SetPrefetchDepth(99));
+        assert_eq!(app.config.prefetch_depth, 10);
+        let _ = update(&mut app, Message::SetPrefetchDepth(4));
+        assert_eq!(app.config.prefetch_depth, 4);
+    }
+
+    #[test]
+    fn cache_budget_clamps_to_its_range() {
+        let mut app = empty_app();
+        let _ = update(&mut app, Message::SetCacheBudget(1));
+        assert_eq!(app.config.cache_budget_mb, 128);
+        let _ = update(&mut app, Message::SetCacheBudget(99_999));
+        assert_eq!(app.config.cache_budget_mb, 4096);
+        let _ = update(&mut app, Message::SetCacheBudget(512));
+        assert_eq!(app.config.cache_budget_mb, 512);
+    }
+}

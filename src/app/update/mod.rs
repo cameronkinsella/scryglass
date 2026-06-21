@@ -85,3 +85,42 @@ pub(crate) fn push_toast(app: &mut App, kind: ToastKind, text: String) -> Task<M
         move |_| Message::Toast(ToastMessage::Dismiss(id)),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::test_support::{empty_app, viewing_app};
+    use crate::app::{Modal, ViewerMessage};
+    use crate::components::toasts::ToastKind;
+
+    // push_toast schedules its auto-dismiss with a tokio timer, which needs
+    // a runtime in scope even though the returned Task is dropped here.
+    #[tokio::test]
+    async fn push_toast_appends_and_increments_the_id() {
+        let mut app = empty_app();
+        let _ = push_toast(&mut app, ToastKind::Info, "hello".into());
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(app.toasts[0].text, "hello");
+        assert_eq!(app.next_toast_id, 1);
+        let _ = push_toast(&mut app, ToastKind::Error, "oops".into());
+        assert_eq!(app.next_toast_id, 2);
+        assert_ne!(app.toasts[0].id, app.toasts[1].id);
+    }
+
+    #[test]
+    fn a_cache_miss_defers_navigation_instead_of_dropping_it() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        let _ = update(&mut app, Message::Viewer(ViewerMessage::Next));
+        // b.png is not cached, so the move is held, not lost: the screen
+        // must never go empty during navigation.
+        assert!(app.viewer().unwrap().pending_nav.is_some());
+    }
+
+    #[test]
+    fn a_modal_makes_viewer_navigation_inert() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        app.modal = Some(Modal::Settings);
+        let _ = update(&mut app, Message::Viewer(ViewerMessage::Next));
+        assert!(app.viewer().unwrap().pending_nav.is_none());
+    }
+}
