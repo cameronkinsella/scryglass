@@ -416,3 +416,57 @@ pub(crate) fn complete_navigation(
 
     Task::batch(tasks)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::test_support::viewing_app;
+
+    #[test]
+    fn a_step_is_dropped_while_a_move_is_pending() {
+        let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
+        app.viewer_mut().unwrap().pending_nav = Some(1);
+        let _ = navigate(&mut app, NavTarget::Delta(Direction::Forward));
+        let v = app.viewer().unwrap();
+        assert_eq!(v.nav.cursor(), 0); // never moved
+        assert_eq!(v.pending_nav, Some(1)); // pending target untouched
+    }
+
+    #[test]
+    fn an_absolute_jump_replaces_a_pending_target() {
+        let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
+        app.viewer_mut().unwrap().pending_nav = Some(1);
+        let _ = navigate(&mut app, NavTarget::Index(2));
+        // c.png isn't cached, so the pending target moves to it (latest wins).
+        assert_eq!(app.viewer().unwrap().pending_nav, Some(2));
+    }
+
+    #[test]
+    fn jumping_to_the_current_index_clears_the_pending_move() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        app.viewer_mut().unwrap().pending_nav = Some(1);
+        let _ = navigate(&mut app, NavTarget::Index(0));
+        let v = app.viewer().unwrap();
+        assert_eq!(v.nav.cursor(), 0);
+        assert!(v.pending_nav.is_none());
+    }
+
+    #[test]
+    fn a_cache_miss_holds_position_and_defers_the_move() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        let _ = navigate(&mut app, NavTarget::Delta(Direction::Forward));
+        let v = app.viewer().unwrap();
+        assert_eq!(v.nav.cursor(), 0); // stays put, screen never goes empty
+        assert_eq!(v.pending_nav, Some(1));
+    }
+
+    #[test]
+    fn resolve_pending_waits_until_the_target_is_displayable() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        app.viewer_mut().unwrap().pending_nav = Some(1);
+        let _ = resolve_pending_nav(&mut app);
+        let v = app.viewer().unwrap();
+        assert_eq!(v.nav.cursor(), 0);
+        assert_eq!(v.pending_nav, Some(1)); // still nothing to show
+    }
+}
