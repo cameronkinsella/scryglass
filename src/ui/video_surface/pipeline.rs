@@ -1,183 +1,14 @@
-//! GPU video surface: uploads decoded YUV planes and converts them to RGB
-//! in a shader. Playback never pays for a CPU color conversion or a
-//! per-frame upload of full RGBA, and the planes are 1.5 bytes per pixel
-//! instead of 4. Zoom, pan, and fit reuse the still-image display math, so
-//! video and stills share one geometry and never diverge.
+//! Persistent GPU state for the video surface: the render pipeline, the
+//! plane textures (reused across frames, recreated only on a resize), the
+//! samplers, and the per-frame uniform buffer. The YUV-to-RGB conversion
+//! runs in the shader, so playback never pays for a CPU color conversion.
 
-use std::sync::Arc;
-
+use iced::wgpu;
 use iced::widget::shader;
-use iced::{Element, Length, Rectangle, mouse, wgpu};
 
-use crate::app::Message;
-use crate::ui::image_display::{DisplayMath, display_math};
 use crate::video::{VideoFrame, YuvFormat, YuvMatrix, YuvRange};
 
-/// Build the video surface element for the current frame at the given
-/// zoom/pan. Fills the image area like the still-image widget does.
-pub fn view(
-    frame: Arc<VideoFrame>,
-    zoom: f32,
-    pan: (f32, f32),
-    viewport: (f32, f32),
-    pixelated: bool,
-) -> Element<'static, Message> {
-    shader::Shader::new(VideoSurface::new(frame, zoom, pan, viewport, pixelated))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
-}
-
-/// The shader program: holds the frame to show and where to put it.
-struct VideoSurface {
-    frame: Arc<VideoFrame>,
-    valid: bool,
-    /// Destination rect in normalized widget space: x0, y0, x1, y1.
-    dst: [f32; 4],
-    /// Source rect in texture UV space: u0, v0, u1, v1.
-    src: [f32; 4],
-    /// Nearest sampling when zoomed past 100% with crisp pixels on.
-    nearest: bool,
-}
-
-impl VideoSurface {
-    fn new(
-        frame: Arc<VideoFrame>,
-        zoom: f32,
-        pan: (f32, f32),
-        viewport: (f32, f32),
-        pixelated: bool,
-    ) -> Self {
-        let original = (frame.width, frame.height);
-        let nearest = pixelated && zoom > 1.0;
-        match geometry(zoom, pan, viewport, original) {
-            Some((dst, src)) => Self {
-                frame,
-                valid: true,
-                dst,
-                src,
-                nearest,
-            },
-            None => Self {
-                frame,
-                valid: false,
-                dst: [0.0; 4],
-                src: [0.0; 4],
-                nearest,
-            },
-        }
-    }
-}
-
-impl<T> shader::Program<T> for VideoSurface {
-    type State = ();
-    type Primitive = VideoPrimitive;
-
-    fn draw(
-        &self,
-        _state: &Self::State,
-        _cursor: mouse::Cursor,
-        _bounds: Rectangle,
-    ) -> VideoPrimitive {
-        VideoPrimitive {
-            frame: self.frame.clone(),
-            valid: self.valid,
-            dst: self.dst,
-            src: self.src,
-            nearest: self.nearest,
-        }
-    }
-}
-
-/// Convert the still-image display math into a destination rect (normalized
-/// widget space) and a source rect (texture UV). Video textures are native
-/// resolution, so texture space equals original space.
-fn geometry(
-    zoom: f32,
-    pan: (f32, f32),
-    viewport: (f32, f32),
-    original: (u32, u32),
-) -> Option<([f32; 4], [f32; 4])> {
-    let (vw, vh) = viewport;
-    let (tw, th) = (original.0 as f32, original.1 as f32);
-    if vw <= 0.0 || vh <= 0.0 {
-        return None;
-    }
-
-    // Centered destination rect for a shown size in logical pixels.
-    let centered = |shown_w: f32, shown_h: f32| {
-        let x0 = (vw - shown_w) / 2.0 / vw;
-        let y0 = (vh - shown_h) / 2.0 / vh;
-        [x0, y0, x0 + shown_w / vw, y0 + shown_h / vh]
-    };
-
-    match display_math(zoom, pan, viewport, original, original) {
-        DisplayMath::Empty => None,
-        DisplayMath::Fit { scale_factor } => {
-            let contain = (vw / tw).min(vh / th);
-            let dst = centered(tw * contain * scale_factor, th * contain * scale_factor);
-            Some((dst, [0.0, 0.0, 1.0, 1.0]))
-        }
-        DisplayMath::Crop { rect } => {
-            let (rw, rh) = (rect.width as f32, rect.height as f32);
-            let contain = (vw / rw).min(vh / rh);
-            let dst = centered(rw * contain, rh * contain);
-            let src = [
-                rect.x as f32 / tw,
-                rect.y as f32 / th,
-                (rect.x as f32 + rw) / tw,
-                (rect.y as f32 + rh) / th,
-            ];
-            Some((dst, src))
-        }
-    }
-}
-
-/// A single frame's worth of work handed to the renderer.
-pub struct VideoPrimitive {
-    frame: Arc<VideoFrame>,
-    valid: bool,
-    dst: [f32; 4],
-    src: [f32; 4],
-    nearest: bool,
-}
-
-impl std::fmt::Debug for VideoPrimitive {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VideoPrimitive")
-            .field("frame_id", &self.frame.id)
-            .field("valid", &self.valid)
-            .finish()
-    }
-}
-
-impl shader::Primitive for VideoPrimitive {
-    type Pipeline = VideoPipeline;
-
-    fn prepare(
-        &self,
-        pipeline: &mut VideoPipeline,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        _bounds: &Rectangle,
-        _viewport: &shader::Viewport,
-    ) {
-        if self.valid {
-            pipeline.prepare(device, queue, &self.frame, self.dst, self.src);
-        }
-    }
-
-    fn draw(&self, pipeline: &VideoPipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
-        if self.valid {
-            pipeline.draw(render_pass, self.nearest);
-        }
-        true
-    }
-}
-
-/// Persistent GPU state shared by every video frame: the pipeline, the
-/// plane textures (reused across frames, recreated only on a resize), and
-/// the uniform buffer.
+/// Persistent GPU state shared by every video frame.
 pub struct VideoPipeline {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
@@ -306,7 +137,7 @@ impl shader::Pipeline for VideoPipeline {
 }
 
 impl VideoPipeline {
-    fn prepare(
+    pub(super) fn prepare(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -460,7 +291,7 @@ impl VideoPipeline {
         }
     }
 
-    fn draw(&self, render_pass: &mut wgpu::RenderPass<'_>, nearest: bool) {
+    pub(super) fn draw(&self, render_pass: &mut wgpu::RenderPass<'_>, nearest: bool) {
         let Some(textures) = &self.textures else {
             return;
         };
@@ -583,4 +414,69 @@ fn build_uniforms(dst: [f32; 4], src: [f32; 4], frame: &VideoFrame, is_srgb: boo
     buf
 }
 
-const YUV_SPV: &[u8] = include_bytes!("video_surface/yuv.spv");
+const YUV_SPV: &[u8] = include_bytes!("yuv.spv");
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    fn frame(matrix: YuvMatrix, range: YuvRange, format: YuvFormat) -> VideoFrame {
+        VideoFrame {
+            id: 0,
+            width: 2,
+            height: 2,
+            chroma_width: 1,
+            chroma_height: 1,
+            format,
+            y: vec![],
+            u: vec![],
+            v: vec![],
+            matrix,
+            range,
+            timestamp: Duration::ZERO,
+        }
+    }
+
+    fn u32_at(buf: &[u8; 48], offset: usize) -> u32 {
+        u32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap())
+    }
+
+    fn f32_at(buf: &[u8; 48], offset: usize) -> f32 {
+        f32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap())
+    }
+
+    #[test]
+    fn packs_dst_then_src_floats_then_flags() {
+        let dst = [0.1, 0.2, 0.3, 0.4];
+        let src = [0.5, 0.6, 0.7, 0.8];
+        let buf = build_uniforms(
+            dst,
+            src,
+            &frame(YuvMatrix::Bt709, YuvRange::Full, YuvFormat::Nv12),
+            true,
+        );
+        for (i, v) in dst.iter().chain(src.iter()).enumerate() {
+            assert_eq!(f32_at(&buf, i * 4), *v);
+        }
+        assert_eq!(u32_at(&buf, 32), 1, "bt709");
+        assert_eq!(u32_at(&buf, 36), 1, "full range");
+        assert_eq!(u32_at(&buf, 40), 1, "srgb target");
+        assert_eq!(u32_at(&buf, 44), 1, "nv12");
+    }
+
+    #[test]
+    fn bt601_limited_i420_on_linear_target_are_all_zero_flags() {
+        let buf = build_uniforms(
+            [0.0; 4],
+            [0.0; 4],
+            &frame(YuvMatrix::Bt601, YuvRange::Limited, YuvFormat::I420),
+            false,
+        );
+        assert_eq!(u32_at(&buf, 32), 0);
+        assert_eq!(u32_at(&buf, 36), 0);
+        assert_eq!(u32_at(&buf, 40), 0);
+        assert_eq!(u32_at(&buf, 44), 0);
+    }
+}
