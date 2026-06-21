@@ -140,6 +140,16 @@ mod tests {
         #[cfg(feature = "video")]
         assert_eq!(find("mp4"), Some("scryglass.video"));
     }
+
+    #[test]
+    fn no_extension_is_claimed_by_two_groups() {
+        let mut seen = std::collections::HashSet::new();
+        for (_, _, exts) in association_groups() {
+            for ext in exts {
+                assert!(seen.insert(ext), "{ext} is claimed by more than one ProgID");
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -148,9 +158,13 @@ mod tests {
 
 #[cfg(target_os = "windows")]
 mod windows {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
 
     use anyhow::Context;
+    use windows_sys::Win32::System::Com;
+    use windows_sys::Win32::UI::Shell;
     use winreg::RegKey;
     use winreg::enums::HKEY_CURRENT_USER;
 
@@ -224,68 +238,101 @@ mod windows {
         Ok(())
     }
 
+    /// A null-terminated UTF-16 copy of `s`, as the wide-string Win32 APIs
+    /// expect.
+    fn to_wide(s: &OsStr) -> Vec<u16> {
+        s.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    /// Initializes COM for this thread and uninitializes it on drop, but only
+    /// when this guard was the one that initialized it.
+    struct ComGuard {
+        owns: bool,
+    }
+
+    impl ComGuard {
+        fn apartment_threaded() -> Self {
+            // SAFETY: CoInitializeEx is always safe to call with a null
+            // reserved pointer. A success code (>= 0) means our call took a
+            // reference that we must release on drop; S_FALSE (already
+            // initialized on this thread) still counts and is balanced too.
+            let hr = unsafe {
+                Com::CoInitializeEx(std::ptr::null(), Com::COINIT_APARTMENTTHREADED as u32)
+            };
+            Self { owns: hr >= 0 }
+        }
+    }
+
+    impl Drop for ComGuard {
+        fn drop(&mut self) {
+            if self.owns {
+                // SAFETY: balanced against our own successful CoInitializeEx
+                // on this same thread.
+                unsafe { Com::CoUninitialize() };
+            }
+        }
+    }
+
+    /// Owns a shell ITEMIDLIST and frees it with CoTaskMemFree on drop.
+    struct Pidl(*mut Shell::Common::ITEMIDLIST);
+
+    impl Drop for Pidl {
+        fn drop(&mut self) {
+            // SAFETY: the pointer came from SHParseDisplayName and is freed
+            // exactly once, here.
+            unsafe { Com::CoTaskMemFree(self.0 as *const _) };
+        }
+    }
+
     /// Tell Explorer the association set changed so menus refresh
     /// without a logoff.
     fn notify_shell() {
-        use windows_sys::Win32::UI::Shell;
         const SHCNE_ASSOCCHANGED: i32 = 0x0800_0000;
+        // SAFETY: SHChangeNotify takes scalars and null item pointers, so
+        // there is nothing to keep alive across the call.
         unsafe {
             Shell::SHChangeNotify(SHCNE_ASSOCCHANGED, 0, std::ptr::null(), std::ptr::null());
         }
     }
 
     /// Reveal a file in Explorer, reusing an existing window if possible.
-    /// Uses `SHOpenFolderAndSelectItems` which highlights the file.
+    /// Uses `SHOpenFolderAndSelectItems`, which highlights the file.
     pub fn reveal_in_file_manager(path: &Path) {
-        use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::System::Com;
-        use windows_sys::Win32::UI::Shell;
+        // The shell call needs COM up for its duration.
+        let _com = ComGuard::apartment_threaded();
 
-        unsafe {
-            // SHOpenFolderAndSelectItems requires COM to be initialized.
-            let _ = Com::CoInitializeEx(std::ptr::null(), Com::COINIT_APARTMENTTHREADED as u32);
-
-            // Parse the path into an ITEMIDLIST (PIDL).
-            let wide: Vec<u16> = path
-                .as_os_str()
-                .encode_wide()
-                .chain(std::iter::once(0))
-                .collect();
-
-            let mut pidl: *mut Shell::Common::ITEMIDLIST = std::ptr::null_mut();
-            let hr = Shell::SHParseDisplayName(
+        let wide = to_wide(path.as_os_str());
+        let mut pidl: *mut Shell::Common::ITEMIDLIST = std::ptr::null_mut();
+        // SAFETY: `wide` is a null-terminated UTF-16 string that lives past
+        // the call; on success (hr == 0) SHParseDisplayName writes an owned
+        // PIDL into `pidl`, which the Pidl guard then frees.
+        let hr = unsafe {
+            Shell::SHParseDisplayName(
                 wide.as_ptr(),
                 std::ptr::null_mut(),
                 &mut pidl,
                 0,
                 std::ptr::null_mut(),
-            );
-
-            if hr == 0 && !pidl.is_null() {
-                // Open (or reuse) the folder window and select the item.
-                Shell::SHOpenFolderAndSelectItems(pidl, 0, std::ptr::null(), 0);
-                Com::CoTaskMemFree(pidl as *const _);
-            }
+            )
+        };
+        if hr != 0 || pidl.is_null() {
+            return;
+        }
+        let pidl = Pidl(pidl);
+        // SAFETY: `pidl.0` is the valid PIDL just parsed; passing zero items
+        // opens or reuses the folder window and selects the parsed item.
+        unsafe {
+            Shell::SHOpenFolderAndSelectItems(pidl.0, 0, std::ptr::null(), 0);
         }
     }
 
-    /// Open the Windows Properties dialog for a file.
-    /// Uses `ShellExecuteExW` with the `"properties"` verb and
-    /// `SEE_MASK_INVOKEIDLIST` flag, which is required for shell verbs
-    /// like "properties" to work.
+    /// Open the Windows Properties dialog via `ShellExecuteExW` with the
+    /// `"properties"` verb and `SEE_MASK_INVOKEIDLIST`.
     pub fn show_properties(path: &Path) {
-        use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::UI::Shell;
+        const SEE_MASK_INVOKEIDLIST: u32 = 0x0000_000C;
 
         let verb: Vec<u16> = "properties\0".encode_utf16().collect();
-        let file: Vec<u16> = path
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-
-        // SEE_MASK_INVOKEIDLIST = 0x0000000C, required for verbs like "properties".
-        const SEE_MASK_INVOKEIDLIST: u32 = 0x0000_000C;
+        let file = to_wide(path.as_os_str());
 
         let mut info = Shell::SHELLEXECUTEINFOW {
             cbSize: std::mem::size_of::<Shell::SHELLEXECUTEINFOW>() as u32,
@@ -301,12 +348,31 @@ mod windows {
             lpClass: std::ptr::null(),
             hkeyClass: std::ptr::null_mut(),
             dwHotKey: 0,
+            // SAFETY: the anonymous union is a handle field unused by the
+            // "properties" verb; zeroed is the documented "none" value.
             Anonymous: unsafe { std::mem::zeroed() },
             hProcess: std::ptr::null_mut(),
         };
 
+        // SAFETY: `info` is fully initialized with cbSize set, and `verb` and
+        // `file` are null-terminated strings that outlive the call.
         unsafe {
             Shell::ShellExecuteExW(&mut info);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn to_wide_appends_a_null_terminator() {
+            assert_eq!(to_wide(OsStr::new("ab")), vec![0x61, 0x62, 0x00]);
+        }
+
+        #[test]
+        fn to_wide_of_empty_is_just_the_terminator() {
+            assert_eq!(to_wide(OsStr::new("")), vec![0x00]);
         }
     }
 }
