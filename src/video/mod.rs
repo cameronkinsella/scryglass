@@ -19,8 +19,10 @@ use std::time::{Duration, Instant};
 use ffmpeg_next as ffmpeg;
 
 mod frame;
+mod hw;
 use frame::copy_plane;
 pub use frame::{VideoFrame, YuvFormat, YuvMatrix, YuvRange};
+use hw::{download_frame, is_hw_frame, try_init_hw};
 
 /// Video container extensions offered in the file list.
 pub const EXTENSIONS: &[&str] = &["mp4", "mkv", "webm", "mov", "avi", "m4v"];
@@ -518,91 +520,6 @@ fn spawn_decode_thread(
 /// ahead across normal A/V interleaving without coupling the streams.
 const PACKET_QUEUE: usize = 512;
 
-// --- Hardware decode ---
-//
-// When the platform and codec support it, decoding runs on the GPU's
-// fixed-function block and frames download to system memory for the shared
-// YUV upload. Any failure (no device, unsupported codec) falls back to
-// software transparently: `get_hw_format` returns a software format and
-// frames never need downloading.
-
-#[cfg(target_os = "windows")]
-const HW_DEVICE: ffmpeg::ffi::AVHWDeviceType =
-    ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA;
-#[cfg(target_os = "windows")]
-const HW_PIXEL: ffmpeg::ffi::AVPixelFormat = ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11;
-
-#[cfg(target_os = "macos")]
-const HW_DEVICE: ffmpeg::ffi::AVHWDeviceType =
-    ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
-#[cfg(target_os = "macos")]
-const HW_PIXEL: ffmpeg::ffi::AVPixelFormat = ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VIDEOTOOLBOX;
-
-#[cfg(target_os = "linux")]
-const HW_DEVICE: ffmpeg::ffi::AVHWDeviceType = ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI;
-#[cfg(target_os = "linux")]
-const HW_PIXEL: ffmpeg::ffi::AVPixelFormat = ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VAAPI;
-
-/// Pick the hardware pixel format if the decoder offers it, otherwise let
-/// libavcodec choose a software format (the transparent fallback).
-#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-unsafe extern "C" fn get_hw_format(
-    ctx: *mut ffmpeg::ffi::AVCodecContext,
-    fmt: *const ffmpeg::ffi::AVPixelFormat,
-) -> ffmpeg::ffi::AVPixelFormat {
-    unsafe {
-        let mut p = fmt;
-        while *p != ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE {
-            if *p == HW_PIXEL {
-                return HW_PIXEL;
-            }
-            p = p.add(1);
-        }
-        ffmpeg::ffi::avcodec_default_get_format(ctx, fmt)
-    }
-}
-
-/// Attach a hardware device to the decoder context. Returns whether it
-/// took; a false return leaves the context ready for software decode.
-#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-fn try_init_hw(context: &mut ffmpeg::codec::context::Context) -> bool {
-    unsafe {
-        let mut device: *mut ffmpeg::ffi::AVBufferRef = std::ptr::null_mut();
-        let ret = ffmpeg::ffi::av_hwdevice_ctx_create(
-            &mut device,
-            HW_DEVICE,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            0,
-        );
-        if ret < 0 || device.is_null() {
-            return false;
-        }
-        let raw = context.as_mut_ptr();
-        (*raw).hw_device_ctx = ffmpeg::ffi::av_buffer_ref(device);
-        (*raw).get_format = Some(get_hw_format);
-        // The context holds its own reference now, so drop ours.
-        ffmpeg::ffi::av_buffer_unref(&mut device);
-        true
-    }
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-fn try_init_hw(_context: &mut ffmpeg::codec::context::Context) -> bool {
-    false
-}
-
-/// Whether a decoded frame lives in GPU memory and must be downloaded.
-#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-fn is_hw_frame(frame: &ffmpeg::frame::Video) -> bool {
-    frame.format() == ffmpeg::format::Pixel::from(HW_PIXEL)
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-fn is_hw_frame(_frame: &ffmpeg::frame::Video) -> bool {
-    false
-}
-
 #[allow(clippy::too_many_arguments)]
 fn run_pipeline(
     path: &Path,
@@ -675,26 +592,16 @@ fn run_pipeline(
                 // Rebase the first kept frame to zero so it shows at once.
                 let relative = pts - *origin.get_or_insert(pts);
                 // Hardware frames live in GPU memory: copy them down to
-                // system memory (as NV12) before the planes can be read.
-                // A failed copy drops just that frame.
+                // system memory (NV12) before the planes can be read. A
+                // failed copy drops just that frame.
                 let source = if is_hw_frame(&frame) {
-                    sw_frame = ffmpeg::frame::Video::empty();
-                    let downloaded = unsafe {
-                        ffmpeg::ffi::av_hwframe_transfer_data(
-                            sw_frame.as_mut_ptr(),
-                            frame.as_ptr(),
-                            0,
-                        )
-                    };
-                    if downloaded < 0 {
-                        continue;
+                    match download_frame(&frame) {
+                        Some(downloaded) => {
+                            sw_frame = downloaded;
+                            &sw_frame
+                        }
+                        None => continue,
                     }
-                    // Carry color space/range (and other props) over from
-                    // the GPU frame so the converter picks the right matrix.
-                    unsafe {
-                        ffmpeg::ffi::av_frame_copy_props(sw_frame.as_mut_ptr(), frame.as_ptr());
-                    }
-                    &sw_frame
                 } else {
                     &frame
                 };
