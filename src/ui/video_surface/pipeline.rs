@@ -20,7 +20,12 @@ pub struct VideoPipeline {
     is_srgb: bool,
     textures: Option<YuvTextures>,
     last_id: Option<u64>,
+    /// Scratch buffers for the keep-alive, allocated on first use.
+    keepalive: Option<(wgpu::Buffer, wgpu::Buffer)>,
 }
+
+/// Per-frame copy size, enough to hold the memory clock off its floor.
+const KEEP_ALIVE_BYTES: u64 = 16 * 1024 * 1024;
 
 struct YuvTextures {
     width: u32,
@@ -132,6 +137,7 @@ impl shader::Pipeline for VideoPipeline {
             is_srgb: format.is_srgb(),
             textures: None,
             last_id: None,
+            keepalive: None,
         }
     }
 }
@@ -145,6 +151,12 @@ impl VideoPipeline {
         dst: [f32; 4],
         src: [f32; 4],
     ) {
+        // Hold the memory clock up once decode has stuttered. See
+        // `gpu_keepalive`.
+        if crate::gpu_keepalive::needed() {
+            self.keep_gpu_awake(device, queue);
+        }
+
         let stale = match &self.textures {
             Some(t) => {
                 t.width != frame.width
@@ -210,6 +222,30 @@ impl VideoPipeline {
             0,
             &build_uniforms(dst, src, frame, self.is_srgb),
         );
+    }
+
+    /// A small memory copy per frame, enough traffic to keep the clock up.
+    /// See `gpu_keepalive`.
+    fn keep_gpu_awake(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let pair = self.keepalive.get_or_insert_with(|| {
+            let buffer = |label| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(label),
+                    size: KEEP_ALIVE_BYTES,
+                    usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            };
+            (
+                buffer("scryglass keepalive src"),
+                buffer("scryglass keepalive dst"),
+            )
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("scryglass keepalive"),
+        });
+        encoder.copy_buffer_to_buffer(&pair.0, 0, &pair.1, 0, KEEP_ALIVE_BYTES);
+        queue.submit(std::iter::once(encoder.finish()));
     }
 
     fn create_textures(&self, device: &wgpu::Device, frame: &VideoFrame) -> YuvTextures {

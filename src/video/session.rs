@@ -12,6 +12,9 @@ use super::audio::{AudioCmd, spawn_audio_output};
 use super::decode::spawn_decode_thread;
 use super::{AUDIO_RATE, STALL, VideoFrame};
 
+/// How long the decoder may run dry before the keep-alive engages.
+const DECODE_BEHIND_GAP: Duration = Duration::from_millis(200);
+
 /// Deletes an extracted temp file once the last session using it drops.
 /// Shared by `Arc` across seek/loop respawns of the same video.
 pub struct TempFileGuard {
@@ -92,6 +95,8 @@ pub struct VideoSession {
     first_frame_shown: bool,
     /// One decoded frame waiting for its presentation time.
     pending: Option<VideoFrame>,
+    /// When the decoder first ran dry, for keep-alive stutter detection.
+    starved_since: Option<Instant>,
     pub playing: bool,
     pub looping: bool,
     pub volume: f32,
@@ -166,6 +171,7 @@ impl VideoSession {
             last_poll: None,
             first_frame_shown: false,
             pending: None,
+            starved_since: None,
             playing: true,
             looping,
             volume,
@@ -269,6 +275,21 @@ impl VideoSession {
                     break;
                 }
                 Err(_) => break,
+            }
+        }
+        // Healthy playback keeps a frame queued ahead; a sustained empty
+        // queue under hardware decode is the idle-GPU stutter. See
+        // `gpu_keepalive`.
+        if self.pending.is_some() {
+            self.starved_since = None;
+        } else if self.playing
+            && self.first_frame_shown
+            && self.hardware
+            && !self.video_done.load(Ordering::Relaxed)
+        {
+            let since = *self.starved_since.get_or_insert(now);
+            if now.duration_since(since) > DECODE_BEHIND_GAP {
+                crate::gpu_keepalive::flag_decode_behind();
             }
         }
         // The wall-clock fallback starts with the first visible frame, but
