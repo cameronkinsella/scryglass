@@ -21,12 +21,40 @@ pub fn extraction_dir() -> PathBuf {
     std::env::temp_dir().join("scryglass-video")
 }
 
+#[allow(dead_code)] // mirrors the real module so shared code compiles
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum YuvMatrix {
+    Bt601,
+    Bt709,
+}
+
+#[allow(dead_code)] // mirrors the real module so shared code compiles
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum YuvRange {
+    Limited,
+    Full,
+}
+
+#[allow(dead_code)] // mirrors the real module so shared code compiles
 pub struct VideoFrame {
+    pub id: u64,
     pub width: u32,
     pub height: u32,
-    pub rgba: Vec<u8>,
-    #[allow(dead_code)] // mirrors the real module's field set
+    pub chroma_width: u32,
+    pub chroma_height: u32,
+    pub y: Vec<u8>,
+    pub u: Vec<u8>,
+    pub v: Vec<u8>,
+    pub matrix: YuvMatrix,
+    pub range: YuvRange,
     pub timestamp: Duration,
+}
+
+impl VideoFrame {
+    #[allow(dead_code)] // mirrors the real module so shared code compiles
+    pub fn to_rgba(&self) -> (u32, u32, Vec<u8>) {
+        (self.width, self.height, Vec::new())
+    }
 }
 
 pub struct TempFileGuard;

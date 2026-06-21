@@ -8,20 +8,28 @@ repository = "https://github.com/cameronkinsella/scryglass"
 readme = "README.md"
 keywords = ["image", "viewer", "photo", "gui", "iced"]
 categories = ["multimedia::images", "gui"]
-exclude = [".github"]
+exclude = ["/.github", "/shaders", "/xtask"]
 
 [package.metadata.binstall]
 # Let cargo-binstall grab release artifacts instead of building from source.
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }{ archive-suffix }"
 pkg-fmt = "zip"
 
+[workspace]
+members = ["xtask"]
+default-members = ["."]
+# Built by cargo-gpu on a pinned nightly, not the app.
+exclude = ["shaders/yuv"]
+
 [dependencies]
 # image-without-codecs: the media pipeline owns all decoding and hands
 # iced raw RGBA handles, so iced's own codec features stay off. The
 # runtime crate is a direct dependency because the facade hides the
 # allocate API behind its full image feature.
-iced = { version = "0.14", features = ["image-without-codecs", "tokio", "canvas"] }
+iced = { version = "0.14", features = ["image-without-codecs", "tokio", "canvas", "wgpu"] }
 iced_runtime = "0.14"
+# Enable wgpu's SPIR-V frontend.
+wgpu = { version = "27", features = ["spirv"] }
 anyhow = "1"
 thiserror = "2"
 gif = "0.14"

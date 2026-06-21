@@ -19,7 +19,7 @@ use iced::Task;
 use crate::components::toasts::{Message as ToastMessage, Toast, ToastKind};
 
 pub(crate) use file_ops::{
-    copy_bitmap, file_op_target, fire_delete, purge_disk_thumb, validate_rename,
+    copy_bitmap, copy_rgba_bitmap, file_op_target, fire_delete, purge_disk_thumb, validate_rename,
 };
 pub(crate) use media_tasks::{
     fire_exif, fire_load, fire_rotate, fire_thumbnailer, fire_visible_thumbs, show_loaded,

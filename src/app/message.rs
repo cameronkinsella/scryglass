@@ -95,9 +95,7 @@ pub fn is_menu_message(msg: &Message) -> bool {
             | Message::Toast(toasts::Message::Dismiss(_))
             | Message::Filmstrip(filmstrip::Message::Scrolled(_))
             | Message::VideoControls(
-                video_controls::Message::Tick
-                    | video_controls::Message::Extracted { .. }
-                    | video_controls::Message::Frame { .. }
+                video_controls::Message::Tick | video_controls::Message::Extracted { .. }
             )
             | Message::Anim(_)
             | Message::Viewer(
@@ -135,9 +133,7 @@ pub fn is_context_menu_message(msg: &Message) -> bool {
             | Message::Toast(toasts::Message::Dismiss(_))
             | Message::Filmstrip(filmstrip::Message::Scrolled(_))
             | Message::VideoControls(
-                video_controls::Message::Tick
-                    | video_controls::Message::Extracted { .. }
-                    | video_controls::Message::Frame { .. }
+                video_controls::Message::Tick | video_controls::Message::Extracted { .. }
             )
             | Message::Anim(_)
             | Message::Viewer(

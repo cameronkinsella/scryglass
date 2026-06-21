@@ -3,12 +3,10 @@ use std::sync::Arc;
 
 use iced::Task;
 use iced::time::Instant;
-use iced::widget::image::Handle;
 
-use crate::app::state::{CachedImage, DisplayedImage, Viewer};
+use crate::app::state::{DisplayedImage, Viewer};
 use crate::app::viewer_math::compute_zoom;
-use crate::app::{MediaMessage, Message, VIDEO_CONTROLS_TIMEOUT, VideoMessage};
-use crate::cache;
+use crate::app::{Message, VIDEO_CONTROLS_TIMEOUT, VideoMessage};
 use crate::components::toasts::ToastKind;
 use crate::config::ZoomMode;
 use crate::media::archive::ArchiveIndex;
@@ -77,6 +75,8 @@ pub(crate) fn fire_video_extract(index: Arc<ArchiveIndex>, entry: PathBuf) -> Ta
 }
 
 pub(crate) fn tick(app: &mut App) -> Task<Message> {
+    let zoom_mode = app.config.zoom_mode;
+    let viewport = app.viewport_size;
     let Some(viewer) = app.viewer_mut() else {
         return Task::none();
     };
@@ -96,19 +96,23 @@ pub(crate) fn tick(app: &mut App) -> Task<Message> {
         }
         return Task::none();
     };
+
     let path = viewer.nav.current().to_path_buf();
-    let (width, height) = (frame.width, frame.height);
-    let handle = Handle::from_rgba(width, height, frame.rgba);
-    cache::allocate_handle(handle).map(move |upload| match upload {
-        Ok(allocation) => Message::VideoControls(VideoMessage::Frame {
-            path: path.clone(),
-            image: CachedImage {
-                allocation,
-                original_size: (width, height),
-            },
-        }),
-        Err(_) => Message::Media(MediaMessage::SpinnerTick),
-    })
+    let (w, h) = (frame.width, frame.height);
+    // First visible frame of this video: set the fit zoom like the
+    // still-image path does, then hand later frames straight through.
+    let first = !matches!(viewer.displayed, DisplayedImage::Video { .. });
+    if first && (!viewer.manual_zoom || zoom_mode != ZoomMode::LockZoomRatio) {
+        viewer.zoom = compute_zoom(zoom_mode, w, h, viewport);
+        viewer.pan = (0.0, 0.0);
+    }
+    viewer.video_frame = Some(Arc::new(frame));
+    viewer.displayed = DisplayedImage::Video {
+        original_size: (w, h),
+    };
+    viewer.displayed_path = Some(path);
+    viewer.pending_since = None;
+    Task::none()
 }
 
 pub(crate) fn extracted(
@@ -149,30 +153,6 @@ pub(crate) fn extracted(
             Task::none()
         }
     }
-}
-
-pub(crate) fn frame(app: &mut App, path: PathBuf, image: CachedImage) -> Task<Message> {
-    let zoom_mode = app.config.zoom_mode;
-    let viewport = app.viewport_size;
-    let Some(viewer) = app.viewer_mut() else {
-        return Task::none();
-    };
-    if viewer.nav.current() != path || viewer.video.is_none() {
-        return Task::none();
-    }
-    let first = matches!(viewer.displayed, DisplayedImage::None) || viewer.pending_since.is_some();
-    let (w, h) = image.original_size;
-    if first && (!viewer.manual_zoom || zoom_mode != ZoomMode::LockZoomRatio) {
-        viewer.zoom = compute_zoom(zoom_mode, w, h, viewport);
-        viewer.pan = (0.0, 0.0);
-    }
-    viewer.displayed = DisplayedImage::Full {
-        allocation: image.allocation,
-        original_size: image.original_size,
-    };
-    viewer.displayed_path = Some(path);
-    viewer.pending_since = None;
-    Task::none()
 }
 
 pub(crate) fn play_pause(app: &mut App) -> Task<Message> {

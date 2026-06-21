@@ -22,7 +22,7 @@ use crate::app::Message;
 
 /// How to render the texture for a given zoom/pan state.
 #[derive(Debug, PartialEq)]
-enum DisplayMath {
+pub(crate) enum DisplayMath {
     /// Image is invalid/degenerate, render nothing.
     Empty,
     /// The zoomed image fits in the viewport: scale the whole texture.
@@ -33,7 +33,7 @@ enum DisplayMath {
 
 /// Pure display math: decides between fit and crop and computes the
 /// numbers, mapping from original-pixel space to texture space.
-fn display_math(
+pub(crate) fn display_math(
     zoom: f32,
     pan: (f32, f32),
     viewport: (f32, f32),

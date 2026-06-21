@@ -73,6 +73,19 @@ pub(crate) fn copy_bitmap(handle: &Handle) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Put raw RGBA pixels on the clipboard as bitmap data. Used for video,
+/// whose current frame is converted from YUV on demand.
+pub(crate) fn copy_rgba_bitmap(width: u32, height: u32, pixels: Vec<u8>) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard
+        .set_image(arboard::ImageData {
+            width: width as usize,
+            height: height as usize,
+            bytes: std::borrow::Cow::Owned(pixels),
+        })
+        .map_err(|e| e.to_string())
+}
+
 /// Drop a deleted/renamed file's entry from the persistent thumbnail
 /// store so the thumbnail can't outlive the file.
 pub(crate) fn purge_disk_thumb(pipeline: &Pipeline, path: &std::path::Path) -> Task<Message> {

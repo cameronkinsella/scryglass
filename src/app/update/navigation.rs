@@ -278,6 +278,7 @@ pub(crate) fn scrub_to(app: &mut App, index: usize) -> Task<Message> {
     viewer.rotation = 0;
     viewer.displayed_rotation = 0;
     viewer.video = None;
+    viewer.video_frame = None;
     viewer.video_seek_drag = None;
     viewer.video_extracting = None;
 
@@ -340,6 +341,7 @@ pub(crate) fn complete_navigation(
 
     viewer.anim_player.stop();
     viewer.video = None;
+    viewer.video_frame = None;
     viewer.video_seek_drag = None;
     viewer.video_extracting = None;
     viewer.drag = None;

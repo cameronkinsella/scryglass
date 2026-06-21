@@ -13,7 +13,7 @@ pub enum Message {
 use iced::{Element, Task};
 
 use crate::app::state::DisplayedImage;
-use crate::app::update::{copy_bitmap, push_toast};
+use crate::app::update::{copy_bitmap, copy_rgba_bitmap, push_toast};
 use crate::app::{App, ContextMenuMessage, Message as AppMessage, TOOLBAR_HEIGHT};
 use crate::components::empty;
 use crate::components::toasts::ToastKind;
@@ -63,17 +63,25 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             };
             // Copy the displayed pixels as a real bitmap. It works for any
             // source (archives included) and pastes into image editors.
-            let DisplayedImage::Full { allocation, .. } = &viewer.displayed else {
+            // Video grabs its current frame, converted off the UI thread.
+            let task = match &viewer.displayed {
+                DisplayedImage::Full { allocation, .. } => {
+                    let handle = allocation.handle().clone();
+                    Some(tokio::task::spawn_blocking(move || copy_bitmap(&handle)))
+                }
+                DisplayedImage::Video { .. } => viewer.video_frame.clone().map(|frame| {
+                    tokio::task::spawn_blocking(move || {
+                        let (w, h, rgba) = frame.to_rgba();
+                        copy_rgba_bitmap(w, h, rgba)
+                    })
+                }),
+                _ => None,
+            };
+            let Some(task) = task else {
                 return push_toast(app, ToastKind::Info, "Image is still loading".into());
             };
-            let handle = allocation.handle().clone();
             Task::perform(
-                async move {
-                    tokio::task::spawn_blocking(move || copy_bitmap(&handle))
-                        .await
-                        .map_err(|e| e.to_string())
-                        .and_then(|r| r)
-                },
+                async move { task.await.map_err(|e| e.to_string()).and_then(|r| r) },
                 |result| AppMessage::ContextMenu(ContextMenuMessage::CopyImageFinished(result)),
             )
         }

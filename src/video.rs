@@ -122,13 +122,89 @@ pub fn first_frame_thumb(path: &Path, max_dim: u32) -> Option<crate::media::Thum
     })
 }
 
-/// A decoded frame ready for GPU upload.
+/// YUV-to-RGB matrix the GPU converter should use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum YuvMatrix {
+    Bt601,
+    Bt709,
+}
+
+/// YUV sample range (limited 16-235 or full 0-255).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum YuvRange {
+    Limited,
+    Full,
+}
+
+/// A decoded frame in planar YUV 4:2:0 (I420), ready for the GPU
+/// converter. Planes are tightly packed, with stride padding removed.
 pub struct VideoFrame {
+    /// Monotonic id, so the GPU side can skip re-uploading the same frame.
+    pub id: u64,
     pub width: u32,
     pub height: u32,
-    pub rgba: Vec<u8>,
+    pub chroma_width: u32,
+    pub chroma_height: u32,
+    pub y: Vec<u8>,
+    pub u: Vec<u8>,
+    pub v: Vec<u8>,
+    pub matrix: YuvMatrix,
+    pub range: YuvRange,
     /// Presentation time relative to the session start (the seek point).
     pub timestamp: Duration,
+}
+
+impl VideoFrame {
+    /// Convert this frame to RGBA8 on the CPU, for a one-off clipboard
+    /// copy. Mirrors the GPU shader's matrix and range (chroma upsampled
+    /// nearest, which is plenty for a still grab).
+    pub fn to_rgba(&self) -> (u32, u32, Vec<u8>) {
+        let (w, h, cw) = (
+            self.width as usize,
+            self.height as usize,
+            self.chroma_width as usize,
+        );
+        let full = self.range == YuvRange::Full;
+        let bt709 = self.matrix == YuvMatrix::Bt709;
+        let mut out = vec![0u8; w * h * 4];
+        for y in 0..h {
+            let yrow = y * w;
+            let crow = (y / 2) * cw;
+            for x in 0..w {
+                let yn = self.y[yrow + x] as f32 / 255.0;
+                let un = self.u[crow + x / 2] as f32 / 255.0;
+                let vn = self.v[crow + x / 2] as f32 / 255.0;
+                let (luma, cb, cr) = if full {
+                    (yn, un - 0.5, vn - 0.5)
+                } else {
+                    (
+                        (yn - 16.0 / 255.0) * (255.0 / 219.0),
+                        (un - 128.0 / 255.0) * (255.0 / 224.0),
+                        (vn - 128.0 / 255.0) * (255.0 / 224.0),
+                    )
+                };
+                let (r, g, b) = if bt709 {
+                    (
+                        luma + 1.5748 * cr,
+                        luma - 0.1873 * cb - 0.4681 * cr,
+                        luma + 1.8556 * cb,
+                    )
+                } else {
+                    (
+                        luma + 1.402 * cr,
+                        luma - 0.344136 * cb - 0.714136 * cr,
+                        luma + 1.772 * cb,
+                    )
+                };
+                let o = (yrow + x) * 4;
+                out[o] = (r.clamp(0.0, 1.0) * 255.0).round() as u8;
+                out[o + 1] = (g.clamp(0.0, 1.0) * 255.0).round() as u8;
+                out[o + 2] = (b.clamp(0.0, 1.0) * 255.0).round() as u8;
+                out[o + 3] = 255;
+            }
+        }
+        (self.width, self.height, out)
+    }
 }
 
 enum AudioCmd {
@@ -533,7 +609,7 @@ fn run_pipeline(
                 }
                 let pts = frame.pts().unwrap_or(0) as f64 * video_tb;
                 let relative = (pts - base).max(0.0);
-                send_video_frame(scaler, decoder, &frame, relative, &tx)?;
+                send_video_frame(scaler, &frame, relative, &tx)?;
             }
             Ok(())
         };
@@ -615,56 +691,110 @@ fn run_pipeline(
     Ok(())
 }
 
-/// Rescale one decoded frame to RGBA and push it (blocking on backpressure).
+/// Convert one decoded frame to planar I420 if needed and push it
+/// (blocking on backpressure). The GPU does the color conversion, so the
+/// CPU only moves luma and chroma planes (1.5 bytes per pixel).
 fn send_video_frame(
     scaler: &mut Option<ffmpeg::software::scaling::Context>,
-    decoder: &ffmpeg::decoder::Video,
     frame: &ffmpeg::frame::Video,
     relative_secs: f64,
     tx: &mpsc::SyncSender<VideoFrame>,
 ) -> Result<(), ()> {
-    // Lazy init: some streams only report a real pixel format with the
-    // first frame.
-    if scaler.is_none() {
-        *scaler = ffmpeg::software::scaling::Context::get(
-            decoder.format(),
-            decoder.width(),
-            decoder.height(),
-            ffmpeg::format::Pixel::RGBA,
-            decoder.width(),
-            decoder.height(),
-            ffmpeg::software::scaling::Flags::BILINEAR,
-        )
-        .ok();
-    }
-    let Some(scaler) = scaler.as_mut() else {
-        return Ok(());
+    use ffmpeg::format::Pixel;
+
+    // Most 8-bit streams decode straight to I420. Anything else (10-bit,
+    // 4:2:2, 4:4:4, NV12) goes through swscale once into I420, far cheaper
+    // than the old full RGBA conversion and rare in practice.
+    let mut converted = ffmpeg::frame::Video::empty();
+    let src = if frame.format() == Pixel::YUV420P {
+        frame
+    } else {
+        if scaler.is_none() {
+            *scaler = ffmpeg::software::scaling::Context::get(
+                frame.format(),
+                frame.width(),
+                frame.height(),
+                Pixel::YUV420P,
+                frame.width(),
+                frame.height(),
+                ffmpeg::software::scaling::Flags::BILINEAR,
+            )
+            .ok();
+        }
+        let Some(scaler) = scaler.as_mut() else {
+            return Ok(());
+        };
+        if scaler.run(frame, &mut converted).is_err() {
+            return Ok(());
+        }
+        &converted
     };
 
-    let mut rgba_frame = ffmpeg::frame::Video::empty();
-    if scaler.run(frame, &mut rgba_frame).is_err() {
-        return Ok(());
-    }
+    let width = src.width();
+    let height = src.height();
+    let chroma_width = width.div_ceil(2);
+    let chroma_height = height.div_ceil(2);
 
-    let (width, height) = (rgba_frame.width(), rgba_frame.height());
-    let stride = rgba_frame.stride(0);
-    let row_bytes = width as usize * 4;
-    let data = rgba_frame.data(0);
+    let y = copy_plane(src.data(0), src.stride(0), width as usize, height as usize);
+    let u = copy_plane(
+        src.data(1),
+        src.stride(1),
+        chroma_width as usize,
+        chroma_height as usize,
+    );
+    let v = copy_plane(
+        src.data(2),
+        src.stride(2),
+        chroma_width as usize,
+        chroma_height as usize,
+    );
 
-    // Rows can carry stride padding, copy row by row.
-    let mut rgba = Vec::with_capacity(row_bytes * height as usize);
-    for row in 0..height as usize {
-        let offset = row * stride;
-        rgba.extend_from_slice(&data[offset..offset + row_bytes]);
-    }
+    let matrix = match src.color_space() {
+        ffmpeg::util::color::Space::BT709 => YuvMatrix::Bt709,
+        ffmpeg::util::color::Space::BT470BG | ffmpeg::util::color::Space::SMPTE170M => {
+            YuvMatrix::Bt601
+        }
+        // Unspecified: HD and up is almost always BT.709, SD is BT.601.
+        _ => {
+            if height >= 720 {
+                YuvMatrix::Bt709
+            } else {
+                YuvMatrix::Bt601
+            }
+        }
+    };
+    let range = match src.color_range() {
+        ffmpeg::util::color::Range::JPEG => YuvRange::Full,
+        _ => YuvRange::Limited,
+    };
+
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
 
     tx.send(VideoFrame {
+        id,
         width,
         height,
-        rgba,
+        chroma_width,
+        chroma_height,
+        y,
+        u,
+        v,
+        matrix,
+        range,
         timestamp: Duration::from_secs_f64(relative_secs),
     })
     .map_err(|_| ())
+}
+
+/// Copy one image plane row by row, stripping stride padding.
+fn copy_plane(data: &[u8], stride: usize, width: usize, height: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(width * height);
+    for row in 0..height {
+        let offset = row * stride;
+        out.extend_from_slice(&data[offset..offset + width]);
+    }
+    out
 }
 
 /// Resample one decoded audio frame to interleaved f32 stereo and push

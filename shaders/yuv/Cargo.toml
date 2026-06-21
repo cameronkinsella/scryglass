@@ -1,0 +1,22 @@
+[package]
+name = "scryglass-yuv-shader"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", tag = "v0.10.0-alpha.1" }
+# Pin to match rust-gpu.
+glam = { version = "=0.31.0", default-features = false, features = ["libm"] }
+
+# Unoptimized build scripts are painfully slow.
+[profile.dev.build-override]
+opt-level = 3
+codegen-units = 16
+
+[profile.release.build-override]
+opt-level = 3
+codegen-units = 16

@@ -86,6 +86,9 @@ pub enum DisplayedImage {
         allocation: Allocation,
         original_size: (u32, u32),
     },
+    /// Live video, drawn by the GPU YUV surface. Carries dimensions for
+    /// the zoom math and info panel; the frame planes live on the viewer.
+    Video { original_size: (u32, u32) },
 }
 
 impl DisplayedImage {
@@ -95,6 +98,7 @@ impl DisplayedImage {
             DisplayedImage::None => None,
             DisplayedImage::Placeholder(thumb) => Some(thumb.original_size),
             DisplayedImage::Full { original_size, .. } => Some(*original_size),
+            DisplayedImage::Video { original_size } => Some(*original_size),
         }
     }
 }
@@ -165,6 +169,8 @@ pub struct Viewer {
     /// Active video playback session (feature `video`). Dropping it
     /// stops the decode processes.
     pub video: Option<crate::video::VideoSession>,
+    /// Latest decoded video frame, drawn by the GPU YUV surface.
+    pub video_frame: Option<std::sync::Arc<crate::video::VideoFrame>>,
     /// Mid-drag value of the video seek slider (seconds), committed on
     /// release.
     pub video_seek_drag: Option<f64>,
@@ -214,6 +220,7 @@ impl Viewer {
             rotation: 0,
             displayed_rotation: 0,
             video: None,
+            video_frame: None,
             video_seek_drag: None,
             video_extracting: None,
             video_controls_until: None,

@@ -1,17 +1,11 @@
 use std::path::PathBuf;
 
-use crate::app::state::CachedImage;
-
 #[derive(Debug, Clone)]
 pub enum Message {
     Tick,
     Extracted {
         entry: PathBuf,
         result: Result<PathBuf, String>,
-    },
-    Frame {
-        path: PathBuf,
-        image: CachedImage,
     },
     PlayPause,
     SeekDrag(f64),
@@ -46,7 +40,6 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
     match message {
         Message::Tick => video_flow::tick(app),
         Message::Extracted { entry, result } => video_flow::extracted(app, entry, result),
-        Message::Frame { path, image } => video_flow::frame(app, path, image),
         Message::PlayPause => video_flow::play_pause(app),
         Message::SeekDrag(secs) => video_flow::seek_drag(app, secs),
         Message::SeekRelease => video_flow::seek_release(app),

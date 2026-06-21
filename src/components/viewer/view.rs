@@ -160,6 +160,16 @@ fn image_view(app: &App) -> Element<'_, Message> {
                 false,
             )
         }
+        DisplayedImage::Video { .. } => match viewer.video_frame.clone() {
+            Some(frame) => ui::video_surface::view(
+                frame,
+                viewer.zoom,
+                viewer.pan,
+                (app.viewport_size.width, app.viewport_size.height),
+                app.config.crisp_pixels,
+            ),
+            None => ui::image_display::empty_viewport(),
+        },
     };
 
     // Optional checkerboard behind the image reveals transparency.
