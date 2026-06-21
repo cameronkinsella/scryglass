@@ -104,6 +104,10 @@ pub fn is_menu_message(msg: &Message) -> bool {
                     | viewer::Message::DragEnd
                     | viewer::Message::NextReleased
                     | viewer::Message::PrevReleased
+                    // Layout toggles live in the Layout menu, so flipping
+                    // them leaves it open like its toolbar siblings.
+                    | viewer::Message::ToggleInfo
+                    | viewer::Message::ToggleCheckerboard
             )
             | Message::Window(window::Message::Resized(_))
             | Message::Modal(modal::Message::RequestDelete | modal::Message::RequestRename)
@@ -179,6 +183,12 @@ mod tests {
         assert!(!is_menu_message(&viewer::Message::Prev.into()));
         assert!(!is_menu_message(&viewer::Message::ScrollZoom(1.0).into()));
         assert!(!is_menu_message(&viewer::Message::ZoomActual.into()));
+    }
+
+    #[test]
+    fn layout_toggles_keep_the_menu_open() {
+        assert!(is_menu_message(&viewer::Message::ToggleInfo.into()));
+        assert!(is_menu_message(&viewer::Message::ToggleCheckerboard.into()));
     }
 
     #[test]
