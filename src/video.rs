@@ -296,6 +296,9 @@ pub struct VideoSession {
     audio: Option<mpsc::Sender<AudioCmd>>,
     audio_clock_us: Arc<AtomicU64>,
     has_audio: Arc<AtomicBool>,
+    /// Set once the first frame shows, releasing the held audio so video
+    /// and audio start together.
+    video_ready: Arc<AtomicBool>,
     duration_us: Arc<AtomicU64>,
     video_done: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
@@ -344,6 +347,7 @@ impl VideoSession {
         let video_done = Arc::new(AtomicBool::new(false));
         let audio_clock_us = Arc::new(AtomicU64::new(0));
         let has_audio = Arc::new(AtomicBool::new(false));
+        let video_ready = Arc::new(AtomicBool::new(false));
         // Shared with the audio watchdog so it can spot a suspended UI
         // thread and freeze playback instead of letting it drift.
         let clock_origin = Instant::now();
@@ -367,6 +371,7 @@ impl VideoSession {
             stop.clone(),
             audio_clock_us.clone(),
             has_audio.clone(),
+            video_ready.clone(),
             ui_tick_ms.clone(),
             clock_origin,
             if muted { 0.0 } else { volume },
@@ -377,6 +382,7 @@ impl VideoSession {
             audio,
             audio_clock_us,
             has_audio,
+            video_ready,
             duration_us,
             video_done,
             stop,
@@ -415,6 +421,10 @@ impl VideoSession {
             .duration_us
             .store(self.duration_us.load(Ordering::Relaxed), Ordering::Relaxed);
         session.temp = self.temp.clone();
+        // A seek from a paused video stays paused, showing the new frame.
+        if !self.playing {
+            session.pause();
+        }
         session
     }
 
@@ -446,7 +456,9 @@ impl VideoSession {
 
     /// The newest frame due for display, if any.
     pub fn poll(&mut self) -> Option<VideoFrame> {
-        if !self.playing {
+        // A paused session still delivers its very first frame, so a seek
+        // while paused shows the new position. After that it holds.
+        if !self.playing && self.first_frame_shown {
             return None;
         }
         // Mark the UI as alive for the audio watchdog. For silent files
@@ -488,10 +500,16 @@ impl VideoSession {
                 Err(_) => break,
             }
         }
-        // The wall-clock fallback starts with the first visible frame.
+        // The wall-clock fallback starts with the first visible frame, but
+        // only while playing. A paused seek shows a frame without letting
+        // the clock advance.
         if due.is_some() && !self.first_frame_shown {
             self.first_frame_shown = true;
-            self.started = Some(Instant::now());
+            // Release the held audio now that the picture is up.
+            self.video_ready.store(true, Ordering::Relaxed);
+            if self.playing {
+                self.started = Some(Instant::now());
+            }
         }
         due
     }
@@ -524,6 +542,8 @@ impl VideoSession {
         }
         self.playing = true;
         self.started = Some(Instant::now());
+        // Don't let the silent-clock watchdog read the paused gap as a stall.
+        self.last_poll = None;
         if let Some(audio) = &self.audio {
             let _ = audio.send(AudioCmd::Play);
         }
@@ -734,6 +754,9 @@ fn run_pipeline(
         let mut scaler: Option<ffmpeg::software::scaling::Context> = None;
         let mut frame = ffmpeg::frame::Video::empty();
         let mut sw_frame = ffmpeg::frame::Video::empty();
+        // The first kept frame is time zero: the seek target, not the
+        // keyframe before it.
+        let mut origin: Option<f64> = None;
         let mut drain = |decoder: &mut ffmpeg::decoder::Video,
                          scaler: &mut Option<ffmpeg::software::scaling::Context>|
          -> Result<(), ()> {
@@ -742,7 +765,13 @@ fn run_pipeline(
                     return Err(());
                 }
                 let pts = frame.pts().unwrap_or(0) as f64 * video_tb;
-                let relative = (pts - base).max(0.0);
+                // Drop frames before the seek target; they exist only for
+                // the reference chain.
+                if pts < base {
+                    continue;
+                }
+                // Rebase the first kept frame to zero so it shows at once.
+                let relative = pts - *origin.get_or_insert(pts);
                 // Hardware frames live in GPU memory: copy them down to
                 // system memory (as NV12) before the planes can be read.
                 // A failed copy drops just that frame.
@@ -1045,11 +1074,13 @@ impl rodio::Source for PcmChannel {
 /// Play decoded PCM through rodio, publishing the player position as the
 /// master clock. The device sink lives on its own thread, so commands
 /// arrive over a channel.
+#[allow(clippy::too_many_arguments)]
 fn spawn_audio_output(
     pcm_rx: mpsc::Receiver<f32>,
     stop: Arc<AtomicBool>,
     clock_us: Arc<AtomicU64>,
     has_audio: Arc<AtomicBool>,
+    video_ready: Arc<AtomicBool>,
     ui_tick_ms: Arc<AtomicU64>,
     clock_origin: Instant,
     volume: f32,
@@ -1070,6 +1101,10 @@ fn spawn_audio_output(
         let player = rodio::Player::connect_new(device_sink.mixer());
         player.set_volume(volume);
         player.append(PcmChannel { rx: pcm_rx });
+        // Hold audio until the first video frame is ready, so they start
+        // together.
+        player.pause();
+        let mut waiting_for_video = true;
         let mut playing = true;
         let mut auto_paused = false;
         let mut ended_clock: Option<(Duration, Option<Instant>)> = None;
@@ -1093,8 +1128,17 @@ fn spawn_audio_output(
                             ended_clock = Some((position, Some(Instant::now())));
                         }
                         playing = true;
-                        player.play();
+                        if !waiting_for_video {
+                            player.play();
+                        }
                     }
+                }
+            }
+            // Release the held audio once the first video frame has shown.
+            if waiting_for_video && video_ready.load(Ordering::Relaxed) {
+                waiting_for_video = false;
+                if playing {
+                    player.play();
                 }
             }
             // Watchdog: a window move or resize modal loop suspends the UI
