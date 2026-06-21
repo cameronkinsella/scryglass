@@ -24,6 +24,7 @@ pub(crate) fn start_video(
     current: PathBuf,
     volume: f32,
     muted: bool,
+    loop_video: bool,
     hardware: bool,
 ) -> Task<Message> {
     // Show the controls briefly on open, like most players.
@@ -35,7 +36,7 @@ pub(crate) fn start_video(
                 std::time::Duration::ZERO,
                 volume,
                 muted,
-                false,
+                loop_video,
                 hardware,
             ));
             Task::none()
@@ -124,6 +125,7 @@ pub(crate) fn extracted(
 ) -> Task<Message> {
     let video_volume = app.config.video_volume;
     let video_muted = app.config.video_muted;
+    let video_loop = app.config.video_loop;
     let hardware = app.config.hardware_decode;
     let Some(viewer) = app.viewer_mut() else {
         return Task::none();
@@ -149,7 +151,7 @@ pub(crate) fn extracted(
                 std::time::Duration::ZERO,
                 video_volume,
                 video_muted,
-                false,
+                video_loop,
                 hardware,
             );
             session.temp = Some(crate::video::TempFileGuard::new(temp));
@@ -240,10 +242,16 @@ pub(crate) fn toggle_mute(app: &mut App) -> Task<Message> {
 }
 
 pub(crate) fn toggle_loop(app: &mut App) -> Task<Message> {
-    if let Some(viewer) = app.viewer_mut()
-        && let Some(session) = viewer.video.as_mut()
-    {
-        session.looping = !session.looping;
-    }
-    Task::none()
+    let Some(viewer) = app.viewer_mut() else {
+        return Task::none();
+    };
+    let Some(session) = viewer.video.as_mut() else {
+        return Task::none();
+    };
+    session.looping = !session.looping;
+    app.config.video_loop = app
+        .viewer()
+        .and_then(|v| v.video.as_ref())
+        .is_some_and(|s| s.looping);
+    save_config(app)
 }
