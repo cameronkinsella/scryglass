@@ -293,3 +293,158 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::Modal;
+    use crate::app::state::Viewer;
+    use crate::app::test_support::{empty_app, viewing_app};
+
+    fn viewer(app: &App) -> &Viewer {
+        app.viewer().unwrap()
+    }
+
+    #[test]
+    fn zoom_actual_sets_full_size_and_marks_manual() {
+        let mut app = viewing_app(&["a.png"], 0);
+        app.viewer_mut().unwrap().zoom = 0.5;
+        let _ = update(&mut app, Message::ZoomActual);
+        assert_eq!(viewer(&app).zoom, 1.0);
+        assert!(viewer(&app).manual_zoom);
+    }
+
+    #[test]
+    fn zoom_step_scales_in_then_back_out() {
+        let mut app = viewing_app(&["a.png"], 0);
+        app.viewer_mut().unwrap().zoom = 1.0;
+        let _ = update(&mut app, Message::ZoomStep(1));
+        assert!((viewer(&app).zoom - ZOOM_STEP).abs() < 1e-5);
+        let _ = update(&mut app, Message::ZoomStep(-1));
+        assert!((viewer(&app).zoom - 1.0).abs() < 1e-5);
+        assert!(viewer(&app).manual_zoom);
+    }
+
+    #[test]
+    fn zoom_step_clamps_at_the_maximum() {
+        let mut app = viewing_app(&["a.png"], 0);
+        app.viewer_mut().unwrap().zoom = ZOOM_MAX;
+        let _ = update(&mut app, Message::ZoomStep(1));
+        assert_eq!(viewer(&app).zoom, ZOOM_MAX);
+    }
+
+    #[test]
+    fn reset_zoom_clears_manual_and_recenters() {
+        let mut app = viewing_app(&["a.png"], 0);
+        {
+            let v = app.viewer_mut().unwrap();
+            v.manual_zoom = true;
+            v.pan = (40.0, -20.0);
+        }
+        let _ = update(&mut app, Message::ResetZoom);
+        assert!(!viewer(&app).manual_zoom);
+        assert_eq!(viewer(&app).pan, (0.0, 0.0));
+    }
+
+    #[test]
+    fn toggle_checkerboard_flips_config() {
+        let mut app = empty_app();
+        let before = app.config.show_checkerboard;
+        let _ = update(&mut app, Message::ToggleCheckerboard);
+        assert_eq!(app.config.show_checkerboard, !before);
+    }
+
+    #[test]
+    fn toggle_help_opens_the_overlay() {
+        let mut app = empty_app();
+        assert!(!app.help_open);
+        let _ = update(&mut app, Message::ToggleHelp);
+        assert!(app.help_open);
+    }
+
+    #[test]
+    fn toggle_info_flips_config() {
+        let mut app = viewing_app(&["a.png"], 0);
+        let before = app.config.show_info;
+        let _ = update(&mut app, Message::ToggleInfo);
+        assert_eq!(app.config.show_info, !before);
+    }
+
+    #[test]
+    fn toggle_fullscreen_fills_the_window() {
+        let mut app = empty_app();
+        app.window_size = iced::Size::new(1000.0, 800.0);
+        let _ = update(&mut app, Message::ToggleFullscreen);
+        assert!(app.fullscreen);
+        assert_eq!(app.viewport_size, app.window_size);
+    }
+
+    #[test]
+    fn escape_closes_the_modal_before_anything_else() {
+        let mut app = empty_app();
+        app.modal = Some(Modal::Settings);
+        app.help_open = true;
+        let _ = update(&mut app, Message::Escape);
+        assert!(app.modal.is_none());
+        // Help is left for the next Escape.
+        assert!(app.help_open);
+    }
+
+    #[test]
+    fn escape_closes_help_when_no_modal_is_open() {
+        let mut app = empty_app();
+        app.help_open = true;
+        let _ = update(&mut app, Message::Escape);
+        assert!(!app.help_open);
+    }
+
+    #[test]
+    fn escape_exits_fullscreen_after_modal_and_help() {
+        let mut app = empty_app();
+        app.fullscreen = true;
+        let _ = update(&mut app, Message::Escape);
+        assert!(!app.fullscreen);
+    }
+
+    #[test]
+    fn escape_clears_menus_when_nothing_else_is_open() {
+        let mut app = empty_app();
+        app.context_menu_pos = Some(iced::Point::ORIGIN);
+        let _ = update(&mut app, Message::Escape);
+        assert!(app.context_menu_pos.is_none());
+    }
+
+    #[test]
+    fn drag_start_then_end_tracks_drag_state() {
+        let mut app = viewing_app(&["a.png"], 0);
+        app.last_cursor_pos = iced::Point::new(10.0, 20.0);
+        let _ = update(&mut app, Message::DragStart);
+        assert!(viewer(&app).drag.is_some());
+        let _ = update(&mut app, Message::DragEnd);
+        assert!(viewer(&app).drag.is_none());
+    }
+
+    #[test]
+    fn next_holds_the_direction_and_defers_on_a_cache_miss() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        let _ = update(&mut app, Message::Next);
+        let v = viewer(&app);
+        assert_eq!(v.held_direction.map(|(d, _)| d), Some(Direction::Forward));
+        assert!(v.pending_nav.is_some());
+    }
+
+    #[test]
+    fn next_released_clears_a_matching_hold() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        let _ = update(&mut app, Message::Next);
+        let _ = update(&mut app, Message::NextReleased);
+        assert!(viewer(&app).held_direction.is_none());
+    }
+
+    #[test]
+    fn rotate_is_a_no_op_without_a_decoded_image() {
+        let mut app = viewing_app(&["a.png"], 0);
+        let _ = update(&mut app, Message::Rotate(1));
+        assert_eq!(viewer(&app).rotation, 0);
+    }
+}

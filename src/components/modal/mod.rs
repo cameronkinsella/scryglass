@@ -181,3 +181,54 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
     }
 }
 mod widget;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::test_support::{empty_app, viewing_app};
+
+    #[test]
+    fn rename_input_updates_the_dialog_text() {
+        let mut app = empty_app();
+        app.modal = Some(Modal::Rename {
+            input: "old".into(),
+        });
+        let _ = update(&mut app, Message::RenameInput("new".into()));
+        assert!(matches!(&app.modal, Some(Modal::Rename { input }) if input.as_str() == "new"));
+    }
+
+    #[test]
+    fn cancel_closes_the_modal() {
+        let mut app = empty_app();
+        app.modal = Some(Modal::Settings);
+        let _ = update(&mut app, Message::Cancel);
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn request_rename_opens_the_dialog_with_the_current_name() {
+        let mut app = viewing_app(&["photo.png", "b.png"], 0);
+        app.config.read_only = false;
+        let _ = update(&mut app, Message::RequestRename);
+        assert!(
+            matches!(&app.modal, Some(Modal::Rename { input }) if input.as_str() == "photo.png")
+        );
+    }
+
+    #[test]
+    fn request_delete_opens_confirmation_when_enabled() {
+        let mut app = viewing_app(&["photo.png"], 0);
+        app.config.read_only = false;
+        app.config.confirm_delete = true;
+        let _ = update(&mut app, Message::RequestDelete);
+        assert!(matches!(&app.modal, Some(Modal::ConfirmDelete(p)) if p.ends_with("photo.png")));
+    }
+
+    #[test]
+    fn submit_on_the_settings_modal_closes_it() {
+        let mut app = empty_app();
+        app.modal = Some(Modal::Settings);
+        let _ = update(&mut app, Message::Submit);
+        assert!(app.modal.is_none());
+    }
+}

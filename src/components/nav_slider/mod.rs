@@ -77,3 +77,32 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
     }
 }
 mod widget;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::test_support::viewing_app;
+
+    #[test]
+    fn changed_sets_a_clamped_drag_target() {
+        let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
+        let _ = update(&mut app, Message::Changed(99));
+        let drag = app
+            .viewer()
+            .unwrap()
+            .slider_drag
+            .expect("drag should be set");
+        assert_eq!(drag.target, 2); // clamped to the last index
+        assert!(drag.bubble); // nothing cached, so the fallback bubble shows
+    }
+
+    #[test]
+    fn released_consumes_the_drag_and_defers_navigation() {
+        let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
+        let _ = update(&mut app, Message::Changed(2));
+        let _ = update(&mut app, Message::Released);
+        let viewer = app.viewer().unwrap();
+        assert!(viewer.slider_drag.is_none());
+        assert_eq!(viewer.pending_nav, Some(2));
+    }
+}

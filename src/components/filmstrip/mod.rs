@@ -52,3 +52,23 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
 
 pub(crate) use widget::{centering_offset, filmstrip_id, visible_range};
 mod widget;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::test_support::viewing_app;
+
+    #[test]
+    fn scrolled_records_the_offset() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        let _ = update(&mut app, Message::Scrolled(120.0));
+        assert_eq!(app.viewer().unwrap().filmstrip_scroll_x, 120.0);
+    }
+
+    #[test]
+    fn clicked_defers_navigation_to_the_target() {
+        let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
+        let _ = update(&mut app, Message::Clicked(2));
+        assert_eq!(app.viewer().unwrap().pending_nav, Some(2));
+    }
+}

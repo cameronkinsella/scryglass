@@ -158,3 +158,35 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
     }
 }
 mod widget;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::test_support::viewing_app;
+
+    #[test]
+    fn show_places_the_menu_at_the_cursor() {
+        let mut app = viewing_app(&["a.png"], 0);
+        app.last_cursor_pos = iced::Point::new(12.0, 34.0);
+        let _ = update(&mut app, Message::Show);
+        assert!(app.context_menu_pos == Some(iced::Point::new(12.0, 34.0)));
+    }
+
+    #[test]
+    fn dismiss_hides_the_menu() {
+        let mut app = viewing_app(&["a.png"], 0);
+        app.context_menu_pos = Some(iced::Point::ORIGIN);
+        let _ = update(&mut app, Message::Dismiss);
+        assert!(app.context_menu_pos.is_none());
+    }
+
+    // push_toast schedules a tokio timer, so this needs a runtime in scope.
+    #[tokio::test]
+    async fn copy_image_while_loading_reports_it_and_closes_the_menu() {
+        let mut app = viewing_app(&["a.png"], 0);
+        app.context_menu_pos = Some(iced::Point::ORIGIN);
+        let _ = update(&mut app, Message::CopyImage);
+        assert!(app.context_menu_pos.is_none());
+        assert_eq!(app.toasts.len(), 1);
+    }
+}

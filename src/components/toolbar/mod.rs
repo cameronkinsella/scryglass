@@ -155,3 +155,106 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
 mod widget;
 
 pub(crate) use widget::OpenMenu;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::test_support::{empty_app, viewing_app};
+
+    #[test]
+    fn file_menu_toggles_open_and_closed() {
+        let mut app = empty_app();
+        let _ = update(&mut app, Message::ToggleFileMenu);
+        assert!(app.open_menu == Some(OpenMenu::File));
+        let _ = update(&mut app, Message::ToggleFileMenu);
+        assert!(app.open_menu.is_none());
+    }
+
+    #[test]
+    fn opening_a_second_menu_replaces_the_first() {
+        let mut app = empty_app();
+        let _ = update(&mut app, Message::ToggleFileMenu);
+        let _ = update(&mut app, Message::ToggleZoomMenu);
+        assert!(app.open_menu == Some(OpenMenu::Zoom));
+    }
+
+    #[test]
+    fn dismiss_overlay_closes_any_menu() {
+        let mut app = empty_app();
+        let _ = update(&mut app, Message::ToggleLayoutMenu);
+        let _ = update(&mut app, Message::DismissOverlay);
+        assert!(app.open_menu.is_none());
+    }
+
+    #[test]
+    fn layout_toggles_flip_their_config_flags() {
+        let mut app = empty_app();
+        let (filmstrip, slider, footer) = (
+            app.config.show_filmstrip,
+            app.config.show_slider,
+            app.config.show_footer,
+        );
+        let _ = update(&mut app, Message::ToggleFilmstrip);
+        let _ = update(&mut app, Message::ToggleSlider);
+        let _ = update(&mut app, Message::ToggleFooter);
+        assert_eq!(app.config.show_filmstrip, !filmstrip);
+        assert_eq!(app.config.show_slider, !slider);
+        assert_eq!(app.config.show_footer, !footer);
+    }
+
+    #[test]
+    fn toggle_toolbar_flips_and_dismisses_the_context_menu() {
+        let mut app = empty_app();
+        app.context_menu_pos = Some(iced::Point::ORIGIN);
+        let before = app.config.show_toolbar;
+        let _ = update(&mut app, Message::ToggleToolbar);
+        assert_eq!(app.config.show_toolbar, !before);
+        assert!(app.context_menu_pos.is_none());
+    }
+
+    #[test]
+    fn toggle_theme_swaps_dark_and_light() {
+        let mut app = empty_app();
+        app.config.theme = ThemeChoice::Dark;
+        let _ = update(&mut app, Message::ToggleTheme);
+        assert_eq!(app.config.theme, ThemeChoice::Light);
+        let _ = update(&mut app, Message::ToggleTheme);
+        assert_eq!(app.config.theme, ThemeChoice::Dark);
+    }
+
+    #[test]
+    fn toggle_crisp_pixels_flips_config() {
+        let mut app = empty_app();
+        let before = app.config.crisp_pixels;
+        let _ = update(&mut app, Message::ToggleCrispPixels);
+        assert_eq!(app.config.crisp_pixels, !before);
+    }
+
+    #[test]
+    fn set_zoom_mode_closes_the_menu_and_clears_manual_zoom() {
+        let mut app = viewing_app(&["a.png"], 0);
+        app.open_menu = Some(OpenMenu::Zoom);
+        app.viewer_mut().unwrap().manual_zoom = true;
+        let _ = update(&mut app, Message::SetZoomMode(ZoomMode::default()));
+        assert!(app.open_menu.is_none());
+        assert_eq!(app.config.zoom_mode, ZoomMode::default());
+        assert!(!app.viewer().unwrap().manual_zoom);
+    }
+
+    #[test]
+    fn set_sort_key_closes_the_menu_and_records_the_key() {
+        let mut app = viewing_app(&["a.png"], 0);
+        app.open_menu = Some(OpenMenu::Sort);
+        let _ = update(&mut app, Message::SetSortKey(SortKey::default()));
+        assert!(app.open_menu.is_none());
+        assert_eq!(app.config.sort_key, SortKey::default());
+    }
+
+    #[test]
+    fn toggle_sort_direction_flips_config() {
+        let mut app = viewing_app(&["a.png"], 0);
+        let before = app.config.sort_desc;
+        let _ = update(&mut app, Message::ToggleSortDirection);
+        assert_eq!(app.config.sort_desc, !before);
+    }
+}
