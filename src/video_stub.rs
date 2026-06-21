@@ -120,6 +120,10 @@ impl VideoSession {
         None
     }
 
+    pub fn frame_duration(&self) -> Option<Duration> {
+        None
+    }
+
     pub fn poll(&mut self) -> Option<VideoFrame> {
         None
     }

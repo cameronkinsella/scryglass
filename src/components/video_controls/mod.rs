@@ -15,6 +15,8 @@ pub enum Message {
     NudgeVolume(f32),
     ToggleMute,
     ToggleLoop,
+    /// Step one frame: +1 forward, -1 back. Pauses playback.
+    StepFrame(i32),
 }
 use iced::{Element, Task};
 
@@ -48,6 +50,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
         Message::NudgeVolume(delta) => video_flow::nudge_volume(app, delta),
         Message::ToggleMute => video_flow::toggle_mute(app),
         Message::ToggleLoop => video_flow::toggle_loop(app),
+        Message::StepFrame(dir) => video_flow::step_frame(app, dir),
     }
 }
 mod widget;

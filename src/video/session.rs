@@ -76,6 +76,9 @@ pub struct VideoSession {
     /// and audio start together.
     video_ready: Arc<AtomicBool>,
     duration_us: Arc<AtomicU64>,
+    /// One frame's duration in microseconds, for frame stepping. 0 until the
+    /// stream is opened.
+    frame_us: Arc<AtomicU64>,
     video_done: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     /// Seek offset this session started from.
@@ -121,6 +124,7 @@ impl VideoSession {
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let duration_us = Arc::new(AtomicU64::new(0));
+        let frame_us = Arc::new(AtomicU64::new(0));
         let video_done = Arc::new(AtomicBool::new(false));
         let audio_clock_us = Arc::new(AtomicU64::new(0));
         let has_audio = Arc::new(AtomicBool::new(false));
@@ -139,6 +143,7 @@ impl VideoSession {
             start,
             stop.clone(),
             duration_us.clone(),
+            frame_us.clone(),
             video_done.clone(),
             pcm_tx,
             hardware,
@@ -161,6 +166,7 @@ impl VideoSession {
             has_audio,
             video_ready,
             duration_us,
+            frame_us,
             video_done,
             stop,
             base: start,
@@ -228,6 +234,12 @@ impl VideoSession {
     /// Total duration, once the container has been opened.
     pub fn duration(&self) -> Option<Duration> {
         let us = self.duration_us.load(Ordering::Relaxed);
+        (us > 0).then(|| Duration::from_micros(us))
+    }
+
+    /// One frame's duration, once the video stream has been opened.
+    pub fn frame_duration(&self) -> Option<Duration> {
+        let us = self.frame_us.load(Ordering::Relaxed);
         (us > 0).then(|| Duration::from_micros(us))
     }
 

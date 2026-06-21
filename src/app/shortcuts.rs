@@ -52,6 +52,8 @@ pub fn map_press(key: &Key, modifiers: Modifiers) -> Option<Message> {
             "m" | "M" if !ctrl => Some(Message::VideoControls(VideoMessage::ToggleMute)),
             "j" | "J" if !ctrl => Some(Message::VideoControls(VideoMessage::SeekBy(-10.0))),
             "l" | "L" if !ctrl => Some(Message::VideoControls(VideoMessage::SeekBy(10.0))),
+            "." if !ctrl => Some(Message::VideoControls(VideoMessage::StepFrame(1))),
+            "," if !ctrl => Some(Message::VideoControls(VideoMessage::StepFrame(-1))),
             _ => None,
         },
         _ => None,
@@ -179,6 +181,18 @@ mod tests {
         ));
         // Bare C must not copy.
         assert!(map_press(&ch("c"), Modifiers::default()).is_none());
+    }
+
+    #[test]
+    fn frame_step_keys() {
+        assert!(matches!(
+            map_press(&ch("."), Modifiers::default()),
+            Some(Message::VideoControls(VideoMessage::StepFrame(1)))
+        ));
+        assert!(matches!(
+            map_press(&ch(","), Modifiers::default()),
+            Some(Message::VideoControls(VideoMessage::StepFrame(-1)))
+        ));
     }
 
     #[test]

@@ -195,6 +195,28 @@ pub(crate) fn seek_release(app: &mut App) -> Task<Message> {
     Task::none()
 }
 
+/// Step one frame forward (`dir` +1) or back (-1), pausing. Backward
+/// re-seeks, so it is imprecise on variable frame rates.
+pub(crate) fn step_frame(app: &mut App, dir: i32) -> Task<Message> {
+    let Some(viewer) = app.viewer_mut() else {
+        return Task::none();
+    };
+    let Some(session) = viewer.video.as_ref() else {
+        return Task::none();
+    };
+    let frame = session
+        .frame_duration()
+        .unwrap_or(std::time::Duration::from_millis(33));
+    let mut target = session.position().as_secs_f64() + frame.as_secs_f64() * f64::from(dir);
+    if let Some(duration) = session.duration() {
+        target = target.min(duration.as_secs_f64() - 0.5);
+    }
+    let mut next = session.reopen_at(std::time::Duration::from_secs_f64(target.max(0.0)));
+    next.pause();
+    viewer.video = Some(next);
+    Task::none()
+}
+
 pub(crate) fn seek_by(app: &mut App, delta: f64) -> Task<Message> {
     let Some(viewer) = app.viewer_mut() else {
         return Task::none();

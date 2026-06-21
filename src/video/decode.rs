@@ -21,11 +21,13 @@ use super::{VideoFrame, YuvFormat, YuvMatrix, YuvRange, init_ffmpeg};
 /// threads. The pipelines must not share backpressure. A full video
 /// frame queue blocking audio decode would starve the sink, freeze the
 /// audio clock, and deadlock the whole player.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_decode_thread(
     path: PathBuf,
     start: Duration,
     stop: Arc<AtomicBool>,
     duration_us: Arc<AtomicU64>,
+    frame_us: Arc<AtomicU64>,
     video_done: Arc<AtomicBool>,
     pcm_tx: mpsc::SyncSender<f32>,
     hardware: bool,
@@ -40,6 +42,7 @@ pub(crate) fn spawn_decode_thread(
             start,
             &stop,
             &duration_us,
+            &frame_us,
             &video_done,
             tx,
             pcm_tx,
@@ -64,6 +67,7 @@ fn run_pipeline(
     start: Duration,
     stop: &Arc<AtomicBool>,
     duration_us: &AtomicU64,
+    frame_us: &AtomicU64,
     video_done: &Arc<AtomicBool>,
     tx: mpsc::SyncSender<VideoFrame>,
     pcm_tx: mpsc::SyncSender<f32>,
@@ -89,6 +93,11 @@ fn run_pipeline(
         .ok_or(ffmpeg::Error::StreamNotFound)?;
     let video_index = video_stream.index();
     let video_tb = f64::from(video_stream.time_base());
+    // Frame duration for stepping, from the average frame rate.
+    let fps = f64::from(video_stream.avg_frame_rate());
+    if fps > 0.0 {
+        frame_us.store((1_000_000.0 / fps) as u64, Ordering::Relaxed);
+    }
     let mut video_context =
         ffmpeg::codec::context::Context::from_parameters(video_stream.parameters())?;
     // Frame threading only helps software decode, so enable it only when

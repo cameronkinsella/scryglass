@@ -28,24 +28,46 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Esc", "Close help / leave fullscreen / dismiss menus"),
 ];
 
+#[cfg(feature = "video")]
+const VIDEO_SHORTCUTS: &[(&str, &str)] = &[
+    ("Space", "Play / pause"),
+    ("Up / Down", "Volume"),
+    ("M", "Mute"),
+    ("J / L", "Back / forward 10s"),
+    (". / ,", "Next / previous frame"),
+];
+
 /// Render the centered help card.
 pub fn help_overlay<'a>() -> Element<'a, Message> {
     let mut rows = column![text("Keyboard shortcuts").size(16)]
         .spacing(8)
         .padding(18);
 
-    for (keys, action) in SHORTCUTS {
-        rows = rows.push(
-            row![
-                text(*keys).size(13).width(Length::Fixed(130.0)),
-                text(*action).size(13).style(theme::secondary_text),
-            ]
-            .spacing(12),
-        );
+    for &(keys, action) in SHORTCUTS {
+        rows = rows.push(shortcut_row(keys, action));
+    }
+
+    #[cfg(feature = "video")]
+    {
+        rows = rows.push(iced::widget::space::vertical().height(Length::Fixed(6.0)));
+        rows = rows.push(text("Video").size(14));
+        for &(keys, action) in VIDEO_SHORTCUTS {
+            rows = rows.push(shortcut_row(keys, action));
+        }
     }
 
     center(container(rows).style(theme::panel))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+/// One key/action line in the help card.
+fn shortcut_row<'a>(keys: &'a str, action: &'a str) -> Element<'a, Message> {
+    row![
+        text(keys).size(13).width(Length::Fixed(130.0)),
+        text(action).size(13).style(theme::secondary_text),
+    ]
+    .spacing(12)
+    .into()
 }
