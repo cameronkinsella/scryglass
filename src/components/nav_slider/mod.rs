@@ -81,7 +81,7 @@ mod widget;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::test_support::viewing_app;
+    use crate::app::test_support::{cache_thumb, viewing_app};
 
     #[test]
     fn changed_sets_a_clamped_drag_target() {
@@ -104,5 +104,37 @@ mod tests {
         let viewer = app.viewer().unwrap();
         assert!(viewer.slider_drag.is_none());
         assert_eq!(viewer.pending_nav, Some(2));
+    }
+
+    #[tokio::test]
+    async fn changed_to_a_displayable_target_scrubs_live() {
+        let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
+        cache_thumb(&mut app, "b.png", 8, 8);
+        let _ = update(&mut app, Message::Changed(1));
+        let drag = app.viewer().unwrap().slider_drag.unwrap();
+        assert_eq!(drag.target, 1);
+        assert!(!drag.bubble); // displayable, so a live scrub, no fallback bubble
+    }
+
+    #[tokio::test]
+    async fn released_on_the_current_index_completes_in_place() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        let _ = update(&mut app, Message::Changed(0));
+        let _ = update(&mut app, Message::Released);
+        assert!(app.viewer().unwrap().slider_drag.is_none());
+    }
+
+    #[test]
+    fn view_and_bubble_render_with_a_drag() {
+        use crate::app::state::SliderDrag;
+        use iced_test::simulator;
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        let _ = simulator(view(&app));
+        app.viewer_mut().unwrap().slider_drag = Some(SliderDrag {
+            target: 1,
+            bubble: true,
+        });
+        let mut ui = simulator(scrub_bubble(&app));
+        assert!(ui.find("2/2").is_ok());
     }
 }

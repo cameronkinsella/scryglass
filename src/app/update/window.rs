@@ -65,4 +65,28 @@ mod tests {
         assert!(app.viewport_size.width > 0.0 && app.viewport_size.width <= 1000.0);
         assert!(app.viewport_size.height > 0.0 && app.viewport_size.height <= 800.0);
     }
+
+    #[test]
+    fn resize_refits_an_auto_zoomed_image() {
+        use crate::app::state::DisplayedImage;
+        use crate::app::test_support::{thumb, viewing_app};
+        let mut app = viewing_app(&["a.png"], 0);
+        {
+            let v = app.viewer_mut().unwrap();
+            v.displayed = DisplayedImage::Placeholder(thumb(2000, 1000));
+            v.manual_zoom = false;
+        }
+        let _ = update(&mut app, Message::Resized(Size::new(800.0, 600.0)));
+        // The 2000-wide image is shrunk to fit the smaller viewport.
+        assert!(app.viewer().unwrap().zoom < 1.0);
+    }
+
+    #[test]
+    fn close_requested_builds_a_save_then_close_task() {
+        let mut app = empty_app();
+        let _ = update(
+            &mut app,
+            Message::CloseRequested(iced::window::Id::unique()),
+        );
+    }
 }

@@ -112,3 +112,89 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
         Message::Quit => iced::exit(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::test_support::{empty_app, viewing_app};
+
+    #[test]
+    fn close_file_empties_the_session() {
+        let mut app = viewing_app(&["a.png"], 0);
+        let _ = update(&mut app, Message::CloseFile);
+        assert!(matches!(app.session, Session::Empty));
+    }
+
+    #[test]
+    fn cancelled_file_dialog_is_a_noop() {
+        let mut app = empty_app();
+        let _ = update(&mut app, Message::FileDialogResult(None));
+        assert!(app.opening_since.is_none());
+    }
+
+    #[test]
+    fn open_file_closes_the_menu_and_builds_a_dialog() {
+        let mut app = empty_app();
+        let _ = update(&mut app, Message::OpenFile);
+        assert!(app.open_menu.is_none());
+    }
+
+    #[test]
+    fn quit_builds_an_exit_task() {
+        let mut app = empty_app();
+        let _ = update(&mut app, Message::Quit);
+    }
+
+    #[tokio::test]
+    async fn file_dropped_marks_the_open_as_in_flight() {
+        let mut app = empty_app();
+        let _ = update(&mut app, Message::FileDropped("x.png".into()));
+        assert!(app.opening_since.is_some());
+    }
+
+    #[tokio::test]
+    async fn picked_file_marks_the_open_as_in_flight() {
+        let mut app = empty_app();
+        let _ = update(&mut app, Message::FileDialogResult(Some("x.png".into())));
+        assert!(app.opening_since.is_some());
+    }
+
+    #[tokio::test]
+    async fn directory_scanned_opens_a_viewer() {
+        let mut app = empty_app();
+        app.opening_since = Some(iced::time::Instant::now());
+        let files = vec![PathBuf::from("a.png"), PathBuf::from("b.png")];
+        let _ = update(
+            &mut app,
+            Message::DirectoryScanned("a.png".into(), true, Ok(files)),
+        );
+        assert!(app.opening_since.is_none());
+        assert!(app.viewer().is_some());
+    }
+
+    #[tokio::test]
+    async fn directory_scan_error_clears_progress_and_toasts() {
+        let mut app = empty_app();
+        app.opening_since = Some(iced::time::Instant::now());
+        let before = app.toasts.len();
+        let _ = update(
+            &mut app,
+            Message::DirectoryScanned("a.png".into(), true, Err("nope".into())),
+        );
+        assert!(app.opening_since.is_none());
+        assert!(app.toasts.len() > before);
+    }
+
+    #[tokio::test]
+    async fn archive_scan_error_clears_progress_and_toasts() {
+        let mut app = empty_app();
+        app.opening_since = Some(iced::time::Instant::now());
+        let before = app.toasts.len();
+        let _ = update(
+            &mut app,
+            Message::ArchiveScanned("a.zip".into(), Err("bad".into())),
+        );
+        assert!(app.opening_since.is_none());
+        assert!(app.toasts.len() > before);
+    }
+}

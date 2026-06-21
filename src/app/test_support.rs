@@ -5,9 +5,10 @@
 use std::path::PathBuf;
 
 use iced::Size;
+use iced::widget::image::Handle;
 
 use crate::anim::AnimPlayer;
-use crate::app::state::{Session, Viewer};
+use crate::app::state::{Session, Thumb, Viewer};
 use crate::config::AppConfig;
 use crate::media::pipeline::{Pipeline, Source};
 use crate::nav::Nav;
@@ -46,4 +47,24 @@ pub(crate) fn viewing_app(names: &[&str], cursor: usize) -> App {
     let mut app = empty_app();
     app.session = Session::Viewing(Box::new(viewer));
     app
+}
+
+/// A small RGBA thumbnail built from a CPU `Handle` (no GPU upload).
+pub(crate) fn thumb(w: u32, h: u32) -> Thumb {
+    let handle = Handle::from_rgba(w, h, vec![0u8; (w * h * 4) as usize]);
+    Thumb {
+        handle,
+        size: (w, h),
+        original_size: (w, h),
+    }
+}
+
+/// Give `path` a cached thumbnail, so the viewer treats it as displayable
+/// (a blur is on hand) without any GPU upload.
+pub(crate) fn cache_thumb(app: &mut App, path: &str, w: u32, h: u32) {
+    if let Some(viewer) = app.viewer_mut() {
+        let thumb = thumb(w, h);
+        let cost = thumb.byte_cost();
+        viewer.thumbs.insert(PathBuf::from(path), thumb, cost);
+    }
 }

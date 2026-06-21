@@ -264,3 +264,81 @@ pub(crate) fn update_anim(app: &mut App, anim_msg: AnimMessage) -> Task<AppMessa
     // A pending move onto a GIF resolves once its decode lands.
     Task::batch([task.map(AppMessage::Anim), resolve_pending_nav(app)])
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+    use crate::app::test_support::{thumb, viewing_app};
+
+    #[test]
+    fn thumb_loaded_caches_the_blur_and_clears_in_flight() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        app.viewer_mut()
+            .unwrap()
+            .in_flight_thumbs
+            .insert("a.png".into());
+        let _ = update(
+            &mut app,
+            Message::ThumbLoaded {
+                path: "a.png".into(),
+                urgency: ThumbUrgency::Urgent,
+                result: Ok(thumb(4, 4)),
+            },
+        );
+        let v = app.viewer().unwrap();
+        assert!(v.thumbs.contains(Path::new("a.png")));
+        assert!(!v.in_flight_thumbs.contains(Path::new("a.png")));
+    }
+
+    #[test]
+    fn a_failed_background_thumb_is_remembered() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        let _ = update(
+            &mut app,
+            Message::ThumbLoaded {
+                path: "b.png".into(),
+                urgency: ThumbUrgency::Background,
+                result: Err(crate::media::MediaError::Unsupported),
+            },
+        );
+        assert!(
+            app.viewer()
+                .unwrap()
+                .failed_thumbs
+                .contains(Path::new("b.png"))
+        );
+    }
+
+    #[test]
+    fn file_size_probe_updates_the_current_file() {
+        let mut app = viewing_app(&["a.png"], 0);
+        let _ = update(&mut app, Message::FileSizeProbed("a.png".into(), 4096));
+        assert_eq!(app.viewer().unwrap().current_file_size, Some(4096));
+    }
+
+    #[test]
+    fn a_stale_file_size_probe_is_ignored() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        let _ = update(&mut app, Message::FileSizeProbed("b.png".into(), 4096));
+        assert_eq!(app.viewer().unwrap().current_file_size, None);
+    }
+
+    #[test]
+    fn resort_replaces_the_file_order() {
+        let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
+        let _ = update(
+            &mut app,
+            Message::Resorted(vec!["c.png".into(), "b.png".into(), "a.png".into()]),
+        );
+        assert_eq!(app.viewer().unwrap().nav.files()[0], PathBuf::from("c.png"));
+    }
+
+    #[test]
+    fn spinner_tick_changes_nothing() {
+        let mut app = viewing_app(&["a.png"], 0);
+        let _ = update(&mut app, Message::SpinnerTick);
+        assert_eq!(app.viewer().unwrap().nav.cursor(), 0);
+    }
+}

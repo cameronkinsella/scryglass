@@ -469,4 +469,25 @@ mod tests {
         assert_eq!(v.nav.cursor(), 0);
         assert_eq!(v.pending_nav, Some(1)); // still nothing to show
     }
+
+    #[test]
+    fn a_step_moves_at_once_when_the_target_has_a_blur() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        crate::app::test_support::cache_thumb(&mut app, "b.png", 4, 4);
+        let _ = navigate(&mut app, NavTarget::Delta(Direction::Forward));
+        let v = app.viewer().unwrap();
+        assert_eq!(v.nav.cursor(), 1); // b.png had a thumb, so we moved
+        assert!(v.pending_nav.is_none());
+    }
+
+    #[test]
+    fn resolve_pending_completes_once_a_blur_arrives() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        app.viewer_mut().unwrap().pending_nav = Some(1);
+        crate::app::test_support::cache_thumb(&mut app, "b.png", 4, 4);
+        let _ = resolve_pending_nav(&mut app);
+        let v = app.viewer().unwrap();
+        assert_eq!(v.nav.cursor(), 1);
+        assert!(v.pending_nav.is_none());
+    }
 }
