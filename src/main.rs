@@ -50,6 +50,7 @@ fn main() -> anyhow::Result<()> {
         })
         .window(iced::window::Settings {
             size: iced::Size::new(initial.window_width, initial.window_height),
+            min_size: Some(iced::Size::new(480.0, 420.0)),
             icon: window_icon(),
             // Route close requests through update() so config is saved on exit.
             exit_on_close_request: false,
