@@ -161,6 +161,7 @@ fn image_view(app: &App) -> Element<'_, Message> {
             )
         }
         DisplayedImage::Video { .. } => match viewer.video_frame.clone() {
+            #[cfg(feature = "video")]
             Some(frame) => ui::video_surface::view(
                 frame,
                 viewer.zoom,
@@ -168,7 +169,7 @@ fn image_view(app: &App) -> Element<'_, Message> {
                 (app.viewport_size.width, app.viewport_size.height),
                 app.config.crisp_pixels,
             ),
-            None => ui::image_display::empty_viewport(),
+            _ => ui::image_display::empty_viewport(),
         },
     };
 

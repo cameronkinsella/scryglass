@@ -5,6 +5,7 @@ pub mod icons;
 pub mod image_display;
 pub mod spinner;
 pub mod theme;
+#[cfg(feature = "video")]
 pub mod video_surface;
 
 /// Format image dimensions for display (e.g. "256 × 512 pixels").

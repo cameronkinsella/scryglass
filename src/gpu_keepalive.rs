@@ -11,7 +11,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 static DECODE_BEHIND: AtomicBool = AtomicBool::new(false);
 
 /// Flag that decode fell behind, latched for the process lifetime.
-#[cfg(feature = "video")]
 pub fn flag_decode_behind() {
     DECODE_BEHIND.store(true, Ordering::Relaxed);
 }

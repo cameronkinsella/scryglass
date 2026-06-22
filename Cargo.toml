@@ -28,8 +28,6 @@ exclude = ["shaders/yuv"]
 # allocate API behind its full image feature.
 iced = { version = "0.14", features = ["image-without-codecs", "tokio", "canvas", "wgpu"] }
 iced_runtime = "0.14"
-# Enable wgpu's SPIR-V frontend.
-wgpu = { version = "27", features = ["spirv"] }
 anyhow = "1"
 thiserror = "2"
 gif = "0.14"
@@ -71,6 +69,8 @@ libheif-rs = { version = "2.7.0", default-features = false, features = ["v1_17"]
 trash = "5.2.6"
 rodio = { version = "0.22", default-features = false, features = ["playback"], optional = true }
 ffmpeg-next = { version = "8", default-features = false, features = ["codec", "format", "software-resampling", "software-scaling"], optional = true }
+# Enable wgpu's SPIR-V frontend.
+wgpu = { version = "27", features = ["spirv"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_Foundation", "Win32_System_Com", "Win32_System_Console", "Win32_System_Ole", "Win32_System_Registry"] }
@@ -108,7 +108,7 @@ heif = ["dep:libheif-rs"]
 # Video playback via FFmpeg's libraries (in-process decode). Building
 # needs an FFmpeg dev package (FFMPEG_DIR) and libclang. With shared
 # libraries the FFmpeg DLLs must be beside the exe at runtime. Opt-in.
-video = ["dep:ffmpeg-next", "dep:rodio"]
+video = ["dep:ffmpeg-next", "dep:rodio", "dep:wgpu"]
 # Fully self-contained executable: links FFmpeg statically. Point
 # FFMPEG_DIR at a static build (e.g. vcpkg's x64-windows-static-md);
 # build.rs rejects shared builds to prevent silently DLL-dependent

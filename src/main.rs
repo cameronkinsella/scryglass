@@ -7,6 +7,7 @@ mod app;
 mod cache;
 mod components;
 mod config;
+#[cfg(feature = "video")]
 mod gpu_keepalive;
 mod media;
 mod nav;
