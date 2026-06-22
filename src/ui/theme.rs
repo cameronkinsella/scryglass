@@ -201,6 +201,25 @@ pub fn menu_item(theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// Overlay close (X): de-emphasized grey, brightens with a rounded wash on hover.
+pub fn close_button(theme: &Theme, status: button::Status) -> button::Style {
+    let t = tokens(theme);
+    let (background, text_color) = match status {
+        button::Status::Hovered => (Some(with_alpha(t.text_primary, 0.10)), t.text_primary),
+        button::Status::Pressed => (Some(with_alpha(t.text_primary, 0.16)), t.text_primary),
+        _ => (None, t.text_secondary),
+    };
+    button::Style {
+        background: background.map(Background::Color),
+        text_color,
+        border: Border {
+            radius: 6.0.into(),
+            ..Border::default()
+        },
+        ..button::Style::default()
+    }
+}
+
 /// Menu-bar tab: transparent by default, subtle highlight on hover.
 pub fn menu_tab(theme: &Theme, status: button::Status) -> button::Style {
     let t = tokens(theme);

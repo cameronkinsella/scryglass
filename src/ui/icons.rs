@@ -36,5 +36,6 @@ icons!(
     trash,
     volume_mute,
     volume_up,
+    x_lg,
     zoom_in,
 );

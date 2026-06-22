@@ -1,9 +1,9 @@
 //! Keyboard shortcut help overlay, toggled with `?`.
 
-use iced::widget::{center, column, container, row, text};
+use iced::widget::{column, container, row, text};
 use iced::{Element, Length};
 
-use crate::app::Message;
+use crate::app::{Message, ViewerMessage};
 use crate::ui::theme;
 
 const SHORTCUTS: &[(&str, &str)] = &[
@@ -56,10 +56,10 @@ pub fn help_overlay<'a>() -> Element<'a, Message> {
         }
     }
 
-    center(container(rows).style(theme::panel))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    crate::ui::overlay_card(
+        container(rows).style(theme::panel),
+        Message::Viewer(ViewerMessage::ToggleHelp),
+    )
 }
 
 /// One key/action line in the help card.

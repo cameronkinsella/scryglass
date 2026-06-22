@@ -8,6 +8,38 @@ pub mod theme;
 #[cfg(feature = "video")]
 pub mod video_surface;
 
+use iced::{Element, Length};
+
+/// Present `card` as a modal overlay: an opaque backdrop that swallows clicks,
+/// the card centered and scrollable, with a close X pinned to the top-right
+/// corner. The X stays put while the card scrolls.
+pub fn overlay_card<'a, M: Clone + 'a>(
+    card: impl Into<Element<'a, M>>,
+    on_close: M,
+) -> Element<'a, M> {
+    use iced::widget::{Stack, button, center, container, opaque, scrollable};
+
+    let close = button(icons::x_lg().size(14))
+        .on_press(on_close)
+        .padding(5)
+        .style(theme::close_button);
+
+    // Stack sizes to its base layer, so the Fill close strip pins to the
+    // card's corner without widening it.
+    opaque(
+        center(Stack::with_children(vec![
+            scrollable(card.into()).into(),
+            container(close)
+                .width(Length::Fill)
+                .align_x(iced::Alignment::End)
+                .padding(8)
+                .into(),
+        ]))
+        .width(Length::Fill)
+        .height(Length::Fill),
+    )
+}
+
 /// Format image dimensions for display (e.g. "256 × 512 pixels").
 pub fn format_dimensions(width: u32, height: u32) -> String {
     format!("{width} × {height} pixels")

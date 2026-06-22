@@ -1,6 +1,6 @@
 //! Settings dialog: the persisted knobs that don't have a menu home.
 
-use iced::widget::{button, center, column, container, row, rule, text, toggler};
+use iced::widget::{button, column, container, row, rule, text, toggler};
 use iced::{Element, Length};
 
 use crate::app::SettingsMessage;
@@ -119,20 +119,5 @@ pub fn settings<'a>(
         );
     }
 
-    rows = rows.push(rule::horizontal(1));
-    rows = rows.push(
-        container(
-            button(text("Close").size(13))
-                .on_press(SettingsMessage::Close)
-                .padding([4, 16])
-                .style(button::primary),
-        )
-        .width(Length::Fill)
-        .align_x(iced::Alignment::End),
-    );
-
-    center(container(rows).style(theme::panel))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    crate::ui::overlay_card(container(rows).style(theme::panel), SettingsMessage::Close)
 }
