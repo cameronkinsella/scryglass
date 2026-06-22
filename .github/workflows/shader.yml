@@ -1,0 +1,33 @@
+name: Shader
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - shaders/yuv/**
+      - xtask/**
+      - src/ui/video_surface/yuv.spv
+      - .github/workflows/shader.yml
+  pull_request:
+    paths:
+      - shaders/yuv/**
+      - xtask/**
+      - src/ui/video_surface/yuv.spv
+      - .github/workflows/shader.yml
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  drift:
+    name: SPIR-V up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # cargo-gpu installs the matching nightly and builds the backend itself.
+      - run: cargo install --git https://github.com/Rust-GPU/rust-gpu --tag v0.10.0-alpha.1 cargo-gpu
+      - run: cargo xtask build-shaders
+      - name: Fail if the committed yuv.spv is stale
+        run: git diff --exit-code -- src/ui/video_surface/yuv.spv
