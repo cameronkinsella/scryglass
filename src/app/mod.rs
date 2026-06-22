@@ -98,6 +98,8 @@ pub struct App {
     pub(crate) window_size: Size,
     /// Context menu position (window coords). `Some` when visible.
     pub(crate) context_menu_pos: Option<iced::Point>,
+    /// Whether the footer zoom slider pop-up is open.
+    pub(crate) zoom_slider_open: bool,
     /// Whether the window is borderless fullscreen (chrome hidden).
     pub(crate) fullscreen: bool,
     /// Whether the shortcut help overlay is open.

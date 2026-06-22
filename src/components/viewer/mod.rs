@@ -16,6 +16,10 @@ pub enum Message {
     ZoomStep(i8),
     ZoomActual,
     ResetZoom,
+    SetZoom(f32),
+    ToggleZoomSlider,
+    CloseZoomSlider,
+    NudgeZoom(i32),
     ToggleFullscreen,
     ToggleInfo,
     Rotate(u8),
@@ -32,7 +36,9 @@ use iced::time::Instant;
 
 use crate::app::state::{Direction, DisplayedImage, DragState};
 use crate::app::update::{NavTarget, fire_exif, fire_rotate, navigate, save_config};
-use crate::app::viewer_math::{clamp_pan, compute_zoom, pan_for_zoom_toward_cursor};
+use crate::app::viewer_math::{
+    clamp_pan, compute_zoom, nudge_zoom_percent, pan_for_zoom_toward_cursor,
+};
 use crate::app::{App, Message as AppMessage, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, recalc_viewport};
 
 pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
@@ -97,6 +103,10 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
         Message::Escape => {
             if app.modal.is_some() {
                 app.modal = None;
+                return Task::none();
+            }
+            if app.zoom_slider_open {
+                app.zoom_slider_open = false;
                 return Task::none();
             }
             if app.help_open {
@@ -219,6 +229,32 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             }
             Task::none()
         }
+        Message::SetZoom(zoom) => {
+            apply_zoom(app, zoom);
+            Task::none()
+        }
+        Message::ToggleZoomSlider => {
+            if app.zoom_slider_open {
+                app.zoom_slider_open = false;
+            } else if app
+                .viewer()
+                .and_then(|v| v.displayed.original_size())
+                .is_some()
+            {
+                app.zoom_slider_open = true;
+            }
+            Task::none()
+        }
+        Message::CloseZoomSlider => {
+            app.zoom_slider_open = false;
+            Task::none()
+        }
+        Message::NudgeZoom(dir) => {
+            if let Some(zoom) = app.viewer().map(|v| v.zoom) {
+                apply_zoom(app, nudge_zoom_percent(zoom, dir, ZOOM_MIN, ZOOM_MAX));
+            }
+            Task::none()
+        }
         Message::DragStart => {
             let cursor = app.last_cursor_pos;
             let Some(viewer) = app.viewer_mut() else {
@@ -294,6 +330,27 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
     }
 }
 
+/// Set an absolute zoom factor, zooming toward the viewport center.
+fn apply_zoom(app: &mut App, zoom: f32) {
+    let viewport = app.viewport_size;
+    let Some(viewer) = app.viewer_mut() else {
+        return;
+    };
+    let old = viewer.zoom;
+    let new = zoom.clamp(ZOOM_MIN, ZOOM_MAX);
+    if (new - old).abs() < f32::EPSILON {
+        return;
+    }
+    viewer.zoom = new;
+    viewer.manual_zoom = true;
+    viewer.pan = pan_for_zoom_toward_cursor(viewer.pan, new / old, (0.0, 0.0));
+    if let Some((w, h)) = viewer.displayed.original_size() {
+        let img_w = w as f32 * new;
+        let img_h = h as f32 * new;
+        viewer.pan = clamp_pan(viewer.pan, img_w, img_h, viewport);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,6 +401,55 @@ mod tests {
         let _ = update(&mut app, Message::ResetZoom);
         assert!(!viewer(&app).manual_zoom);
         assert_eq!(viewer(&app).pan, (0.0, 0.0));
+    }
+
+    #[test]
+    fn set_zoom_clamps_and_marks_manual() {
+        let mut app = viewing_app(&["a.png"], 0);
+        let _ = update(&mut app, Message::SetZoom(999.0));
+        assert_eq!(viewer(&app).zoom, ZOOM_MAX);
+        assert!(viewer(&app).manual_zoom);
+    }
+
+    #[test]
+    fn nudge_zoom_steps_a_single_percent() {
+        let mut app = viewing_app(&["a.png"], 0);
+        app.viewer_mut().unwrap().zoom = 0.62;
+        let _ = update(&mut app, Message::NudgeZoom(1));
+        assert!((viewer(&app).zoom - 0.63).abs() < 1e-5);
+        assert!(viewer(&app).manual_zoom);
+    }
+
+    #[test]
+    fn zoom_slider_opens_only_with_a_displayed_image() {
+        let mut app = viewing_app(&["a.png"], 0);
+        // Nothing displayed yet: toggling is a no-op.
+        let _ = update(&mut app, Message::ToggleZoomSlider);
+        assert!(!app.zoom_slider_open);
+
+        app.viewer_mut().unwrap().displayed = DisplayedImage::Video {
+            original_size: (100, 100),
+        };
+        let _ = update(&mut app, Message::ToggleZoomSlider);
+        assert!(app.zoom_slider_open);
+        let _ = update(&mut app, Message::ToggleZoomSlider);
+        assert!(!app.zoom_slider_open);
+    }
+
+    #[test]
+    fn escape_closes_the_zoom_slider() {
+        let mut app = viewing_app(&["a.png"], 0);
+        app.zoom_slider_open = true;
+        let _ = update(&mut app, Message::Escape);
+        assert!(!app.zoom_slider_open);
+    }
+
+    #[test]
+    fn close_zoom_slider_closes_it() {
+        let mut app = viewing_app(&["a.png"], 0);
+        app.zoom_slider_open = true;
+        let _ = update(&mut app, Message::CloseZoomSlider);
+        assert!(!app.zoom_slider_open);
     }
 
     #[test]

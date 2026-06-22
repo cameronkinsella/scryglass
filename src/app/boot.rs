@@ -44,6 +44,7 @@ pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Message>) {
         last_cursor_pos: iced::Point::ORIGIN,
         window_size: Size::new(800.0, 600.0),
         context_menu_pos: None,
+        zoom_slider_open: false,
         fullscreen: false,
         help_open: false,
         modal: None,

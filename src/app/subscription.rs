@@ -140,6 +140,11 @@ fn handle_event(event: Event, _status: event::Status, _id: window::Id) -> Option
             Some(Message::Window(WindowMessage::Resized(*size)))
         }
 
+        // --- Window lost focus: close the zoom pop-up ---
+        Event::Window(window::Event::Unfocused) => {
+            Some(Message::Viewer(ViewerMessage::CloseZoomSlider))
+        }
+
         _ => None,
     }
 }

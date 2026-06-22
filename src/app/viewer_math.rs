@@ -58,6 +58,13 @@ pub fn pan_for_zoom_toward_cursor(pan: (f32, f32), ratio: f32, d: (f32, f32)) ->
     )
 }
 
+/// Step `zoom` by `dir` whole percentage points, snapping to a whole
+/// percent so repeated steps stay exact (0.62 -> 0.63).
+pub fn nudge_zoom_percent(zoom: f32, dir: i32, min: f32, max: f32) -> f32 {
+    let pct = (zoom * 100.0).round() as i32 + dir;
+    (pct as f32 / 100.0).clamp(min, max)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,5 +212,25 @@ mod tests {
         let after = ((d.0 - new_pan.0) / new_zoom, (d.1 - new_pan.1) / new_zoom);
         assert!((before.0 - after.0).abs() < 1e-4);
         assert!((before.1 - after.1).abs() < 1e-4);
+    }
+
+    // --- nudge_zoom_percent ---
+
+    #[test]
+    fn nudge_zoom_percent_steps_one_whole_percent() {
+        assert!((nudge_zoom_percent(0.62, 1, 0.01, 50.0) - 0.63).abs() < 1e-6);
+        assert!((nudge_zoom_percent(0.62, -1, 0.01, 50.0) - 0.61).abs() < 1e-6);
+    }
+
+    #[test]
+    fn nudge_zoom_percent_rounds_a_fractional_zoom_first() {
+        // 62.4% rounds to 62, then +1 lands exactly on 63%.
+        assert!((nudge_zoom_percent(0.624, 1, 0.01, 50.0) - 0.63).abs() < 1e-6);
+    }
+
+    #[test]
+    fn nudge_zoom_percent_clamps_to_bounds() {
+        assert_eq!(nudge_zoom_percent(0.01, -1, 0.01, 50.0), 0.01);
+        assert_eq!(nudge_zoom_percent(50.0, 1, 0.01, 50.0), 50.0);
     }
 }

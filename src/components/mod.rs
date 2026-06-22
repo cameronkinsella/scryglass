@@ -10,6 +10,7 @@ pub mod toasts;
 pub mod toolbar;
 pub mod video_controls;
 pub mod viewer;
+pub mod zoom_slider;
 
 pub(crate) fn empty<'a, Message: 'a>() -> iced::Element<'a, Message> {
     iced::widget::column![]

@@ -2,10 +2,10 @@
 
 use std::time::Duration;
 
-use iced::widget::{container, row, space, text};
+use iced::widget::{button, container, row, space, text};
 use iced::{Alignment, Element, Length};
 
-use crate::app::Message;
+use crate::app::{Message, ViewerMessage};
 use crate::ui::theme;
 
 /// Render the footer bar. Items have minimum widths so positions stay
@@ -33,9 +33,18 @@ pub fn footer<'a>(
     .align_y(Alignment::Center)
     .width(Length::Fixed(90.0));
 
-    let zoom_item = row![icons::zoom_in().size(13), text(format!(" {zoom}")).size(13),]
-        .align_y(Alignment::Center)
-        .width(Length::Fixed(70.0));
+    // Fixed-width container so the footer doesn't shift as the % changes.
+    let zoom_item = container(
+        button(
+            row![icons::zoom_in().size(13), text(zoom.to_string()).size(13)]
+                .spacing(4)
+                .align_y(Alignment::Center),
+        )
+        .on_press(Message::Viewer(ViewerMessage::ToggleZoomSlider))
+        .padding([2, 6])
+        .style(theme::menu_item),
+    )
+    .width(Length::Fixed(74.0));
 
     let position_item = row![
         icons::images().size(13),
@@ -66,4 +75,29 @@ pub fn footer<'a>(
         .width(Length::Fill)
         .style(theme::surface)
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::footer;
+    use iced_test::simulator;
+    use std::time::Duration;
+
+    #[test]
+    fn shows_the_zoom_readout() {
+        let mut ui = simulator(footer("256 × 512 pixels", "1.2 MB", "100%", "3 / 10", None));
+        assert!(ui.find("100%").is_ok());
+    }
+
+    #[test]
+    fn renders_with_a_loading_spinner() {
+        let mut ui = simulator(footer(
+            "…",
+            "…",
+            "50%",
+            "1 / 1",
+            Some(Duration::from_millis(500)),
+        ));
+        assert!(ui.find("50%").is_ok());
+    }
 }
