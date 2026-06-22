@@ -153,6 +153,8 @@ pub fn drop_prompt<'a>() -> Element<'a, Message> {
     center(
         text("Drop an image here to begin")
             .size(24)
+            .width(Length::Fill)
+            .center()
             .style(crate::ui::theme::secondary_text),
     )
     .width(Length::Fill)
@@ -278,5 +280,20 @@ mod tests {
             display_math(1.0, (0.0, 0.0), VP, (0, 100), (0, 100)),
             DisplayMath::Empty
         );
+    }
+
+    #[test]
+    fn drop_prompt_invites_the_user() {
+        use iced_test::simulator;
+        let mut ui = simulator(super::drop_prompt());
+        assert!(ui.find("Drop an image here to begin").is_ok());
+    }
+
+    #[test]
+    fn image_display_builds_fit_crop_and_empty_paths() {
+        let handle = Handle::from_rgba(4, 4, vec![0u8; 4 * 4 * 4]);
+        let _ = image_display(&handle, (4, 4), (4, 4), 1.0, (0.0, 0.0), VP, false);
+        let _ = image_display(&handle, (4, 4), (4000, 3000), 5.0, (0.0, 0.0), VP, true);
+        let _ = image_display(&handle, (4, 4), (4, 4), 0.0, (0.0, 0.0), VP, false);
     }
 }
