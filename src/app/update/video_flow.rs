@@ -229,6 +229,7 @@ pub(crate) fn seek_by(app: &mut App, delta: f64) -> Task<Message> {
         target = target.min(duration.as_secs_f64() - 0.5);
     }
     viewer.video = Some(session.reopen_at(std::time::Duration::from_secs_f64(target.max(0.0))));
+    viewer.video_controls_until = Some(Instant::now() + VIDEO_CONTROLS_TIMEOUT);
     Task::none()
 }
 
@@ -245,6 +246,11 @@ pub(crate) fn set_volume(app: &mut App, volume: f32) -> Task<Message> {
 
 pub(crate) fn nudge_volume(app: &mut App, delta: f32) -> Task<Message> {
     let volume = (app.config.video_volume + delta).clamp(0.0, 1.0);
+    if let Some(viewer) = app.viewer_mut()
+        && viewer.video.is_some()
+    {
+        viewer.video_controls_until = Some(Instant::now() + VIDEO_CONTROLS_TIMEOUT);
+    }
     set_volume(app, volume)
 }
 
