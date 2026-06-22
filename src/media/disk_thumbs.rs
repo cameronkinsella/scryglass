@@ -53,7 +53,7 @@ impl DiskThumbs {
         if !enabled {
             return None;
         }
-        let root = dirs::cache_dir()?.join("scryglass").join("thumbs");
+        let root = store_root()?;
         fs::create_dir_all(&root).ok()?;
         Some(Self { root })
     }
@@ -204,17 +204,32 @@ impl DiskThumbs {
     /// Total bytes used on disk (settings display). Blocking, run on a
     /// worker. Local cache directory only.
     pub fn total_size(&self) -> u64 {
-        let Ok(buckets) = fs::read_dir(&self.root) else {
-            return 0;
-        };
-        buckets
-            .flatten()
-            .filter_map(|bucket| fs::read_dir(bucket.path()).ok())
-            .flat_map(|files| files.flatten())
-            .filter_map(|file| file.metadata().ok())
-            .map(|meta| meta.len())
-            .sum()
+        dir_size(&self.root)
     }
+}
+
+/// The cache root, whether or not the store is currently enabled.
+fn store_root() -> Option<PathBuf> {
+    Some(dirs::cache_dir()?.join("scryglass").join("thumbs"))
+}
+
+/// Total bytes under `root`, summing the two-level bucket layout.
+fn dir_size(root: &Path) -> u64 {
+    let Ok(buckets) = fs::read_dir(root) else {
+        return 0;
+    };
+    buckets
+        .flatten()
+        .filter_map(|bucket| fs::read_dir(bucket.path()).ok())
+        .flat_map(|files| files.flatten())
+        .filter_map(|file| file.metadata().ok())
+        .map(|meta| meta.len())
+        .sum()
+}
+
+/// On-disk store size, even when the setting is off (the store survives it).
+pub fn store_size_on_disk() -> u64 {
+    store_root().map(|root| dir_size(&root)).unwrap_or(0)
 }
 
 fn encode_entry(

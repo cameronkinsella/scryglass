@@ -11,15 +11,29 @@ pub(crate) fn save_config(app: &App) -> Task<Message> {
 
 /// Measure the disk thumbnail store, off-thread.
 pub(crate) fn probe_disk_cache_size(pipeline: &Pipeline) -> Task<Message> {
-    let Some(disk) = pipeline.disk() else {
-        return Task::done(Message::Settings(SettingsMessage::DiskCacheSize(0)));
-    };
+    let disk = pipeline.disk();
     Task::perform(
         async move {
-            tokio::task::spawn_blocking(move || disk.total_size())
-                .await
-                .unwrap_or(0)
+            tokio::task::spawn_blocking(move || match &disk {
+                Some(d) => d.total_size(),
+                None => crate::media::disk_thumbs::store_size_on_disk(),
+            })
+            .await
+            .unwrap_or(0)
         },
         |bytes| Message::Settings(SettingsMessage::DiskCacheSize(bytes)),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::test_support::empty_app;
+
+    #[test]
+    fn save_and_probe_build_background_tasks() {
+        let app = empty_app();
+        let _ = save_config(&app);
+        let _ = probe_disk_cache_size(&app.pipeline);
+    }
 }

@@ -42,3 +42,7 @@ impl DiskThumbs {
         0
     }
 }
+
+pub fn store_size_on_disk() -> u64 {
+    0
+}
