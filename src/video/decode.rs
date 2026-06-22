@@ -100,8 +100,7 @@ fn run_pipeline(
     }
     let mut video_context =
         ffmpeg::codec::context::Context::from_parameters(video_stream.parameters())?;
-    // Frame threading only helps software decode, so enable it only when
-    // hardware isn't attached.
+    // Frame threading only helps software decode.
     let hw_active = hardware && try_init_hw(&mut video_context);
     if !hw_active {
         video_context.set_threading(ffmpeg::codec::threading::Config::kind(
@@ -347,7 +346,7 @@ fn send_video_frame(
 }
 
 /// Map a frame PTS onto the session timeline, or None to drop it. Frames
-/// before a seek target are dropped; the first kept one rebases to zero so
+/// before the seek target drop. The first kept frame rebases to zero so
 /// it shows at once.
 fn rebase_pts(pts: f64, base: f64, origin: &mut Option<f64>) -> Option<f64> {
     if pts < base {

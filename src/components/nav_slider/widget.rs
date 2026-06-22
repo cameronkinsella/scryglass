@@ -1,9 +1,5 @@
-//! Navigation slider: horizontal slider for direct cursor positioning,
-//! plus the scrub preview bubble.
-//!
-//! During a drag the thumb follows the hand freely (the caller passes the
-//! drag target as `value`). Navigation commits on release. The bubble is
-//! the fallback preview for files that can't be shown live mid-drag.
+//! Navigation slider for direct cursor positioning, plus the scrub
+//! preview bubble for files that can't be shown live mid-drag.
 
 use std::path::PathBuf;
 
@@ -105,4 +101,37 @@ pub fn scrub_bubble<'a>(
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{nav_slider, scrub_bubble};
+    use crate::app::test_support::{cache_thumb, viewing_app};
+    use iced::Size;
+    use iced_test::simulator;
+    use std::path::PathBuf;
+
+    #[test]
+    fn nav_slider_builds_for_single_and_many() {
+        let _ = nav_slider(0, 1);
+        let _ = nav_slider(3, 10);
+    }
+
+    #[test]
+    fn scrub_bubble_shows_position_with_and_without_a_thumb() {
+        let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
+        cache_thumb(&mut app, "a.png", 8, 8);
+        let files: Vec<PathBuf> = ["a.png", "b.png", "c.png"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        let viewer = app.viewer().unwrap();
+        let window = Size::new(800.0, 600.0);
+
+        let mut cached = simulator(scrub_bubble(&files, 0, &viewer.thumbs, window, true));
+        assert!(cached.find("1/3").is_ok());
+
+        let mut uncached = simulator(scrub_bubble(&files, 1, &viewer.thumbs, window, false));
+        assert!(uncached.find("2/3").is_ok());
+    }
 }

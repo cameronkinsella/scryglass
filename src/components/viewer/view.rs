@@ -25,7 +25,6 @@ pub(crate) fn view(app: &App) -> Element<'_, Message> {
 
             let image_view = image_view(app);
 
-            // Wrap image area in mouse_area for scroll, drag, double-click, and right-click.
             let interactive = mouse_area(image_view)
                 .on_press(Message::Viewer(viewer::Message::DragStart))
                 .on_right_press(Message::ContextMenu(context_menu::Message::Show))

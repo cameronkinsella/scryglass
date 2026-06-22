@@ -115,8 +115,7 @@ pub struct AppConfig {
     pub sort_key: SortKey,
     /// Reverse the sort order.
     pub sort_desc: bool,
-    /// Render with nearest-neighbor sampling when zoomed past 100%,
-    /// crisp pixels for pixel art instead of smoothing.
+    /// Nearest-neighbor sampling past 100% zoom: crisp pixels for pixel art.
     pub crisp_pixels: bool,
     /// Persist thumbnails on disk between sessions (warm folders open
     /// instantly). Reconciled against deleted files, expired after 90

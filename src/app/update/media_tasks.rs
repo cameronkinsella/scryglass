@@ -12,10 +12,9 @@ use crate::media::pipeline::{Lane, Pipeline, Source, ThumbUrgency};
 use crate::media::registry::DecodeOpts;
 use crate::media::{DecodedMedia, MediaError};
 
-/// Rotate the displayed texture to match the desired view rotation.
-/// Rotation happens on the pixels (off-thread) so every bit of zoom, pan,
-/// and crop math keeps working on the rotated dimensions unchanged. The
-/// cache keeps the unrotated original.
+/// Rotate the displayed texture to the desired view rotation, off-thread.
+/// Rotating the pixels (not the geometry) leaves zoom, pan, and crop math
+/// unchanged. The cache keeps the unrotated original.
 pub(crate) fn fire_rotate(viewer: &mut Viewer) -> Task<Message> {
     if viewer.rotation == viewer.displayed_rotation {
         return Task::none();
@@ -134,9 +133,9 @@ pub(crate) fn show_loaded(
     viewer.pending_since = None;
 }
 
-/// Put a blurred thumbnail on screen while the full image decodes. Zoom is
-/// computed from the true dimensions, so geometry is identical when the
-/// full image swaps in, no jump. The load stays pending (spinner included).
+/// Show a placeholder thumbnail while the full image loads. Zoom uses the
+/// true dimensions, so geometry is identical when the full image swaps in
+/// (no jump). The load stays pending.
 pub(crate) fn show_placeholder(
     viewer: &mut Viewer,
     path: &std::path::Path,
@@ -365,7 +364,7 @@ pub(crate) fn probe_size(viewer: &mut Viewer, path: PathBuf) -> Task<Message> {
     }
 }
 
-/// Fetch the file size off-thread, a stat on slow storage can stall for seconds and
+/// Fetch the file size off-thread. A stat on slow storage can stall, and
 /// must never run inside `update()`.
 fn probe_file_size(path: PathBuf) -> Task<Message> {
     Task::perform(

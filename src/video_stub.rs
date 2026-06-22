@@ -1,6 +1,5 @@
-//! No-op stand-in for video playback when the `video` cargo feature is
-//! disabled. Same API surface, but `is_video` never matches, so a session is
-//! never constructed and the methods are unreachable.
+//! No-op stand-in for video when the `video` feature is off. `is_video`
+//! never matches, so the other methods are never reached.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

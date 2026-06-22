@@ -34,9 +34,6 @@ struct ActiveAnim {
 }
 
 /// Manages decoded-animation caching and playback.
-///
-/// Message-driven: call `update()` with an [`AnimMessage`], get back a
-/// follow-up task and (possibly) an allocation to display.
 pub struct AnimPlayer {
     /// Decoded animations, keyed by path, fed by pipeline loads.
     cache: HashMap<PathBuf, Arc<AnimatedImage>>,
@@ -57,11 +54,8 @@ impl AnimPlayer {
         self.cache.insert(path, anim);
     }
 
-    /// Handle an `AnimMessage`. `current_path` is the path the app is
-    /// viewing. Stale messages are discarded against it.
-    ///
-    /// Returns `(task, allocation_ready)`: follow-up async work, and an
-    /// allocation the caller should display if `Some`.
+    /// Handle an `AnimMessage`. Messages stale against `current_path` are
+    /// discarded. Returns follow-up work and an allocation to display, if any.
     pub fn update(
         &mut self,
         msg: AnimMessage,
@@ -107,9 +101,8 @@ impl AnimPlayer {
         }
     }
 
-    /// Begin playback for `path` if its decode is cached: composites
-    /// frame 0 and returns the allocation task. `None` means the caller
-    /// should fire a pipeline load.
+    /// Begin playback if `path`'s decode is cached (composites frame 0).
+    /// `None` means the caller should fire a pipeline load.
     pub fn try_start_from_cache(&mut self, path: &Path) -> Option<Task<AnimMessage>> {
         let decoded = self.cache.get(path)?.clone();
         Some(self.start_display(decoded, path))

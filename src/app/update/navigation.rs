@@ -418,8 +418,8 @@ pub(crate) fn complete_navigation(
     viewer.cache.evict_over_budget(&pinned);
 
     if show_filmstrip {
-        // Move the strip only enough to keep the cursor on screen; otherwise
-        // hold it where it is. Warm whatever thumbs become visible.
+        // Move the strip only enough to keep the cursor on screen, otherwise
+        // hold it. Warm whatever thumbs become visible.
         let offset = crate::components::filmstrip::keep_visible_offset(
             viewer.filmstrip_scroll_x,
             viewer.nav.cursor(),

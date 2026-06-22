@@ -8,14 +8,8 @@ use iced::{Alignment, Element, Length};
 use crate::app::Message;
 use crate::ui::theme;
 
-/// Render the bottom footer bar.
-///
-/// Left side: image dimensions + file size (with icons).
-/// Right side: an unobtrusive loading spinner while something is pending,
-/// then zoom percentage + position in directory (with icons).
-///
-/// Each item has a minimum width so positions stay stable across
-/// typical values. Unusually large values will push items apart.
+/// Render the footer bar. Items have minimum widths so positions stay
+/// stable as values change.
 pub fn footer<'a>(
     dimensions: &str,
     file_size: &str,

@@ -166,11 +166,9 @@ pub struct FileMeta {
     pub size: u64,
 }
 
-/// Compare file names the way the platform's file manager does. On
-/// Windows that is StrCmpLogicalW, the exact ordering Explorer uses
-/// (punctuation before digits, numeric runs by value, case ignored).
-/// Elsewhere fall back to a natural case-insensitive compare, which is
-/// close to what Finder and the common Linux file managers do.
+/// Compare file names the way the platform's file manager does:
+/// StrCmpLogicalW on Windows (Explorer's ordering), a natural
+/// case-insensitive compare elsewhere.
 #[cfg(windows)]
 pub fn name_cmp(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> std::cmp::Ordering {
     use std::os::windows::ffi::OsStrExt;

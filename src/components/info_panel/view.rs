@@ -9,11 +9,7 @@ use crate::ui::theme;
 /// Width of the panel in logical pixels (the viewport math subtracts it).
 pub const WIDTH: f32 = 280.0;
 
-/// Render the info panel.
-///
-/// * `file_name`: the current file's name.
-/// * `details`: general rows (dimensions, size, position…).
-/// * `exif`: curated EXIF rows, or `None` while the probe is running.
+/// Render the info panel. `exif` is `None` while the probe is still running.
 pub fn info_panel<'a>(
     file_name: &str,
     details: &[(String, String)],
@@ -61,4 +57,34 @@ pub fn info_panel<'a>(
         .height(Length::Fill)
         .style(theme::surface)
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::info_panel;
+    use iced_test::simulator;
+
+    fn details() -> Vec<(String, String)> {
+        vec![("Dimensions".to_string(), "256 × 512 pixels".to_string())]
+    }
+
+    #[test]
+    fn shows_file_name_and_details_while_exif_pending() {
+        let mut ui = simulator(info_panel("photo.jpg", &details(), None));
+        assert!(ui.find("photo.jpg").is_ok());
+        assert!(ui.find("256 × 512 pixels").is_ok());
+    }
+
+    #[test]
+    fn notes_when_there_is_no_camera_metadata() {
+        let mut ui = simulator(info_panel("photo.jpg", &details(), Some(&[])));
+        assert!(ui.find("No camera metadata").is_ok());
+    }
+
+    #[test]
+    fn lists_exif_fields_when_present() {
+        let exif = [("Camera".to_string(), "Acme One".to_string())];
+        let mut ui = simulator(info_panel("photo.jpg", &details(), Some(&exif)));
+        assert!(ui.find("Acme One").is_ok());
+    }
 }

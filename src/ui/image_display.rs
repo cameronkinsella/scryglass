@@ -54,9 +54,8 @@ pub(crate) fn display_math(
     let zoomed_w = img_w * zoom;
     let zoomed_h = img_h * zoom;
 
-    // If the zoomed image fits entirely within the viewport, no cropping
-    // is needed. Show the whole texture, scaled so its on-screen size
-    // equals the zoomed original.
+    // The zoomed image fits the viewport: no crop, just scale the whole
+    // texture to the zoomed size.
     if zoomed_w <= vp_w && zoomed_h <= vp_h {
         // ContentFit::Contain in a Fill layout shows the texture at
         // min(vp/tex) scale, so correct it to hit the target size.

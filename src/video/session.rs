@@ -1,7 +1,6 @@
-//! The playback session. It owns the decode threads and the master clock,
-//! plus the temp-file lifecycle for extracted archive entries. Polling
-//! hands the UI the newest frame due for display; dropping the session
-//! stops the threads.
+//! The playback session. It owns the decode threads, the master clock, and
+//! the temp-file lifecycle for extracted archive entries. Polling hands the
+//! UI the newest frame due. Dropping the session stops the threads.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

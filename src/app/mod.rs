@@ -147,7 +147,7 @@ pub enum Modal {
     Settings,
 }
 
-/// Theme function: returns the active theme from config.
+/// The active theme, from config.
 pub fn theme(app: &App) -> iced::Theme {
     match app.config.theme {
         crate::config::ThemeChoice::Dark => ui::theme::dark(),
@@ -155,11 +155,8 @@ pub fn theme(app: &App) -> iced::Theme {
     }
 }
 
-/// Title function: returns the window title based on current state.
-///
-/// When the footer is hidden, the title bar includes the info that
-/// would normally appear in the footer: file index, zoom, dimensions,
-/// and file size.
+/// The window title. With the footer hidden, it also carries the
+/// footer's info: file index, zoom, dimensions, and size.
 pub fn title(app: &App) -> String {
     let Some(viewer) = app.viewer() else {
         return String::new();

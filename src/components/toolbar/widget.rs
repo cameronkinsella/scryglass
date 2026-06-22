@@ -1,9 +1,5 @@
-//! Toolbar widget: "File", "Zoom", and "Layout" dropdown menus.
-//!
-//! Renders a menu-bar style row. Clicking a tab toggles a dropdown that
-//! floats over the content below. Menu items are flat, borderless buttons
-//! with a subtle hover highlight, matching the look of a native menu bar.
-//! All colors come from [`crate::ui::theme`].
+//! Toolbar: "File", "Zoom", and "Layout" dropdown menus, styled to look
+//! like a native menu bar.
 
 use iced::widget::{button, column, container, row, rule, text, toggler};
 use iced::{Alignment, Element, Length, Padding};
@@ -256,5 +252,95 @@ pub fn dropdown<'a>(
 
             Some(positioned.into())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{SortKey, ZoomMode};
+    use iced_test::simulator;
+
+    fn vis() -> LayoutVisibility {
+        LayoutVisibility {
+            show_filmstrip: true,
+            show_slider: true,
+            show_footer: true,
+            show_info: false,
+            show_checkerboard: false,
+        }
+    }
+
+    fn open(menu: OpenMenu) -> Element<'static, Message> {
+        dropdown(
+            Some(menu),
+            ZoomMode::Auto,
+            vis(),
+            false,
+            false,
+            SortKey::Name,
+            true,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn menu_bar_shows_every_tab() {
+        let mut ui = simulator(menu_bar(None));
+        for tab in ["File", "Zoom", "Sort", "Layout"] {
+            assert!(ui.find(tab).is_ok(), "missing tab: {tab}");
+        }
+    }
+
+    #[test]
+    fn no_dropdown_without_an_open_menu() {
+        assert!(
+            dropdown(
+                None,
+                ZoomMode::Auto,
+                vis(),
+                false,
+                false,
+                SortKey::Name,
+                false
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn file_dropdown_lists_its_actions() {
+        let mut ui = simulator(open(OpenMenu::File));
+        assert!(ui.find("Open…").is_ok());
+        assert!(ui.find("Settings…").is_ok());
+        assert!(ui.find("Quit").is_ok());
+    }
+
+    #[test]
+    fn zoom_dropdown_offers_crisp_pixels() {
+        let mut ui = simulator(open(OpenMenu::Zoom));
+        assert!(ui.find("Crisp pixels when zoomed").is_ok());
+    }
+
+    #[test]
+    fn sort_dropdown_offers_descending() {
+        let mut ui = simulator(open(OpenMenu::Sort));
+        assert!(ui.find("Descending").is_ok());
+    }
+
+    #[test]
+    fn layout_dropdown_builds() {
+        assert!(
+            dropdown(
+                Some(OpenMenu::Layout),
+                ZoomMode::Auto,
+                vis(),
+                true,
+                false,
+                SortKey::Name,
+                false
+            )
+            .is_some()
+        );
     }
 }

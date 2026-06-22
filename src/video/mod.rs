@@ -1,14 +1,12 @@
 //! Video playback via FFmpeg's libraries (cargo feature `video`).
 //!
 //! One session thread demuxes the file in-process. Video packets decode on
-//! the GPU's fixed-function block when the platform and codec allow,
-//! otherwise multithreaded software, into planar YUV that flows through a
-//! bounded channel for backpressure; the GPU converts it to RGB at display.
-//! Audio packets decode and resample to f32 PCM consumed by a rodio sink on
-//! its own thread. The sink's position is the master clock. Files without
-//! audio fall back to a pause-aware wall clock. Seeking opens a fresh
-//! session at the target (`avformat` seek before decode begins). No
-//! external processes are involved anywhere.
+//! the GPU when the platform and codec allow, otherwise on multithreaded
+//! software, into planar YUV that flows through a bounded channel to the GPU
+//! converter. Audio decodes and resamples to f32 PCM for a rodio sink on its
+//! own thread, whose position is the master clock. Files without audio use a
+//! pause-aware wall clock. Seeking opens a fresh session at the target. No
+//! external processes are involved.
 
 use std::path::Path;
 use std::time::Duration;

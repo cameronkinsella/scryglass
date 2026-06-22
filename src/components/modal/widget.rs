@@ -72,3 +72,25 @@ fn overlay(card: Element<'_, ModalMessage>) -> Element<'_, ModalMessage> {
         .height(Length::Fill)
         .into()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{confirm_delete, rename_dialog, rename_input_id};
+    use iced_test::simulator;
+
+    #[test]
+    fn confirm_delete_names_the_file_and_offers_choices() {
+        let mut ui = simulator(confirm_delete("photo.jpg"));
+        assert!(ui.find("Move to Recycle Bin?").is_ok());
+        assert!(ui.find("photo.jpg").is_ok());
+        assert!(ui.find("Delete").is_ok());
+        assert!(ui.find("Cancel").is_ok());
+    }
+
+    #[test]
+    fn rename_dialog_builds_with_a_stable_input_id() {
+        let _ = rename_input_id();
+        let mut ui = simulator(rename_dialog("photo.jpg"));
+        assert!(ui.find("Cancel").is_ok());
+    }
+}

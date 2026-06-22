@@ -61,9 +61,8 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             let Some(viewer) = app.viewer() else {
                 return Task::none();
             };
-            // Copy the displayed pixels as a real bitmap. It works for any
-            // source (archives included) and pastes into image editors.
-            // Video grabs its current frame, converted off the UI thread.
+            // Copy the displayed pixels as a real bitmap (works for any
+            // source). Video grabs its current frame off the UI thread.
             let task = match &viewer.displayed {
                 DisplayedImage::Full { allocation, .. } => {
                     let handle = allocation.handle().clone();
@@ -188,5 +187,40 @@ mod tests {
         let _ = update(&mut app, Message::CopyImage);
         assert!(app.context_menu_pos.is_none());
         assert_eq!(app.toasts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn copy_image_finished_toasts_on_success_and_failure() {
+        let mut app = viewing_app(&["a.png"], 0);
+        let _ = update(&mut app, Message::CopyImageFinished(Ok(())));
+        let _ = update(&mut app, Message::CopyImageFinished(Err("nope".into())));
+        assert_eq!(app.toasts.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn copy_file_path_closes_the_menu_and_toasts() {
+        let mut app = viewing_app(&["a.png"], 0);
+        app.context_menu_pos = Some(iced::Point::ORIGIN);
+        let _ = update(&mut app, Message::CopyFilePath);
+        assert!(app.context_menu_pos.is_none());
+        assert!(!app.toasts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn copy_filename_closes_the_menu_and_toasts() {
+        let mut app = viewing_app(&["a.png"], 0);
+        app.context_menu_pos = Some(iced::Point::ORIGIN);
+        let _ = update(&mut app, Message::CopyFilename);
+        assert!(app.context_menu_pos.is_none());
+        assert!(!app.toasts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn copy_file_closes_the_menu_and_toasts() {
+        let mut app = viewing_app(&["a.png"], 0);
+        app.context_menu_pos = Some(iced::Point::ORIGIN);
+        let _ = update(&mut app, Message::CopyFile);
+        assert!(app.context_menu_pos.is_none());
+        assert!(!app.toasts.is_empty());
     }
 }

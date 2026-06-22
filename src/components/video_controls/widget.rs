@@ -1,6 +1,5 @@
-//! Video transport controls: an overlay bar along the bottom of the
-//! image area. Shown while paused or when the cursor is near the bottom
-//! of the window, hidden otherwise so the picture stays clean.
+//! Video transport controls: an overlay along the bottom of the image
+//! area, shown while paused or when the cursor is near the bottom.
 
 use std::time::Duration;
 

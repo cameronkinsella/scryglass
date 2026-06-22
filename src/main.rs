@@ -21,9 +21,8 @@ mod video;
 
 use std::path::PathBuf;
 
-/// Decode the embedded window icon. The icon API that takes encoded
-/// bytes sits behind iced's codec feature, which is off, so decode with
-/// the image crate the pipeline already uses.
+/// Decode the embedded window icon with the image crate. (iced's
+/// encoded-bytes icon API needs its codec feature, which is off.)
 fn window_icon() -> Option<iced::window::Icon> {
     let img = image::load_from_memory(include_bytes!("../assets/icon.png"))
         .ok()?
@@ -43,8 +42,8 @@ fn main() -> anyhow::Result<()> {
         .title(app::title)
         .theme(app::theme)
         .subscription(app::subscription)
-        // .settings() replaces the whole settings struct, so it must come
-        // before .font(), because fonts accumulate inside settings.
+        // .settings() replaces the whole struct, so it must precede .font()
+        // (fonts accumulate inside settings).
         .settings(iced::Settings {
             vsync: false,
             ..Default::default()
@@ -52,8 +51,7 @@ fn main() -> anyhow::Result<()> {
         .window(iced::window::Settings {
             size: iced::Size::new(initial.window_width, initial.window_height),
             icon: window_icon(),
-            // Close requests route through update() so the config (window
-            // size included) is saved before exit.
+            // Route close requests through update() so config is saved on exit.
             exit_on_close_request: false,
             ..Default::default()
         })

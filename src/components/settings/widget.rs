@@ -7,11 +7,8 @@ use crate::app::SettingsMessage;
 use crate::config::AppConfig;
 use crate::ui::theme;
 
-/// Render the settings card.
-///
-/// `disk_cache_size` is the probed size of the persistent thumbnail
-/// store (`None` while probing). `associations_registered` is whether
-/// the app currently sits in the OS Open with menu.
+/// Render the settings card. `disk_cache_size` is `None` while the
+/// thumbnail-store probe is still running.
 pub fn settings<'a>(
     config: &AppConfig,
     disk_cache_size: Option<u64>,

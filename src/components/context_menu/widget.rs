@@ -26,10 +26,7 @@ pub fn clamp_menu_pos(pos: Point, menu_size: Size, bounds: Size) -> Point {
     )
 }
 
-/// Render the context menu at the given position.
-///
-/// `pos` is the cursor position relative to the overlay origin.
-/// `show_toolbar` is the current toolbar visibility state.
+/// Render the context menu. `pos` is relative to the overlay origin.
 pub fn context_menu<'a>(
     pos: iced::Point,
     show_toolbar: bool,
@@ -180,5 +177,25 @@ mod tests {
         };
         let pos = Point::new(50.0, 50.0);
         assert_eq!(clamp_menu_pos(pos, MENU, tiny), Point::new(0.0, 0.0));
+    }
+
+    #[test]
+    fn lists_the_copy_and_location_actions() {
+        use iced_test::simulator;
+        let mut ui = simulator(context_menu(Point::new(10.0, 10.0), true, false));
+        assert!(ui.find("Copy image").is_ok());
+        assert!(ui.find("Copy file path").is_ok());
+        assert!(ui.find("Open image location").is_ok());
+        assert!(ui.find("Image properties").is_ok());
+    }
+
+    #[test]
+    fn shows_modify_actions_only_when_allowed() {
+        use iced_test::simulator;
+        let mut with = simulator(context_menu(Point::new(0.0, 0.0), true, true));
+        assert!(with.find("Rename").is_ok());
+        assert!(with.find("Delete").is_ok());
+        let mut without = simulator(context_menu(Point::new(0.0, 0.0), true, false));
+        assert!(without.find("Rename").is_err());
     }
 }

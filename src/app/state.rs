@@ -12,7 +12,7 @@ use crate::media::cache::ImageCache;
 use crate::media::pipeline::Source;
 use crate::nav::Nav;
 
-/// Thumbnail cache budget. Thumbs are ~256 KB each, so this holds 500+.
+/// Thumbnail cache budget, about 500 thumbs.
 const THUMB_BUDGET_BYTES: usize = 128 * 1024 * 1024;
 
 /// Whether the app is idle or actively viewing a directory of images.
@@ -46,8 +46,7 @@ pub struct Thumb {
     pub handle: Handle,
     /// Thumbnail texture dimensions.
     pub size: (u32, u32),
-    /// True dimensions of the image this previews. Zoom math runs on
-    /// these so the placeholder's geometry matches the full image exactly.
+    /// True dimensions of the previewed image, for placeholder zoom geometry.
     pub original_size: (u32, u32),
 }
 
@@ -87,7 +86,7 @@ pub enum DisplayedImage {
         original_size: (u32, u32),
     },
     /// Live video, drawn by the GPU YUV surface. Carries dimensions for
-    /// the zoom math and info panel; the frame planes live on the viewer.
+    /// zoom and the info panel. The frame planes live on the viewer.
     Video { original_size: (u32, u32) },
 }
 
@@ -253,10 +252,9 @@ impl Viewer {
             || crate::video::is_video(path)
     }
 
-    /// The next file the background thumbnailer should work on: scans
-    /// forward from the cursor (wrapping) for a file with no thumbnail,
-    /// none in flight, and no full load underway (those yield a thumbnail
-    /// as a by-product).
+    /// The next file for the background thumbnailer to pick: one with no
+    /// thumbnail, none in flight, and no full load underway (a full load
+    /// produces a thumbnail anyway).
     pub fn next_unthumbed(&self) -> Option<PathBuf> {
         let files = self.nav.files();
         let len = files.len();
@@ -276,7 +274,7 @@ impl Viewer {
     }
 
     /// The on-disk file behind the current image: the file itself, or the
-    /// archive containing it. Used by shell integration (reveal, properties).
+    /// archive containing it.
     pub fn current_disk_path(&self) -> PathBuf {
         match &self.source {
             Source::Fs => self.nav.current().to_path_buf(),

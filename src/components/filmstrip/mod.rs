@@ -28,7 +28,6 @@ pub(crate) fn view(app: &App) -> Element<'_, AppMessage> {
 pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
     match message {
         Message::Scroll(delta_y) => {
-            // Convert vertical scroll delta to horizontal scroll on the filmstrip.
             let offset = iced::widget::scrollable::AbsoluteOffset {
                 x: -delta_y * 60.0,
                 y: 0.0,
