@@ -8,12 +8,17 @@ repository = "https://github.com/cameronkinsella/scryglass"
 readme = "README.md"
 keywords = ["image", "viewer", "photo", "gui", "iced"]
 categories = ["multimedia::images", "gui"]
-exclude = ["/.github", "/shaders", "/xtask"]
+exclude = ["/.github", "/shaders", "/xtask", "/packaging"]
 
 [package.metadata.binstall]
-# Let cargo-binstall grab release artifacts instead of building from source.
-pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }{ archive-suffix }"
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "{ name }-v{ version }-{ target }/{ bin }{ binary-ext }"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }.zip"
 pkg-fmt = "zip"
+bin-dir = "{ name }-v{ version }-{ target }/{ bin }{ binary-ext }"
 
 [workspace]
 members = ["xtask"]
