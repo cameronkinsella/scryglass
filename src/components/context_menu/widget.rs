@@ -9,20 +9,45 @@ use iced::{Element, Length, Padding, Point, Size};
 use crate::app::{ContextMenuMessage, Message, ModalMessage, ToolbarMessage};
 use crate::ui::theme;
 
-/// Approximate rendered size of the context menu panel, used for edge
-/// clamping. A small estimation error only shifts the menu by a few pixels.
-pub const MENU_SIZE: Size = Size {
-    width: 224.0,
-    height: 282.0,
-};
+const MENU_WIDTH: f32 = 224.0;
+/// Height of one item or the toggler row (content plus padding); they all
+/// render the same, so the panel height is a function of the row count.
+const ROW_HEIGHT: f32 = 28.0;
+const RULE_HEIGHT: f32 = 1.0;
+const PANEL_PADDING: f32 = 2.0;
 
-/// Clamp a desired menu position so the panel stays inside `bounds`.
-///
-/// If the menu is larger than the bounds, it pins to the top/left edge.
-pub fn clamp_menu_pos(pos: Point, menu_size: Size, bounds: Size) -> Point {
+/// The panel's size for the current item set. The height must match what
+/// renders so flip placement anchors the cursor to a corner without a gap, and
+/// it grows when the editing actions (rename, delete) are shown.
+pub fn menu_size(can_modify: bool) -> Size {
+    // toggler + 4 copy + 2 location rows and 2 separator rules; editing adds a
+    // third rule plus the rename and delete rows.
+    let rows = if can_modify { 9.0 } else { 7.0 };
+    let rules = if can_modify { 3.0 } else { 2.0 };
+    Size::new(
+        MENU_WIDTH,
+        2.0 * PANEL_PADDING + rows * ROW_HEIGHT + rules * RULE_HEIGHT,
+    )
+}
+
+/// Place the menu so the cursor stays on one of its corners, like a native
+/// menu: it opens down and to the right of `pos`, but flips to the other side
+/// of the cursor on whichever axis would overflow `bounds`. If the menu is
+/// larger than `bounds` on an axis, it pins to that edge instead.
+pub fn flip_menu_pos(pos: Point, menu_size: Size, bounds: Size) -> Point {
+    let x = if pos.x + menu_size.width <= bounds.width {
+        pos.x
+    } else {
+        pos.x - menu_size.width
+    };
+    let y = if pos.y + menu_size.height <= bounds.height {
+        pos.y
+    } else {
+        pos.y - menu_size.height
+    };
     Point::new(
-        pos.x.min(bounds.width - menu_size.width).max(0.0),
-        pos.y.min(bounds.height - menu_size.height).max(0.0),
+        x.min(bounds.width - menu_size.width).max(0.0),
+        y.min(bounds.height - menu_size.height).max(0.0),
     )
 }
 
@@ -146,37 +171,51 @@ mod tests {
     };
 
     #[test]
-    fn clamp_keeps_interior_position_unchanged() {
+    fn keeps_interior_position_unchanged() {
         let pos = Point::new(100.0, 100.0);
-        assert_eq!(clamp_menu_pos(pos, MENU, BOUNDS), pos);
+        assert_eq!(flip_menu_pos(pos, MENU, BOUNDS), pos);
     }
 
     #[test]
-    fn clamp_shifts_left_at_right_edge() {
+    fn opens_left_at_the_right_edge() {
+        // The menu's right edge anchors to the cursor: 550 + 200 = 750.
         let pos = Point::new(750.0, 100.0);
-        assert_eq!(clamp_menu_pos(pos, MENU, BOUNDS), Point::new(600.0, 100.0));
+        assert_eq!(flip_menu_pos(pos, MENU, BOUNDS), Point::new(550.0, 100.0));
     }
 
     #[test]
-    fn clamp_shifts_up_at_bottom_edge() {
+    fn opens_up_at_the_bottom_edge() {
+        // The menu's bottom edge anchors to the cursor: 430 + 150 = 580.
         let pos = Point::new(100.0, 580.0);
-        assert_eq!(clamp_menu_pos(pos, MENU, BOUNDS), Point::new(100.0, 450.0));
+        assert_eq!(flip_menu_pos(pos, MENU, BOUNDS), Point::new(100.0, 430.0));
     }
 
     #[test]
-    fn clamp_handles_corner() {
+    fn flips_both_axes_in_the_corner() {
         let pos = Point::new(799.0, 599.0);
-        assert_eq!(clamp_menu_pos(pos, MENU, BOUNDS), Point::new(600.0, 450.0));
+        let placed = flip_menu_pos(pos, MENU, BOUNDS);
+        assert_eq!(placed, Point::new(599.0, 449.0));
+        // The cursor lands exactly on the menu's bottom-right corner.
+        assert_eq!(
+            Point::new(placed.x + MENU.width, placed.y + MENU.height),
+            pos
+        );
     }
 
     #[test]
-    fn clamp_pins_to_origin_when_menu_exceeds_bounds() {
+    fn pins_to_origin_when_menu_exceeds_bounds() {
         let tiny = Size {
             width: 100.0,
             height: 80.0,
         };
         let pos = Point::new(50.0, 50.0);
-        assert_eq!(clamp_menu_pos(pos, MENU, tiny), Point::new(0.0, 0.0));
+        assert_eq!(flip_menu_pos(pos, MENU, tiny), Point::new(0.0, 0.0));
+    }
+
+    #[test]
+    fn menu_size_grows_with_editing_actions() {
+        // The rename/delete rows make the editable menu taller.
+        assert!(menu_size(true).height > menu_size(false).height);
     }
 
     #[test]

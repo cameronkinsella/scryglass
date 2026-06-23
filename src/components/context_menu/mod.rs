@@ -33,10 +33,10 @@ pub(crate) fn view(app: &App) -> Element<'_, AppMessage> {
         app.window_size.width,
         app.window_size.height - toolbar_offset,
     );
-    let clamped = widget::clamp_menu_pos(adjusted_pos, widget::MENU_SIZE, bounds);
     let can_modify =
         !app.config.read_only && app.viewer().is_some_and(|v| matches!(v.source, Source::Fs));
-    widget::context_menu(clamped, app.config.show_toolbar, can_modify)
+    let placed = widget::flip_menu_pos(adjusted_pos, widget::menu_size(can_modify), bounds);
+    widget::context_menu(placed, app.config.show_toolbar, can_modify)
 }
 
 pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
