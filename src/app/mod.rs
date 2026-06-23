@@ -79,6 +79,8 @@ pub(crate) const SPINNER_DELAY: Duration = Duration::from_millis(150);
 
 /// How long the video controls stay up after the last mouse movement.
 pub(crate) const VIDEO_CONTROLS_TIMEOUT: Duration = Duration::from_millis(2500);
+/// Per-tick opacity step for the control-bar fade (~5 ticks at the 16ms tick).
+pub(crate) const CONTROLS_FADE_STEP: f32 = 0.2;
 
 /// Application state: the single source of truth.
 pub struct App {

@@ -9,6 +9,7 @@ use std::sync::LazyLock;
 use iced::theme::Palette;
 use iced::widget::button;
 use iced::widget::container;
+use iced::widget::slider;
 use iced::widget::text;
 use iced::{Background, Border, Color, Shadow, Theme, Vector};
 
@@ -157,6 +158,48 @@ pub fn accent_text(theme: &Theme) -> text::Style {
     text::Style {
         color: Some(tokens(theme).accent),
     }
+}
+
+/// Multiply a color's alpha, for fading a subtree iced can't fade directly.
+pub fn fade(color: Color, opacity: f32) -> Color {
+    Color {
+        a: color.a * opacity,
+        ..color
+    }
+}
+
+fn fade_background(bg: Background, opacity: f32) -> Background {
+    match bg {
+        Background::Color(c) => Background::Color(fade(c, opacity)),
+        other => other,
+    }
+}
+
+/// A container style faded to `opacity`.
+pub fn faded_container(mut s: container::Style, opacity: f32) -> container::Style {
+    s.background = s.background.map(|bg| fade_background(bg, opacity));
+    s.border.color = fade(s.border.color, opacity);
+    s.shadow.color = fade(s.shadow.color, opacity);
+    s.text_color = s.text_color.map(|c| fade(c, opacity));
+    s
+}
+
+/// A button style faded to `opacity`.
+pub fn faded_button(mut s: button::Style, opacity: f32) -> button::Style {
+    s.background = s.background.map(|bg| fade_background(bg, opacity));
+    s.text_color = fade(s.text_color, opacity);
+    s.border.color = fade(s.border.color, opacity);
+    s
+}
+
+/// A slider style faded to `opacity`.
+pub fn faded_slider(mut s: slider::Style, opacity: f32) -> slider::Style {
+    s.rail.backgrounds.0 = fade_background(s.rail.backgrounds.0, opacity);
+    s.rail.backgrounds.1 = fade_background(s.rail.backgrounds.1, opacity);
+    s.rail.border.color = fade(s.rail.border.color, opacity);
+    s.handle.background = fade_background(s.handle.background, opacity);
+    s.handle.border_color = fade(s.handle.border_color, opacity);
+    s
 }
 
 /// Menu selection checkmark: accent when selected, invisible otherwise
@@ -390,7 +433,11 @@ mod tests {
     #[test]
     fn menu_tab_active_is_always_filled() {
         let t = dark();
-        assert!(menu_tab_active(&t, button::Status::Active).background.is_some());
+        assert!(
+            menu_tab_active(&t, button::Status::Active)
+                .background
+                .is_some()
+        );
         assert!(menu_tab(&t, button::Status::Active).background.is_none());
     }
 
@@ -409,6 +456,52 @@ mod tests {
                 let _ = thumb(&theme, status);
                 let _ = thumb_current(&theme, status);
             }
+        }
+    }
+
+    #[test]
+    fn fade_multiplies_alpha_and_keeps_hue() {
+        let c = Color {
+            r: 1.0,
+            g: 0.5,
+            b: 0.0,
+            a: 0.8,
+        };
+        assert!((fade(c, 0.5).a - 0.4).abs() < 1e-6);
+        assert_eq!(fade(c, 0.0).a, 0.0);
+        assert_eq!(fade(c, 0.5).r, c.r);
+    }
+
+    #[test]
+    fn faded_styles_drop_their_alpha() {
+        let t = dark();
+        let half = faded_container(panel(&t), 0.5);
+        match half.background {
+            Some(Background::Color(c)) => assert!(c.a < 1.0),
+            _ => panic!("panel should have a color background"),
+        }
+        let _ = faded_button(menu_item(&t, button::Status::Active), 0.5);
+
+        let style = slider::Style {
+            rail: slider::Rail {
+                backgrounds: (
+                    Background::Color(Color::WHITE),
+                    Background::Color(Color::WHITE),
+                ),
+                width: 2.0,
+                border: Border::default(),
+            },
+            handle: slider::Handle {
+                shape: slider::HandleShape::Circle { radius: 6.0 },
+                background: Background::Color(Color::WHITE),
+                border_width: 1.0,
+                border_color: Color::WHITE,
+            },
+        };
+        let faded = faded_slider(style, 0.25);
+        match faded.rail.backgrounds.0 {
+            Background::Color(c) => assert!((c.a - 0.25).abs() < 1e-6),
+            _ => panic!("expected a color rail"),
         }
     }
 }

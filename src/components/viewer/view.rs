@@ -25,13 +25,10 @@ pub(crate) fn view(app: &App) -> Element<'_, Message> {
 
             let image_view = image_view(app);
 
-            let controls_alive = viewer
-                .video_controls_until
-                .is_some_and(|until| iced::time::Instant::now() < until);
             let hide_cursor = crate::app::viewer_math::hide_idle_cursor(
                 viewer.video.as_ref().is_some_and(|s| s.playing),
                 viewer.video_seek_drag.is_some(),
-                controls_alive,
+                viewer.controls_opacity > 0.0,
             );
 
             let interactive = mouse_area(image_view)
@@ -194,15 +191,13 @@ fn image_view(app: &App) -> Element<'_, Message> {
             image_view
         };
 
-    // Video transport controls: visible while paused, mid-seek, or for a
-    // few seconds after any mouse movement.
-    let controls_alive = viewer
-        .video_controls_until
-        .is_some_and(|until| iced::time::Instant::now() < until);
+    // Video transport controls, faded in/out by the per-tick opacity ease.
     match &viewer.video {
-        Some(session) if !session.playing || viewer.video_seek_drag.is_some() || controls_alive => {
-            Stack::with_children(vec![image_view, video_controls::view(session, viewer)]).into()
-        }
+        Some(session) if viewer.controls_opacity > 0.0 => Stack::with_children(vec![
+            image_view,
+            video_controls::view(session, viewer, viewer.controls_opacity),
+        ])
+        .into(),
         _ => image_view,
     }
 }

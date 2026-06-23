@@ -83,6 +83,27 @@ pub(crate) fn tick(app: &mut App) -> Task<Message> {
     let Some(viewer) = app.viewer_mut() else {
         return Task::none();
     };
+
+    // Ease the control bar toward visible/hidden once per tick.
+    let playing = viewer.video.as_ref().is_some_and(|s| s.playing);
+    let controls_alive = viewer
+        .video_controls_until
+        .is_some_and(|until| Instant::now() < until);
+    let target = if crate::app::viewer_math::controls_visible(
+        playing,
+        viewer.video_seek_drag.is_some(),
+        controls_alive,
+    ) {
+        1.0
+    } else {
+        0.0
+    };
+    viewer.controls_opacity = crate::app::viewer_math::ease_toward(
+        viewer.controls_opacity,
+        target,
+        crate::app::CONTROLS_FADE_STEP,
+    );
+
     let Some(session) = viewer.video.as_mut() else {
         return Task::none();
     };

@@ -25,16 +25,23 @@ use crate::app::update::video_flow;
 use crate::app::{App, Message as AppMessage};
 use crate::video::VideoSession;
 
-pub(crate) fn view<'a>(session: &VideoSession, viewer: &Viewer) -> Element<'a, AppMessage> {
-    widget::video_controls(widget::VideoControls {
-        playing: session.playing,
-        position: session.position(),
-        duration: session.duration(),
-        seek_drag: viewer.video_seek_drag,
-        volume: session.volume,
-        muted: session.muted,
-        looping: session.looping,
-    })
+pub(crate) fn view<'a>(
+    session: &VideoSession,
+    viewer: &Viewer,
+    opacity: f32,
+) -> Element<'a, AppMessage> {
+    widget::video_controls(
+        widget::VideoControls {
+            playing: session.playing,
+            position: session.position(),
+            duration: session.duration(),
+            seek_drag: viewer.video_seek_drag,
+            volume: session.volume,
+            muted: session.muted,
+            looping: session.looping,
+        },
+        opacity,
+    )
     .map(AppMessage::VideoControls)
 }
 

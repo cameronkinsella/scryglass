@@ -22,12 +22,12 @@ pub struct VideoControls {
 }
 
 /// Render the transport bar, anchored to the bottom of the image area.
-pub fn video_controls<'a>(state: VideoControls) -> Element<'a, VideoMessage> {
+pub fn video_controls<'a>(state: VideoControls, opacity: f32) -> Element<'a, VideoMessage> {
     let icon_button = |icon: iced::widget::Text<'a>, msg: VideoMessage| {
         button(icon.size(16))
             .on_press(msg)
             .padding([2, 8])
-            .style(theme::menu_item)
+            .style(move |t, s| theme::faded_button(theme::menu_item(t, s), opacity))
     };
 
     let play_icon = if state.playing {
@@ -51,7 +51,10 @@ pub fn video_controls<'a>(state: VideoControls) -> Element<'a, VideoMessage> {
         clock_label(shown_secs),
         clock_label(total_secs)
     ))
-    .size(12);
+    .size(12)
+    .style(move |t| iced::widget::text::Style {
+        color: Some(theme::fade(theme::tokens(t).text_primary, opacity)),
+    });
 
     let seek = slider(
         0.0..=total_secs.max(0.1),
@@ -60,7 +63,8 @@ pub fn video_controls<'a>(state: VideoControls) -> Element<'a, VideoMessage> {
     )
     .on_release(VideoMessage::SeekRelease)
     .step(0.000_001)
-    .width(Length::Fill);
+    .width(Length::Fill)
+    .style(move |t, s| theme::faded_slider(iced::widget::slider::default(t, s), opacity));
 
     let volume_icon = if state.muted || state.volume == 0.0 {
         icons::volume_mute()
@@ -73,15 +77,20 @@ pub fn video_controls<'a>(state: VideoControls) -> Element<'a, VideoMessage> {
         VideoMessage::SetVolume,
     )
     .step(0.05)
-    .width(Length::Fixed(80.0));
+    .width(Length::Fixed(80.0))
+    .style(move |t, s| theme::faded_slider(iced::widget::slider::default(t, s), opacity));
 
+    let looping = state.looping;
     let loop_button = button(icons::arrow_repeat().size(16))
         .on_press(VideoMessage::ToggleLoop)
         .padding([2, 8])
-        .style(if state.looping {
-            theme::menu_tab_active
-        } else {
-            theme::menu_item
+        .style(move |t, s| {
+            let base = if looping {
+                theme::menu_tab_active(t, s)
+            } else {
+                theme::menu_item(t, s)
+            };
+            theme::faded_button(base, opacity)
         });
 
     let bar = container(
@@ -97,7 +106,7 @@ pub fn video_controls<'a>(state: VideoControls) -> Element<'a, VideoMessage> {
         .padding([6, 12])
         .align_y(Alignment::Center),
     )
-    .style(theme::panel)
+    .style(move |t| theme::faded_container(theme::panel(t), opacity))
     .width(Length::Fill);
 
     container(bar)

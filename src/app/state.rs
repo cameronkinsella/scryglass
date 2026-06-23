@@ -179,6 +179,8 @@ pub struct Viewer {
     /// Video controls stay visible until this deadline, refreshed by any
     /// mouse movement. `None` means hidden (while playing).
     pub video_controls_until: Option<Instant>,
+    /// Control-bar fade level, eased toward 0 or 1 each video tick.
+    pub controls_opacity: f32,
     /// After the post-open resort lands, jump to the first image of the
     /// new order. Set when a folder or archive was opened rather than a
     /// specific file.
@@ -223,6 +225,7 @@ impl Viewer {
             video_seek_drag: None,
             video_extracting: None,
             video_controls_until: None,
+            controls_opacity: 0.0,
             resort_to_first: false,
         }
     }

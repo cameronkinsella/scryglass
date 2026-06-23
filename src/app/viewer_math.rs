@@ -65,10 +65,24 @@ pub fn nudge_zoom_percent(zoom: f32, dir: i32, min: f32, max: f32) -> f32 {
     (pct as f32 / 100.0).clamp(min, max)
 }
 
-/// Hide the cursor only while a video plays, isn't being scrubbed, and the
-/// transport controls have already timed out.
+/// Whether the transport controls belong on screen: a paused or mid-scrub
+/// video always shows them, a playing one only while recently active.
+pub fn controls_visible(playing: bool, seeking: bool, controls_alive: bool) -> bool {
+    !playing || seeking || controls_alive
+}
+
+/// Hide the cursor exactly when the controls are gone over a playing video.
 pub fn hide_idle_cursor(playing: bool, seeking: bool, controls_alive: bool) -> bool {
-    playing && !seeking && !controls_alive
+    !controls_visible(playing, seeking, controls_alive)
+}
+
+/// Step `current` toward `target` by at most `step`, for a per-frame fade.
+pub fn ease_toward(current: f32, target: f32, step: f32) -> f32 {
+    if current < target {
+        (current + step).min(target)
+    } else {
+        (current - step).max(target)
+    }
 }
 
 #[cfg(test)]
@@ -260,5 +274,39 @@ mod tests {
     #[test]
     fn hide_idle_cursor_visible_when_paused() {
         assert!(!hide_idle_cursor(false, false, false));
+    }
+
+    // --- controls_visible ---
+
+    #[test]
+    fn controls_visible_when_paused_seeking_or_recently_active() {
+        assert!(controls_visible(false, false, false)); // paused
+        assert!(controls_visible(true, true, false)); // seeking
+        assert!(controls_visible(true, false, true)); // recently active
+    }
+
+    #[test]
+    fn controls_hidden_while_playing_and_idle() {
+        assert!(!controls_visible(true, false, false));
+    }
+
+    // --- ease_toward ---
+
+    #[test]
+    fn ease_toward_rises_and_clamps_at_target() {
+        assert!((ease_toward(0.0, 1.0, 0.3) - 0.3).abs() < 1e-6);
+        assert_eq!(ease_toward(0.9, 1.0, 0.3), 1.0);
+    }
+
+    #[test]
+    fn ease_toward_falls_and_clamps_at_target() {
+        assert!((ease_toward(1.0, 0.0, 0.3) - 0.7).abs() < 1e-6);
+        assert_eq!(ease_toward(0.1, 0.0, 0.3), 0.0);
+    }
+
+    #[test]
+    fn ease_toward_stays_at_target() {
+        assert_eq!(ease_toward(1.0, 1.0, 0.3), 1.0);
+        assert_eq!(ease_toward(0.0, 0.0, 0.3), 0.0);
     }
 }
