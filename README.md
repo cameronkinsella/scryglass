@@ -8,9 +8,9 @@ A lightweight, blazing-fast image viewer built with [iced](https://github.com/ic
 
 ## Install
 
-Prebuilt binaries are attached to each [release](https://github.com/cameronkinsella/scryglass/releases)
-as a single self-contained executable, no installer and no runtime
-dependencies. With [cargo-binstall](https://github.com/cargo-bins/cargo-binstall):
+Prebuilt binaries are attached to each [release](https://github.com/cameronkinsella/scryglass/releases),
+self-contained with no runtime dependencies. The quickest path is
+[cargo-binstall](https://github.com/cargo-bins/cargo-binstall):
 
 ```
 cargo binstall scryglass
@@ -19,17 +19,32 @@ cargo binstall scryglass
 Or build from source (`cargo install scryglass`), see Build & Run below
 for the optional native features.
 
-Release binaries from the [releases page](https://github.com/cameronkinsella/scryglass/releases)
-ship with all features on every platform: video playback (FFmpeg
-statically linked), AV1/AVIF, and HEIC/HEIF decoding included. Releases
-also carry a Linux AppImage and a macOS dmg. The
-dmg is unsigned, so macOS quarantines it on first launch: right-click
-the app and pick Open once, or install through cargo-binstall instead.
+Every release ships two downloads per platform, both with all features
+(video playback on statically linked FFmpeg, AV1/AVIF, and HEIC/HEIF):
 
-To make scryglass your default viewer on Windows, turn on file
-associations in its Settings, then pick it under Settings > Apps >
-Default apps. This registers every supported image, video, and comic
-format for the current user, no admin needed.
+- An OS application: a Windows installer (`-setup.exe`), a Linux
+  `AppImage`, or a macOS `.dmg`.
+- A slim archive holding just the binary: a `.zip` on Windows, a
+  `.tar.gz` on Linux and macOS. This is what `cargo binstall` fetches.
+
+The macOS app is unsigned, so Gatekeeper blocks the first launch. Either
+right-click the app and pick **Open** (macOS 14 and earlier), or open
+**System Settings > Privacy & Security** and click **Open Anyway**
+(macOS 15 Sequoia removed the right-click path). If it still refuses,
+clear quarantine from a terminal:
+
+```
+xattr -dr com.apple.quarantine /Applications/scryglass.app
+```
+
+The `.dmg` is the cleanest macOS install (drag the app out before
+launching). The slim `.tar.gz` suits `cargo binstall` and scripting.
+
+To make scryglass your default viewer on Windows, install it (the
+installer puts it at a stable path), then turn on file associations in
+its Settings and pick it under Settings > Apps > Default apps. This
+registers every supported image, video, and comic format for the
+current user, no admin needed.
 
 ## Features
 

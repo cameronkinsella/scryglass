@@ -209,6 +209,38 @@ cargo build --release --all-features --target x86_64-apple-darwin
 On macOS, do not force `FFMPEG_DIR`; the release build uses pkg-config
 metadata so static dependencies such as `dav1d` are discovered.
 
+## Packaging and release
+
+Release artifacts are built by `cargo xtask package`, which writes the
+host platform's two downloads into `target/dist/`: a slim binary archive
+(`.zip` on Windows, `.tar.gz` on Linux and macOS) and the OS-native
+application. The same command runs locally and in CI, so a release is
+reproducible on a developer machine.
+
+It runs `cargo build --release` (release is always on), passing through
+`--target`, `--features`, `--all-features`, and `--no-default-features`.
+The binary is read from `target/release`, or `target/<triple>/release`
+with `--target`. Add `--no-build` to package an existing binary instead
+of building it.
+
+Native tools the xtask shells out to, by host:
+
+- Windows: Inno Setup (`ISCC`) for the installer. CI installs it with
+  `choco install innosetup`, since the runners do not ship it.
+- macOS: `sips` and `iconutil` for the icon, `codesign` for the ad-hoc
+  signature, and `hdiutil` for the dmg. All ship with macOS.
+- Linux: `appimagetool`, downloaded on demand.
+
+Everything else (tar/zip, the `Info.plist`, the `.desktop` entry) is
+generated in Rust, so the MIME list and bundle metadata are unit-tested
+rather than hand-maintained.
+
+The macOS dmg is ad-hoc signed only (no Developer ID, no notarization),
+which is why first launch needs the Gatekeeper override noted in the
+README. The slim `.tar.gz` and `.zip` archives are what `cargo binstall`
+resolves. Their names and layout match `[package.metadata.binstall]` in
+`Cargo.toml`.
+
 ## Licensing
 
 The static FFmpeg configuration is LGPL-clean: no x264 or x265 is

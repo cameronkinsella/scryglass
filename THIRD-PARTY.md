@@ -30,10 +30,10 @@ vcpkg with the exact configuration pinned in
 - **rawler** (camera RAW metadata and embedded previews): LGPL-2.1.
   Statically linked like all Rust crates. Source availability and the
   open MIT licensing of this application satisfy its relink terms.
-- The remaining roughly 600 crates in the dependency tree are licensed
-  under MIT, Apache-2.0, BSD, ISC, Zlib, Unicode-3.0, MPL-2.0, BSL-1.0,
-  CC0, or Unlicense terms. Run `cargo deny list` in the repository for
-  the complete per-crate breakdown.
+- The remaining crates in the dependency tree are licensed under MIT,
+  Apache-2.0, BSD, ISC, Zlib, Unicode-3.0, MPL-2.0, BSL-1.0, CC0, or
+  Unlicense terms. Run `cargo deny list` in the repository for the
+  complete per-crate breakdown.
 
 ## UnRAR license
 
