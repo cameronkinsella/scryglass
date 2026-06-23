@@ -11,6 +11,8 @@
 //! - sRGB transfer function: IEC 61966-2-1. https://en.wikipedia.org/wiki/SRGB
 
 #![no_std]
+// spirv-std's macros expand to cfg(target_arch = "spirv"), unknown off-target.
+#![expect(unexpected_cfgs)]
 
 use spirv_std::glam::{UVec4, Vec2, Vec3, Vec4};
 use spirv_std::image::Image2d;
