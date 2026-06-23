@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -8,10 +9,22 @@ pub enum Message {
     RequestRename,
     RenameInput(String),
     CommitRename,
-    RenameFinished(PathBuf, PathBuf, Result<(), String>),
+    RenameFinished(PathBuf, PathBuf, Result<(), String>, Option<VideoResume>),
     Submit,
     Cancel,
 }
+
+/// How to resume a video that was torn down so its file could be renamed.
+#[derive(Debug, Clone, Copy)]
+pub struct VideoResume {
+    position: Duration,
+    volume: f32,
+    muted: bool,
+    looping: bool,
+    hardware: bool,
+    playing: bool,
+}
+
 use iced::{Element, Task};
 
 use crate::app::state::Session;
@@ -117,55 +130,71 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                 return Task::none();
             };
             let old = viewer.nav.current().to_path_buf();
-            let new = old.parent().unwrap_or(std::path::Path::new("")).join(name);
+            let new = old.parent().unwrap_or(Path::new("")).join(name);
             app.modal = None;
             if new == old {
                 return Task::none();
             }
-
-            Task::perform(
-                async move {
-                    if tokio::fs::try_exists(&new).await.unwrap_or(false) {
-                        let err = "a file with that name already exists".to_string();
-                        return (old, new, Err(err));
-                    }
-                    let result = tokio::fs::rename(&old, &new)
-                        .await
-                        .map_err(|e| e.to_string());
-                    (old, new, result)
-                },
-                |(old, new, result)| AppMessage::Modal(Message::RenameFinished(old, new, result)),
-            )
+            if new.exists() {
+                return push_toast(
+                    app,
+                    ToastKind::Error,
+                    "a file with that name already exists".to_string(),
+                );
+            }
+            // Renaming the open video means FFmpeg is holding its file handle,
+            // so tear the session down (remembering how to resume) first.
+            let resume = take_video_for_rename(app, &old);
+            let (from, to) = (old.clone(), new.clone());
+            Task::perform(rename_with_retry(from, to), move |result| {
+                AppMessage::Modal(Message::RenameFinished(old, new, result, resume))
+            })
         }
 
-        Message::RenameFinished(old, new, result) => match result {
-            Err(e) => push_toast(app, ToastKind::Error, format!("Couldn't rename: {e}")),
-            Ok(()) => {
-                let purge = purge_disk_thumb(&app.pipeline, &old);
-                let Some(viewer) = app.viewer_mut() else {
-                    return purge;
-                };
-                viewer.nav.rename(&old, new.clone());
-                if let Some(image) = viewer.cache.remove(&old) {
-                    let cost = image.byte_cost();
-                    viewer.cache.insert(new.clone(), image, cost);
+        Message::RenameFinished(old, new, result, resume) => {
+            let resume = resume.map(|r| {
+                (
+                    r,
+                    if result.is_ok() {
+                        new.clone()
+                    } else {
+                        old.clone()
+                    },
+                )
+            });
+            let task = match result {
+                Err(e) => push_toast(app, ToastKind::Error, format!("Couldn't rename: {e}")),
+                Ok(()) => {
+                    let purge = purge_disk_thumb(&app.pipeline, &old);
+                    if let Some(viewer) = app.viewer_mut() {
+                        viewer.nav.rename(&old, new.clone());
+                        if let Some(image) = viewer.cache.remove(&old) {
+                            let cost = image.byte_cost();
+                            viewer.cache.insert(new.clone(), image, cost);
+                        }
+                        if let Some(thumb) = viewer.thumbs.remove(&old) {
+                            let cost = thumb.byte_cost();
+                            viewer.thumbs.insert(new.clone(), thumb, cost);
+                        }
+                        viewer.anim_player.remove(&old);
+                        if viewer.displayed_path.as_deref() == Some(&*old) {
+                            viewer.displayed_path = Some(new.clone());
+                        }
+                        if let Some((p, _)) = &mut viewer.exif
+                            && *p == old
+                        {
+                            *p = new.clone();
+                        }
+                    }
+                    purge
                 }
-                if let Some(thumb) = viewer.thumbs.remove(&old) {
-                    let cost = thumb.byte_cost();
-                    viewer.thumbs.insert(new.clone(), thumb, cost);
-                }
-                viewer.anim_player.remove(&old);
-                if viewer.displayed_path.as_deref() == Some(&*old) {
-                    viewer.displayed_path = Some(new.clone());
-                }
-                if let Some((p, _)) = &mut viewer.exif
-                    && *p == old
-                {
-                    *p = new;
-                }
-                purge
+            };
+            // Resume the video on the renamed file, or the original if it failed.
+            if let Some((resume, path)) = resume {
+                resume_video(app, resume, path);
             }
-        },
+            task
+        }
 
         Message::Submit => match &app.modal {
             Some(Modal::ConfirmDelete(_)) => update(app, Message::ConfirmDeleteNow),
@@ -180,6 +209,63 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
         }
     }
 }
+
+/// Rename, retrying briefly: the video decoder can keep the old file open for
+/// a moment on Windows after its session drops.
+async fn rename_with_retry(old: PathBuf, new: PathBuf) -> Result<(), String> {
+    let mut err = String::new();
+    for attempt in 0..5 {
+        match tokio::fs::rename(&old, &new).await {
+            Ok(()) => return Ok(()),
+            Err(e) => err = e.to_string(),
+        }
+        if attempt < 4 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    Err(err)
+}
+
+/// If `old` is the open video, drop its session (releasing the file handle)
+/// and return how to resume it once the file is renamed.
+fn take_video_for_rename(app: &mut App, old: &Path) -> Option<VideoResume> {
+    let hardware = app.config.hardware_decode;
+    let viewer = app.viewer_mut()?;
+    let session = viewer.video.as_ref()?;
+    if session.path != *old {
+        return None;
+    }
+    let resume = VideoResume {
+        position: session.position(),
+        volume: session.volume,
+        muted: session.muted,
+        looping: session.looping,
+        hardware,
+        playing: session.playing,
+    };
+    viewer.video = None;
+    Some(resume)
+}
+
+/// Reopen a torn-down video at `path` and its saved position.
+fn resume_video(app: &mut App, resume: VideoResume, path: PathBuf) {
+    let Some(viewer) = app.viewer_mut() else {
+        return;
+    };
+    let mut session = crate::video::VideoSession::open(
+        path,
+        resume.position,
+        resume.volume,
+        resume.muted,
+        resume.looping,
+        resume.hardware,
+    );
+    if !resume.playing {
+        session.pause();
+    }
+    viewer.video = Some(session);
+}
+
 mod widget;
 
 #[cfg(test)]
@@ -307,12 +393,29 @@ mod tests {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
         let _ = update(
             &mut app,
-            Message::RenameFinished("a.png".into(), "renamed.png".into(), Ok(())),
+            Message::RenameFinished("a.png".into(), "renamed.png".into(), Ok(()), None),
         );
         assert_eq!(
             app.viewer().unwrap().nav.current().to_string_lossy(),
             "renamed.png"
         );
+    }
+
+    #[test]
+    fn renaming_the_open_video_tears_it_down() {
+        let mut app = viewing_app(&["clip.mp4"], 0);
+        let path = app.viewer().unwrap().nav.current().to_path_buf();
+        let open = || {
+            crate::video::VideoSession::open(path.clone(), Duration::ZERO, 0.4, false, true, false)
+        };
+        app.viewer_mut().unwrap().video = Some(open());
+        // Renaming the open video releases its session so the file unlocks.
+        assert!(take_video_for_rename(&mut app, &path).is_some());
+        assert!(app.viewer().unwrap().video.is_none());
+        // A different file leaves the video alone.
+        app.viewer_mut().unwrap().video = Some(open());
+        assert!(take_video_for_rename(&mut app, Path::new("other.mp4")).is_none());
+        assert!(app.viewer().unwrap().video.is_some());
     }
 
     #[tokio::test]
@@ -321,7 +424,7 @@ mod tests {
         let before = app.toasts.len();
         let _ = update(
             &mut app,
-            Message::RenameFinished("a.png".into(), "b.png".into(), Err("nope".into())),
+            Message::RenameFinished("a.png".into(), "b.png".into(), Err("nope".into()), None),
         );
         assert!(app.toasts.len() > before);
     }
