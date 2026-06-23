@@ -2,6 +2,7 @@
 pub enum Message {
     Open,
     Close,
+    ShowHelp,
     DiskCacheSize(u64),
     ClearDiskThumbs,
     SetPrefetchDepth(usize),
@@ -43,6 +44,12 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
 
         Message::Close => {
             app.modal = None;
+            Task::none()
+        }
+
+        Message::ShowHelp => {
+            app.modal = None;
+            app.help_open = true;
             Task::none()
         }
 
@@ -181,5 +188,14 @@ mod tests {
         assert_eq!(app.config.cache_budget_mb, 4096);
         let _ = update(&mut app, Message::SetCacheBudget(512));
         assert_eq!(app.config.cache_budget_mb, 512);
+    }
+
+    #[test]
+    fn show_help_closes_settings_and_opens_help() {
+        let mut app = empty_app();
+        app.modal = Some(Modal::Settings);
+        let _ = update(&mut app, Message::ShowHelp);
+        assert!(app.modal.is_none());
+        assert!(app.help_open);
     }
 }

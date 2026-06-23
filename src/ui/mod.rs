@@ -23,7 +23,7 @@ pub fn overlay_card<'a, M: Clone + 'a>(
     let close = button(icons::x_lg().size(14))
         .on_press(on_close.clone())
         .padding(5)
-        .style(theme::close_button);
+        .style(theme::icon_button);
 
     // The card is opaque so clicks land on it instead of falling through to the
     // dismiss backdrop. Stack sizes to its base layer, so the Fill close strip

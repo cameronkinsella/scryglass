@@ -33,9 +33,40 @@ icons!(
     pause_fill,
     pencil_square,
     play_fill,
+    question_circle,
     trash,
     volume_mute,
     volume_up,
     x_lg,
     zoom_in,
 );
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn every_icon_helper_builds() {
+        for icon in [
+            super::arrow_repeat(),
+            super::aspect_ratio(),
+            super::check_lg(),
+            super::clipboard(),
+            super::file_earmark(),
+            super::folder(),
+            super::hdd(),
+            super::image(),
+            super::images(),
+            super::info_circle(),
+            super::pause_fill(),
+            super::pencil_square(),
+            super::play_fill(),
+            super::question_circle(),
+            super::trash(),
+            super::volume_mute(),
+            super::volume_up(),
+            super::x_lg(),
+            super::zoom_in(),
+        ] {
+            let _ = icon.size(16);
+        }
+    }
+}

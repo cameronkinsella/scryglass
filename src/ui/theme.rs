@@ -152,8 +152,7 @@ pub fn secondary_text(theme: &Theme) -> text::Style {
     }
 }
 
-/// Accent-colored text, used for the video section label in the help card.
-#[cfg(feature = "video")]
+/// Accent-colored text for section labels.
 pub fn accent_text(theme: &Theme) -> text::Style {
     text::Style {
         color: Some(tokens(theme).accent),
@@ -209,8 +208,8 @@ pub fn menu_item(theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
-/// Overlay close (X): de-emphasized grey, brightens with a rounded wash on hover.
-pub fn close_button(theme: &Theme, status: button::Status) -> button::Style {
+/// Subtle icon button: grey by default, brightens on hover.
+pub fn icon_button(theme: &Theme, status: button::Status) -> button::Style {
     let t = tokens(theme);
     let (background, text_color) = match status {
         button::Status::Hovered => (Some(with_alpha(t.text_primary, 0.10)), t.text_primary),
@@ -327,5 +326,89 @@ pub fn thumb(theme: &Theme, status: button::Status) -> button::Style {
             },
             ..button::Style::default()
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const STATES: [button::Status; 4] = [
+        button::Status::Active,
+        button::Status::Hovered,
+        button::Status::Pressed,
+        button::Status::Disabled,
+    ];
+
+    #[test]
+    fn dark_is_darker_than_light() {
+        assert!(tokens(&dark()).bg_base.r < tokens(&light()).bg_base.r);
+    }
+
+    #[test]
+    fn panel_is_elevated_with_a_border() {
+        let s = panel(&dark());
+        assert!(s.background.is_some());
+        assert!(s.border.width > 0.0);
+    }
+
+    #[test]
+    fn menu_item_washes_only_when_interacted() {
+        let t = dark();
+        assert!(menu_item(&t, button::Status::Active).background.is_none());
+        assert!(menu_item(&t, button::Status::Hovered).background.is_some());
+        assert!(menu_item(&t, button::Status::Pressed).background.is_some());
+    }
+
+    #[test]
+    fn icon_button_dims_until_hovered() {
+        let t = dark();
+        let idle = icon_button(&t, button::Status::Active);
+        let hot = icon_button(&t, button::Status::Hovered);
+        assert!(idle.background.is_none());
+        assert!(hot.background.is_some());
+        assert_ne!(idle.text_color, hot.text_color);
+    }
+
+    #[test]
+    fn check_indicator_visible_only_when_selected() {
+        let t = dark();
+        assert_eq!(check_indicator(true)(&t).color.unwrap(), tokens(&t).accent);
+        assert_eq!(
+            check_indicator(false)(&t).color.unwrap(),
+            Color::TRANSPARENT
+        );
+    }
+
+    #[test]
+    fn accent_and_secondary_text_use_their_tokens() {
+        let t = light();
+        assert_eq!(accent_text(&t).color.unwrap(), tokens(&t).accent);
+        assert_eq!(secondary_text(&t).color.unwrap(), tokens(&t).text_secondary);
+    }
+
+    #[test]
+    fn menu_tab_active_is_always_filled() {
+        let t = dark();
+        assert!(menu_tab_active(&t, button::Status::Active).background.is_some());
+        assert!(menu_tab(&t, button::Status::Active).background.is_none());
+    }
+
+    #[test]
+    fn every_style_builds_for_every_status() {
+        for theme in [dark(), light()] {
+            let _ = surface(&theme);
+            let _ = toast_info(&theme);
+            let _ = toast_error(&theme);
+            let _ = thumb_placeholder(&theme);
+            for status in STATES {
+                let _ = menu_item(&theme, status);
+                let _ = menu_tab(&theme, status);
+                let _ = menu_tab_active(&theme, status);
+                let _ = icon_button(&theme, status);
+                let _ = thumb(&theme, status);
+                let _ = thumb_current(&theme, status);
+            }
+        }
     }
 }

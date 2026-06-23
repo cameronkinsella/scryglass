@@ -45,7 +45,17 @@ pub fn settings<'a>(
     let budget = config.cache_budget_mb;
 
     let mut rows = column![
-        text("Settings").size(16),
+        row![
+            text("Settings").size(16),
+            button(container(crate::ui::icons::question_circle().size(16)).center(Length::Fill),)
+                .on_press(SettingsMessage::ShowHelp)
+                .width(Length::Fixed(26.0))
+                .height(Length::Fixed(26.0))
+                .padding(0)
+                .style(theme::icon_button),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
         switch(
             "Read-only mode (no delete or rename)",
             config.read_only,
@@ -120,4 +130,25 @@ pub fn settings<'a>(
     }
 
     crate::ui::overlay_card(container(rows).style(theme::panel), SettingsMessage::Close)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::settings;
+    use crate::config::AppConfig;
+    use iced_test::simulator;
+
+    #[test]
+    fn renders_title_and_steppers() {
+        let mut ui = simulator(settings(&AppConfig::default(), None, false));
+        assert!(ui.find("Settings").is_ok());
+        assert!(ui.find("Prefetch depth").is_ok());
+        assert!(ui.find("Image cache budget").is_ok());
+    }
+
+    #[test]
+    fn shows_the_thumbnail_store_size() {
+        let mut ui = simulator(settings(&AppConfig::default(), Some(2048), false));
+        assert!(ui.find("Thumbnail store: 2.0 KB").is_ok());
+    }
 }
