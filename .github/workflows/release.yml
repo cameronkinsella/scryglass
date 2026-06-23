@@ -162,28 +162,31 @@ jobs:
             throw "exe imports media DLLs, static link failed"
           }
 
-      - name: Package
-        shell: bash
-        run: |
-          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
-          name="scryglass-v${version}-${{ matrix.target }}"
-          mkdir "$name"
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            cp "target/${{ matrix.target }}/release/scryglass.exe" "$name/"
-          else
-            cp "target/${{ matrix.target }}/release/scryglass" "$name/"
-          fi
-          cp LICENSE THIRD-PARTY.md README.md "$name/"
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            7z a "$name.zip" "$name"
-          else
-            zip -r "$name.zip" "$name"
-          fi
+      - name: Install Inno Setup (Windows)
+        if: runner.os == 'Windows'
+        run: choco install innosetup -y --no-progress
 
-      - uses: actions/upload-artifact@v6
+      # --no-build: package the --all-features binary the Build step produced,
+      # rather than letting the xtask rebuild it with default features.
+      - name: Package artifacts
+        shell: bash
+        run: cargo xtask package --no-build --target ${{ matrix.target }}
+
+      - name: Upload the portable archive
+        uses: actions/upload-artifact@v6
         with:
-          name: scryglass-${{ matrix.target }}
-          path: "*.zip"
+          name: scryglass-${{ matrix.target }}-portable
+          path: |
+            target/dist/*.zip
+            target/dist/*.tar.gz
+      - name: Upload the application
+        uses: actions/upload-artifact@v6
+        with:
+          name: scryglass-${{ matrix.target }}-app
+          path: |
+            target/dist/*.AppImage
+            target/dist/*.dmg
+            target/dist/*-setup.exe
 
   release:
     name: Create release
@@ -198,4 +201,9 @@ jobs:
         with:
           draft: true
           generate_release_notes: true
-          files: "*.zip"
+          files: |
+            *.zip
+            *.tar.gz
+            *.AppImage
+            *.dmg
+            *-setup.exe
