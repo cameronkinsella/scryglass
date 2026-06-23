@@ -152,6 +152,14 @@ pub fn secondary_text(theme: &Theme) -> text::Style {
     }
 }
 
+/// Accent-colored text, used for the video section label in the help card.
+#[cfg(feature = "video")]
+pub fn accent_text(theme: &Theme) -> text::Style {
+    text::Style {
+        color: Some(tokens(theme).accent),
+    }
+}
+
 /// Menu selection checkmark: accent when selected, invisible otherwise
 /// (keeps label alignment identical across items).
 pub fn check_indicator(selected: bool) -> impl Fn(&Theme) -> text::Style {

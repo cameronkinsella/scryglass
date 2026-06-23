@@ -41,7 +41,8 @@ const VIDEO_SHORTCUTS: &[(&str, &str)] = &[
 pub fn help_overlay<'a>() -> Element<'a, Message> {
     let mut rows = column![text("Keyboard shortcuts").size(16)]
         .spacing(8)
-        .padding(18);
+        .padding(18)
+        .width(Length::Fixed(480.0));
 
     for &(keys, action) in SHORTCUTS {
         rows = rows.push(shortcut_row(keys, action));
@@ -49,8 +50,8 @@ pub fn help_overlay<'a>() -> Element<'a, Message> {
 
     #[cfg(feature = "video")]
     {
-        rows = rows.push(iced::widget::space::vertical().height(Length::Fixed(6.0)));
-        rows = rows.push(text("Video").size(14));
+        rows = rows.push(iced::widget::rule::horizontal(1));
+        rows = rows.push(text("Video").size(14).style(theme::accent_text));
         for &(keys, action) in VIDEO_SHORTCUTS {
             rows = rows.push(shortcut_row(keys, action));
         }
@@ -70,4 +71,25 @@ fn shortcut_row<'a>(keys: &'a str, action: &'a str) -> Element<'a, Message> {
     ]
     .spacing(12)
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::help_overlay;
+    use iced_test::simulator;
+
+    #[test]
+    fn renders_the_shortcut_list() {
+        let mut ui = simulator(help_overlay());
+        assert!(ui.find("Keyboard shortcuts").is_ok());
+        assert!(ui.find("First / last image").is_ok());
+    }
+
+    #[cfg(feature = "video")]
+    #[test]
+    fn shows_the_video_section() {
+        let mut ui = simulator(help_overlay());
+        assert!(ui.find("Video").is_ok());
+        assert!(ui.find("Play / pause").is_ok());
+    }
 }
