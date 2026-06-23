@@ -288,11 +288,8 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             Task::none()
         }
         Message::CursorLeft => {
-            if let Some(viewer) = app.viewer_mut()
-                && viewer.video.is_some()
-            {
-                viewer.video_controls_until =
-                    Some(Instant::now() + crate::app::VIDEO_CONTROLS_TIMEOUT);
+            if let Some(viewer) = app.viewer_mut() {
+                viewer.video_controls_until = None;
             }
             Task::none()
         }
@@ -407,26 +404,12 @@ mod tests {
     }
 
     #[test]
-    fn cursor_leave_without_video_leaves_controls_alone() {
+    fn cursor_leave_clears_the_controls_clock() {
         let mut app = viewing_app(&["a.png"], 0);
+        app.viewer_mut().unwrap().video_controls_until =
+            Some(Instant::now() + std::time::Duration::from_secs(5));
         let _ = update(&mut app, Message::CursorLeft);
         assert!(viewer(&app).video_controls_until.is_none());
-    }
-
-    #[cfg(not(feature = "video"))]
-    #[test]
-    fn cursor_leave_keeps_video_controls_briefly() {
-        let mut app = viewing_app(&["a.mp4"], 0);
-        app.viewer_mut().unwrap().video = Some(crate::video::VideoSession::open(
-            std::path::PathBuf::from("a.mp4"),
-            std::time::Duration::ZERO,
-            1.0,
-            false,
-            false,
-            false,
-        ));
-        let _ = update(&mut app, Message::CursorLeft);
-        assert!(viewer(&app).video_controls_until.is_some());
     }
 
     #[test]
