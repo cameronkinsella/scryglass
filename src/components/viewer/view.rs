@@ -25,6 +25,15 @@ pub(crate) fn view(app: &App) -> Element<'_, Message> {
 
             let image_view = image_view(app);
 
+            let controls_alive = viewer
+                .video_controls_until
+                .is_some_and(|until| iced::time::Instant::now() < until);
+            let hide_cursor = crate::app::viewer_math::hide_idle_cursor(
+                viewer.video.as_ref().is_some_and(|s| s.playing),
+                viewer.video_seek_drag.is_some(),
+                controls_alive,
+            );
+
             let interactive = mouse_area(image_view)
                 .on_press(Message::Viewer(viewer::Message::DragStart))
                 .on_right_press(Message::ContextMenu(context_menu::Message::Show))
@@ -44,6 +53,11 @@ pub(crate) fn view(app: &App) -> Element<'_, Message> {
                     Message::Viewer(viewer::Message::ScrollZoom(y))
                 })
                 .on_double_click(Message::Viewer(viewer::Message::ResetZoom));
+            let interactive = if hide_cursor {
+                interactive.interaction(mouse::Interaction::Hidden)
+            } else {
+                interactive
+            };
 
             // Info panel sits beside the image (not over it).
             let image_cell: Element<'_, Message> = if !app.fullscreen && app.config.show_info {

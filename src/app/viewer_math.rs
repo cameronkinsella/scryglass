@@ -65,6 +65,12 @@ pub fn nudge_zoom_percent(zoom: f32, dir: i32, min: f32, max: f32) -> f32 {
     (pct as f32 / 100.0).clamp(min, max)
 }
 
+/// Hide the cursor only while a video plays, isn't being scrubbed, and the
+/// transport controls have already timed out.
+pub fn hide_idle_cursor(playing: bool, seeking: bool, controls_alive: bool) -> bool {
+    playing && !seeking && !controls_alive
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,5 +238,27 @@ mod tests {
     fn nudge_zoom_percent_clamps_to_bounds() {
         assert_eq!(nudge_zoom_percent(0.01, -1, 0.01, 50.0), 0.01);
         assert_eq!(nudge_zoom_percent(50.0, 1, 0.01, 50.0), 50.0);
+    }
+
+    // --- hide_idle_cursor ---
+
+    #[test]
+    fn hide_idle_cursor_hides_when_playing_idle_and_controls_gone() {
+        assert!(hide_idle_cursor(true, false, false));
+    }
+
+    #[test]
+    fn hide_idle_cursor_visible_while_controls_are_up() {
+        assert!(!hide_idle_cursor(true, false, true));
+    }
+
+    #[test]
+    fn hide_idle_cursor_visible_while_seeking() {
+        assert!(!hide_idle_cursor(true, true, false));
+    }
+
+    #[test]
+    fn hide_idle_cursor_visible_when_paused() {
+        assert!(!hide_idle_cursor(false, false, false));
     }
 }
