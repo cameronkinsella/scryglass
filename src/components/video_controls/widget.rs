@@ -113,6 +113,7 @@ pub fn video_controls<'a>(state: VideoControls, opacity: f32) -> Element<'a, Vid
         .width(Length::Fill)
         .height(Length::Fill)
         .align_y(Alignment::End)
+        .padding(4)
         .into()
 }
 
