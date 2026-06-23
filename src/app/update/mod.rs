@@ -31,7 +31,7 @@ pub(crate) use navigation::{
 };
 pub(crate) use settings::{probe_disk_cache_size, save_config};
 
-use super::message::{is_context_menu_message, is_menu_message, is_viewer_interaction};
+use super::message::{is_context_menu_message, is_menu_message, is_modal_blocked};
 use super::state::Direction;
 use super::{App, Message};
 
@@ -53,9 +53,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         app.context_menu_pos = None;
     }
 
-    // A modal dialog owns the keyboard: viewer interactions go inert so
-    // text typed into an input never navigates or deletes.
-    if app.modal.is_some() && is_viewer_interaction(&message) {
+    // A modal dialog owns the keyboard: hotkey actions go inert so keys the
+    // text input doesn't capture never navigate, delete, or nudge the video.
+    if app.modal.is_some() && is_modal_blocked(&message) {
         return Task::none();
     }
 

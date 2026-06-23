@@ -72,7 +72,16 @@ fn is_backward_key(key: &Key) -> bool {
         || matches!(key, Key::Character(c) if c.as_ref() == "a")
 }
 
-fn handle_event(event: Event, _status: event::Status, _id: window::Id) -> Option<Message> {
+/// Whether a focused widget captured this keyboard event, so the global
+/// shortcut table should leave it alone (the rename input owns its keys).
+fn shortcut_suppressed(event: &Event, status: event::Status) -> bool {
+    status == event::Status::Captured && matches!(event, Event::Keyboard(_))
+}
+
+fn handle_event(event: Event, status: event::Status, _id: window::Id) -> Option<Message> {
+    if shortcut_suppressed(&event, status) {
+        return None;
+    }
     match &event {
         // --- Keyboard: initial press ---
         Event::Keyboard(keyboard::Event::KeyPressed {
@@ -236,5 +245,17 @@ mod tests {
             mouse::Button::Middle,
         )));
         assert!(msg.is_none());
+    }
+
+    #[test]
+    fn captured_keyboard_events_are_suppressed() {
+        let key = Event::Keyboard(keyboard::Event::ModifiersChanged(
+            keyboard::Modifiers::default(),
+        ));
+        assert!(shortcut_suppressed(&key, event::Status::Captured));
+        assert!(!shortcut_suppressed(&key, event::Status::Ignored));
+        // Mouse events pass through even when captured.
+        let mouse = Event::Mouse(mouse::Event::CursorLeft);
+        assert!(!shortcut_suppressed(&mouse, event::Status::Captured));
     }
 }

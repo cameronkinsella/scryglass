@@ -48,7 +48,10 @@ impl_message_from! {
     toasts => Toast,
 }
 
-pub fn is_viewer_interaction(msg: &Message) -> bool {
+/// Messages a modal dialog suppresses so the keyboard stays in its text input:
+/// the viewer, video, and toolbar hotkey actions (but not the passive video
+/// tick, nor the input's own RenameInput/Submit, which must still flow).
+pub fn is_modal_blocked(msg: &Message) -> bool {
     matches!(
         msg,
         Message::Viewer(
@@ -65,7 +68,14 @@ pub fn is_viewer_interaction(msg: &Message) -> bool {
                 | viewer::Message::ToggleFullscreen
                 | viewer::Message::ToggleInfo
                 | viewer::Message::ToggleHelp
-        ) | Message::Modal(modal::Message::RequestDelete | modal::Message::RequestRename)
+        ) | Message::VideoControls(
+            video_controls::Message::PlayPause
+                | video_controls::Message::NudgeVolume(_)
+                | video_controls::Message::ToggleMute
+                | video_controls::Message::SeekBy(_)
+                | video_controls::Message::StepFrame(_)
+        ) | Message::Toolbar(toolbar::Message::ToggleToolbar)
+            | Message::Modal(modal::Message::RequestDelete | modal::Message::RequestRename)
     )
 }
 
@@ -155,14 +165,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn modal_blocks_keyboard_viewer_interactions() {
-        assert!(is_viewer_interaction(&viewer::Message::Next.into()));
-        assert!(is_viewer_interaction(&viewer::Message::ZoomStep(1).into()));
-        assert!(is_viewer_interaction(&modal::Message::RequestRename.into()));
-        assert!(!is_viewer_interaction(
+    fn modal_blocks_hotkey_actions() {
+        assert!(is_modal_blocked(&viewer::Message::Next.into()));
+        assert!(is_modal_blocked(&viewer::Message::ZoomStep(1).into()));
+        assert!(is_modal_blocked(
+            &video_controls::Message::NudgeVolume(0.1).into()
+        ));
+        assert!(is_modal_blocked(&toolbar::Message::ToggleToolbar.into()));
+        assert!(is_modal_blocked(&modal::Message::RequestRename.into()));
+        // Typing into the field and the passive video tick still flow.
+        assert!(!is_modal_blocked(
             &modal::Message::RenameInput("photo.png".to_string()).into()
         ));
-        assert!(!is_viewer_interaction(&modal::Message::Submit.into()));
+        assert!(!is_modal_blocked(&modal::Message::Submit.into()));
+        assert!(!is_modal_blocked(&video_controls::Message::Tick.into()));
     }
 
     #[test]
