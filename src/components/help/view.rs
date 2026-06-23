@@ -43,6 +43,7 @@ pub fn help_overlay<'a>() -> Element<'a, Message> {
         .spacing(8)
         .padding(18)
         .width(Length::Fixed(480.0));
+    rows = rows.push(text("General").size(14).style(theme::accent_text));
 
     for &(keys, action) in SHORTCUTS {
         rows = rows.push(shortcut_row(keys, action));
@@ -82,6 +83,7 @@ mod tests {
     fn renders_the_shortcut_list() {
         let mut ui = simulator(help_overlay());
         assert!(ui.find("Keyboard shortcuts").is_ok());
+        assert!(ui.find("General").is_ok());
         assert!(ui.find("First / last image").is_ok());
     }
 
