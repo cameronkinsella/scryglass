@@ -14,20 +14,48 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          # Need the pushed range and old Cargo.toml blobs, not just the tip.
+          fetch-depth: 0
 
-      - name: Tag new versions and start the release
+      - name: Tag each version bump and start its release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
-          tag="v${version}"
-          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
-            echo "$tag already exists, nothing to do"
-            exit 0
+          before="${{ github.event.before }}"
+          after="${{ github.sha }}"
+          zero="0000000000000000000000000000000000000000"
+
+          if [ "$before" = "$zero" ] || ! git cat-file -e "$before" 2>/dev/null; then
+            # No usable predecessor (new branch). Inspect only the pushed tip.
+            commits="$after"
+          else
+            # Oldest first, so tags get created in the order they were committed.
+            commits=$(git rev-list --reverse "$before..$after")
           fi
-          git tag "$tag"
-          git push origin "$tag"
-          # Tags pushed with the workflow token do not fire tag-triggered
-          # workflows, so start the release run on the tag directly.
-          # Dispatch is the documented exception to that recursion rule.
-          gh workflow run release.yml --ref "$tag"
+
+          version_at() {
+            git show "$1:Cargo.toml" 2>/dev/null | grep -m1 '^version = ' | cut -d'"' -f2
+          }
+
+          for commit in $commits; do
+            new=$(version_at "$commit")
+            old=$(version_at "${commit}^")
+            # Act only on commits that actually changed the crate version.
+            if [ -z "$new" ] || [ "$new" = "$old" ]; then
+              continue
+            fi
+            tag="v${new}"
+            if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+              echo "$tag already exists, skipping $commit"
+              continue
+            fi
+            # Tag the bump commit itself so the release is built from that
+            # commit's tree and excludes anything pushed after it.
+            git tag "$tag" "$commit"
+            git push origin "$tag"
+            # Tags pushed with the workflow token do not fire tag-triggered
+            # workflows, so start the release run on the tag directly.
+            # Dispatch is the documented exception to that recursion rule.
+            gh workflow run release.yml --ref "$tag"
+          done
