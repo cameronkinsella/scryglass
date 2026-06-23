@@ -48,7 +48,7 @@ current user, no admin needed.
 
 ## Features
 
-- **Instant, flicker-free navigation**: every keypress moves immediately, blurred placeholders cover slow loads, and
+- **Smooth navigation**: every keypress moves immediately, blurred placeholders cover slow loads, and
   images render as pre-allocated GPU textures
 - **Built for slow storage**: all I/O runs off-thread with cancellation, so stalled reads never freeze the UI
 - **Smart caching**: background prefetch into a byte-budgeted LRU cache, plus persistent disk thumbnails with
