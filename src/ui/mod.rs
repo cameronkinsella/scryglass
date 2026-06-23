@@ -10,34 +10,49 @@ pub mod video_surface;
 
 use iced::{Element, Length};
 
-/// Present `card` as a click-away modal: an opaque backdrop that keeps the app
-/// behind inert (no hover, no clicks) and dismisses on any click outside the
-/// card, the card centered and scrollable, with a close X pinned to the
-/// top-right corner. The X stays put while the card scrolls.
+/// Present `content` as a click-away modal: an opaque backdrop that keeps the
+/// app behind inert and dismisses on any outside click, the content framed,
+/// centered, and scrollable, with a close X pinned to the top-right corner.
 pub fn overlay_card<'a, M: Clone + 'a>(
-    card: impl Into<Element<'a, M>>,
+    content: impl Into<Element<'a, M>>,
     on_close: M,
 ) -> Element<'a, M> {
     use iced::widget::{Stack, button, center, container, mouse_area, opaque, scrollable};
 
-    let close = button(icons::x_lg().size(14))
+    let close = button(container(icons::x_lg().size(14)).center(Length::Fill))
         .on_press(on_close.clone())
-        .padding(5)
+        .width(Length::Fixed(24.0))
+        .height(Length::Fixed(24.0))
+        .padding(0)
         .style(theme::icon_button);
 
-    // The card is opaque so clicks land on it instead of falling through to the
-    // dismiss backdrop. Stack sizes to its base layer, so the Fill close strip
-    // pins the X to the card's corner without widening it.
+    // Frame outside the scroll area so its corners stay put as the content scrolls.
+    let frame = container(
+        scrollable(content.into()).direction(scrollable::Direction::Both {
+            vertical: scrollable::Scrollbar::new(),
+            horizontal: scrollable::Scrollbar::new(),
+        }),
+    )
+    .style(theme::panel);
+
     let panel = opaque(Stack::with_children(vec![
-        scrollable(card.into()).into(),
+        frame.into(),
         container(close)
             .width(Length::Fill)
             .align_x(iced::Alignment::End)
-            .padding(8)
+            .padding([6, 16])
             .into(),
     ]));
 
-    opaque(mouse_area(center(panel).width(Length::Fill).height(Length::Fill)).on_press(on_close))
+    opaque(
+        mouse_area(
+            center(panel)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding(4),
+        )
+        .on_press(on_close),
+    )
 }
 
 /// Format image dimensions for display (e.g. "256 × 512 pixels").

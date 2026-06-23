@@ -1,6 +1,6 @@
 //! Keyboard shortcut help overlay, toggled with `?`.
 
-use iced::widget::{column, container, row, text};
+use iced::widget::{column, row, text};
 use iced::{Element, Length};
 
 use crate::app::{Message, ViewerMessage};
@@ -58,10 +58,7 @@ pub fn help_overlay<'a>() -> Element<'a, Message> {
         }
     }
 
-    crate::ui::overlay_card(
-        container(rows).style(theme::panel),
-        Message::Viewer(ViewerMessage::ToggleHelp),
-    )
+    crate::ui::overlay_card(rows, Message::Viewer(ViewerMessage::ToggleHelp))
 }
 
 /// One key/action line in the help card.

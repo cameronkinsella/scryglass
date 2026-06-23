@@ -129,7 +129,7 @@ pub fn settings<'a>(
         );
     }
 
-    crate::ui::overlay_card(container(rows).style(theme::panel), SettingsMessage::Close)
+    crate::ui::overlay_card(rows, SettingsMessage::Close)
 }
 
 #[cfg(test)]
