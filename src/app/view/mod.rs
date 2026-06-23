@@ -14,9 +14,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         nav_slider::scrub_bubble(app),
         toolbar::dropdown(app),
         context_menu::view(app),
-        help(app),
         modal::view(app),
-        settings::view(app),
         toasts::view(app),
     ]);
 
@@ -27,7 +25,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     }
     page = page.push(stacked);
 
-    if app.context_menu_pos.is_some() {
+    let base: Element<'_, Message> = if app.context_menu_pos.is_some() {
         mouse_area(page)
             .on_press(Message::ContextMenu(context_menu::Message::Dismiss))
             .on_right_press(Message::ContextMenu(context_menu::Message::Dismiss))
@@ -39,7 +37,10 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .into()
     } else {
         mouse_area(page).into()
-    }
+    };
+
+    // Above the page so the dismiss backdrop covers the menu bar too.
+    Stack::with_children(vec![base, help(app), settings::view(app)]).into()
 }
 
 fn help(app: &App) -> Element<'_, Message> {
