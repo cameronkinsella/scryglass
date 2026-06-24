@@ -41,3 +41,21 @@ Name: "{group}\Uninstall scryglass"; Filename: "{uninstallexe}"
 
 [Run]
 Filename: "{app}\scryglass.exe"; Description: "Launch scryglass"; Flags: nowait postinstall skipifsilent
+
+[Code]
+// The app writes settings to %AppData%\scryglass and a thumbnail cache to
+// %LocalAppData%\scryglass. Offer to remove them, since Inno only tracks the
+// installed program files.
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then
+  begin
+    if MsgBox('Also remove your scryglass settings and cached thumbnails?' + #13#10 +
+        'Choose No to keep them for a future reinstall.',
+        mbConfirmation, MB_YESNO) = IDYES then
+    begin
+      DelTree(ExpandConstant('{userappdata}\scryglass'), True, True, True);
+      DelTree(ExpandConstant('{localappdata}\scryglass'), True, True, True);
+    end;
+  end;
+end;
