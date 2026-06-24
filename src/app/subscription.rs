@@ -76,7 +76,7 @@ fn watch_dir(dir: PathBuf) -> Subscription<Message> {
     Subscription::run_with(dir, watch_stream)
 }
 
-/// The watcher runs on its own thread; events coalesce over a quiet window so a
+/// The watcher runs on its own thread. Events coalesce over a quiet window so a
 /// bulk change triggers a single refresh.
 // `run_with` hands the builder `&D`, so the parameter has to be `&PathBuf`.
 #[allow(clippy::ptr_arg)]

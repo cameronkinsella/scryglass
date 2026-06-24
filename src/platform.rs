@@ -1,7 +1,4 @@
 //! Platform-specific operations: clipboard, shell integration.
-//!
-//! Provides cross-platform abstractions that dispatch to native APIs
-//! on Windows and fall back to simpler approaches on other platforms.
 
 use std::path::Path;
 
@@ -22,14 +19,8 @@ pub fn copy_file_to_clipboard(path: &Path) {
 // Open image location (reveal in file manager)
 // ---------------------------------------------------------------------------
 
-/// Open the file's parent folder in the native file manager and highlight
-/// (select) the file.
-///
-/// On Windows this uses `SHOpenFolderAndSelectItems`, which reuses an
-/// existing Explorer window if the folder is already open, and highlights
-/// the target file.
-///
-/// On other platforms this uses the `open` crate to open the parent folder.
+/// Open the file's parent folder in the native file manager and, on Windows,
+/// select the file. Other platforms just open the folder.
 pub fn reveal_in_file_manager(path: &Path) {
     #[cfg(target_os = "windows")]
     windows::reveal_in_file_manager(path);
@@ -46,12 +37,8 @@ pub fn reveal_in_file_manager(path: &Path) {
 // Image properties dialog
 // ---------------------------------------------------------------------------
 
-/// Open the native file properties dialog for the given path.
-///
-/// On Windows this uses `ShellExecuteW` with the `"properties"` verb,
-/// which opens the standard Properties dialog.
-///
-/// On other platforms this is a no-op.
+/// Open the native file properties dialog for the given path. A no-op off
+/// Windows.
 pub fn show_properties(path: &Path) {
     #[cfg(target_os = "windows")]
     windows::show_properties(path);

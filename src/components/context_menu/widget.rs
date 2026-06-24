@@ -144,7 +144,6 @@ pub fn context_menu<'a>(
         .padding(Padding::from(2))
         .style(theme::panel);
 
-    // Position the panel at the cursor location.
     container(panel)
         .padding(Padding {
             top: pos.y,

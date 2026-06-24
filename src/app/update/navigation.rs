@@ -278,8 +278,8 @@ pub(crate) fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
 }
 
 /// Move display, title, cursor, and filmstrip onto `index` with minimal side
-/// effects (no generation bump, no prefetch, no probes; those run on settle).
-/// The slider centers the cursor in the filmstrip; key navigation (`center`
+/// effects (no generation bump, no prefetch, no probes, which run on settle).
+/// The slider centers the cursor in the filmstrip. Key navigation (`center`
 /// false) only scrolls enough to keep it on screen.
 pub(crate) fn scrub_to(app: &mut App, index: usize, center: bool) -> Task<Message> {
     let zoom_mode = app.config.zoom_mode;
@@ -399,7 +399,7 @@ pub(crate) fn complete_navigation(
         pipeline.bump_generation();
         pipeline.bump_thumb_generation();
         // Forget the queued thumbnails so the new neighborhood re-fires now
-        // instead of waiting behind the stale queue; the stale tasks bail.
+        // instead of waiting behind the stale queue. The stale tasks bail.
         viewer.in_flight_thumbs.clear();
     }
 
@@ -621,7 +621,7 @@ mod tests {
             .in_flight_thumbs
             .insert("005.png".into());
         let _ = complete_navigation(&mut app, 90, true);
-        // The far, stale entry is abandoned; only the new neighborhood re-fires.
+        // The far, stale entry is abandoned. Only the new neighborhood re-fires.
         assert!(
             !app.viewer()
                 .unwrap()

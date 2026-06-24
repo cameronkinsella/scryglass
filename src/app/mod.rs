@@ -121,7 +121,7 @@ pub struct App {
     pub(crate) toasts: Vec<Toast>,
     /// Monotonic toast ID source.
     pub(crate) next_toast_id: u64,
-    /// Result of the last manual update check (settings). Ephemeral; cleared
+    /// Result of the last manual update check (settings). Ephemeral, cleared
     /// when settings closes so a reopen never shows a stale verdict.
     #[cfg(feature = "update-check")]
     pub(crate) update_status: Option<crate::update_check::UpdateStatus>,

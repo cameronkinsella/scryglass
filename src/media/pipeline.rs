@@ -102,8 +102,7 @@ impl Pipeline {
             current_lane: Arc::new(Semaphore::new(2)),
             prefetch_lane: Arc::new(Semaphore::new(prefetch_permits)),
             thumb_lane: Arc::new(Semaphore::new(2)),
-            // Wide enough that scrubbing never waits on the background
-            // queue, bounded so a long key-hold can't flood the I/O pool.
+            // Bounded so a long key-hold can't flood the I/O pool.
             urgent_thumb_lane: Arc::new(Semaphore::new(8)),
             disk: Arc::new(std::sync::RwLock::new(disk)),
         }
@@ -237,7 +236,7 @@ pub enum ThumbUrgency {
 
 impl Pipeline {
     /// Produce a thumbnail for `path`. An urgent thumbnail (the current view's
-    /// blur) always runs; a background one fired before `generation` bails at
+    /// blur) always runs. A background one fired before `generation` bails at
     /// the lane, so a cursor jump reprioritizes the filmstrip.
     pub fn load_thumb(
         &self,
@@ -279,7 +278,7 @@ impl Pipeline {
 
             // Cheap path: embedded EXIF preview from the file prefix.
             let prefix = source.read_start(&path, thumbs::PREFIX_LEN).await?;
-            // The prefix read has latency on slow storage; bail if a jump
+            // The prefix read has latency on slow storage. Bail if a jump
             // happened during it rather than hold the lane through the decode.
             if urgency == ThumbUrgency::Background && live.load(Ordering::SeqCst) != generation {
                 return Err(MediaError::Cancelled);
@@ -299,7 +298,7 @@ impl Pipeline {
             // Background fallback: a registry decode capped at thumb size,
             // so every supported format gets filmstrip thumbnails.
             let bytes = source.read_all(&path).await?;
-            // A full read on slow storage is the costly part; bail if the
+            // A full read on slow storage is the costly part. Bail if the
             // cursor jumped away while it was in flight.
             if live.load(Ordering::SeqCst) != generation {
                 return Err(MediaError::Cancelled);

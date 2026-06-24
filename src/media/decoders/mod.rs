@@ -29,9 +29,7 @@ pub(crate) fn finish(img: DynamicImage, opts: &DecodeOpts) -> DecodedImage {
         img
     };
 
-    // Always produce a thumbnail here, cheaply (pixels already decoded).
-    // Even thumb-sized images need a filmstrip entry, and the background
-    // thumbnailer skips files a full decode covers.
+    // Always produce a thumbnail, since the pixels are already decoded.
     let rgba = img.into_rgba8();
     let (width, height) = rgba.dimensions();
     let thumbnail = if width.max(height) > crate::media::THUMB_DIM {

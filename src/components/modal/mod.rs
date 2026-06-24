@@ -291,16 +291,16 @@ fn resume_video(app: &mut App, resume: VideoResume, path: PathBuf) {
 /// How the view should react to a successful rename.
 #[derive(Debug, PartialEq, Eq)]
 enum RenameRefresh {
-    /// The open video kept a video name; resume it at its saved position.
+    /// The open video kept a video name. Resume it at its saved position.
     Resume,
-    /// The rename crossed the image/video line; reload to match the new kind.
+    /// The rename crossed the image/video line. Reload to match the new kind.
     Reload,
-    /// Same kind on both sides; the current display already fits.
+    /// Same kind on both sides, so the current display already fits.
     Keep,
 }
 
 /// Decide how to refresh after a rename. A video that stays a video resumes in
-/// place; a rename that flips image to video (or back) reloads so the player
+/// place. A rename that flips image to video (or back) reloads so the player
 /// and its controls appear or disappear without a manual navigation.
 fn rename_refresh(old_is_video: bool, new_is_video: bool, had_open_video: bool) -> RenameRefresh {
     if had_open_video && new_is_video {

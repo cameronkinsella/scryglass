@@ -1,4 +1,4 @@
-//! Checkerboard backdrop: the classic transparency indicator.
+//! Checkerboard backdrop drawn behind transparent images.
 
 use std::cell::Cell;
 

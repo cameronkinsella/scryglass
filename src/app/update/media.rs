@@ -113,7 +113,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                     }
                     // The file vanished (deleted outside the app): drop it and
                     // move on instead of erroring. The watcher usually removes it
-                    // first; this is the backstop for the race.
+                    // first. This is the backstop for the race.
                     if !path.exists() {
                         viewer.cache.remove(&path);
                         viewer.thumbs.remove(&path);
@@ -128,9 +128,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                         return complete_navigation(app, cursor, true);
                     }
                     // The file exists but won't decode (a video renamed to .png,
-                    // a truncated image). Remember it and land on it with the
-                    // error on screen, so it stays a visible, navigable stop
-                    // rather than a wall the cursor can't cross.
+                    // a truncated image). Remember it and show the error in place.
                     let name = path
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
@@ -180,7 +178,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                         show_placeholder(viewer, &path, thumb, zoom_mode, viewport);
                     }
                 }
-                // A jump cleared this slot; a re-fire may own it now, so leave
+                // A jump cleared this slot. A re-fire may own it now, so leave
                 // in_flight alone. The pump re-picks the path if nothing did.
                 Err(MediaError::Cancelled) => {}
                 Err(_) => {
@@ -413,7 +411,7 @@ mod tests {
     #[test]
     fn a_broken_file_becomes_a_navigable_error_stop() {
         use std::io::Write;
-        // Real files so the not-found backstop doesn't fire; the cursor starts
+        // Real files so the not-found backstop doesn't fire. The cursor starts
         // on `a` with a pending move onto the (undecodable) `b`.
         let dir = std::env::temp_dir().join(format!("scryglass-broken-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

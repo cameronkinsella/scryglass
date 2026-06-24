@@ -73,7 +73,7 @@ pub enum MediaError {
 
 /// A file's true format, sniffed from its leading bytes. Used to warn when a
 /// rename would give the file an extension that misrepresents its contents.
-/// Only formats worth warning about are recognized; anything else is `None`.
+/// Only formats worth warning about are recognized. Anything else is `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileFormat {
     /// Human-facing label, e.g. "PNG".

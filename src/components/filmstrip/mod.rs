@@ -60,7 +60,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                 }
             } else {
                 viewer.filmstrip_scrolled_at = iced::time::Instant::now();
-                // Arm one settle check at a time; it reschedules itself.
+                // Arm one settle check at a time. It reschedules itself.
                 if viewer.visible_settle_pending {
                     Task::none()
                 } else {

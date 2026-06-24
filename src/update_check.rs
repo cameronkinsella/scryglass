@@ -13,7 +13,7 @@ pub enum UpdateStatus {
         version: String,
         url: String,
     },
-    /// Network or parse failure. Surfaced calmly; an offline viewer is fine.
+    /// Network or parse failure, surfaced calmly.
     Failed,
 }
 
@@ -55,7 +55,7 @@ fn parse_release(body: &str) -> Option<(String, String)> {
 }
 
 /// Compare the running version to the latest tag (a leading `v` is optional on
-/// either). Newer tag wins; equal or older is up to date; unparsable fails.
+/// either). Newer tag wins, equal or older is up to date, unparsable fails.
 fn decide(current: &str, tag: &str, url: &str) -> UpdateStatus {
     match (
         Version::parse(strip_v(current)),

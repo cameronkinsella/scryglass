@@ -12,9 +12,9 @@ pub enum Message {
     FileDialogResult(Option<PathBuf>),
     CloseFile,
     Quit,
-    /// The open folder changed on disk; trigger a re-scan.
+    /// The open folder changed on disk. Trigger a re-scan.
     DirectoryChanged(PathBuf),
-    /// A re-scan finished; reconcile the file list with it.
+    /// A re-scan finished. Reconcile the file list with it.
     DirectoryRescanned(PathBuf, Option<Vec<PathBuf>>),
 }
 use iced::Task;

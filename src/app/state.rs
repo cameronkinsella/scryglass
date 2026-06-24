@@ -88,8 +88,8 @@ pub enum DisplayedImage {
     /// Live video, drawn by the GPU YUV surface. Carries dimensions for
     /// zoom and the info panel. The frame planes live on the viewer.
     Video { original_size: (u32, u32) },
-    /// The file couldn't be decoded; the image area shows this message
-    /// instead of an image, so a broken file is a visible, navigable stop.
+    /// The file couldn't be decoded, so the image area shows this message
+    /// instead of an image.
     Error { message: String },
 }
 

@@ -110,9 +110,7 @@ pub fn from_image_frames<'a>(
     Ok(finish_animation(width, height, frames))
 }
 
-/// Derive the first-frame thumbnail and assemble the result. The
-/// thumbnail is always produced, even thumb-sized animations need a
-/// filmstrip entry.
+/// Derive the first-frame thumbnail and assemble the result.
 fn finish_animation(width: u32, height: u32, frames: Vec<RawFrame>) -> AnimatedImage {
     let mut canvas = FrameCanvas::new(width, height);
     canvas.composite_frame(&frames[0]);

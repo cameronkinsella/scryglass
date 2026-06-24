@@ -213,7 +213,7 @@ pub fn filmstrip<'a>(
         .on_scroll(|viewport| FilmstripMessage::Scrolled(viewport.absolute_offset().x))
         .width(Length::Fill);
 
-    // Wrap in mouse_area to intercept vertical scroll and convert to horizontal.
+    // Vertical wheel scrolls the strip horizontally.
     let scrollable_area = mouse_area(scroll).on_scroll(|delta| {
         let y = match delta {
             iced::mouse::ScrollDelta::Lines { y, .. } => y,
