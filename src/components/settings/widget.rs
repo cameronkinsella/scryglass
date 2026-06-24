@@ -15,10 +15,10 @@ pub fn settings<'a>(
     associations_registered: bool,
     #[cfg(feature = "update-check")] update_status: Option<&crate::update_check::UpdateStatus>,
 ) -> Element<'a, SettingsMessage> {
-    let switch = |label: &str, on: bool, msg: fn(bool) -> SettingsMessage| {
+    let switch = |label: &str, on: bool, enabled: bool, msg: fn(bool) -> SettingsMessage| {
         toggler(on)
             .label(label.to_string())
-            .on_toggle(msg)
+            .on_toggle_maybe(enabled.then_some(msg))
             .size(15)
             .text_size(13)
             .width(Length::Fill)
@@ -60,12 +60,17 @@ pub fn settings<'a>(
         switch(
             "Read-only mode (no delete or rename)",
             config.read_only,
+            true,
             |_| SettingsMessage::ToggleReadOnly
         ),
-        switch("Confirm before deleting", config.confirm_delete, |_| {
-            SettingsMessage::ToggleConfirmDelete
-        }),
-        switch("Mouse edge navigation", config.mouse_nav, |_| {
+        // Useless while read-only blocks deletion outright, so grey it out then.
+        switch(
+            "Confirm before deleting",
+            config.confirm_delete,
+            !config.read_only,
+            |_| SettingsMessage::ToggleConfirmDelete,
+        ),
+        switch("Mouse edge navigation", config.mouse_nav, true, |_| {
             SettingsMessage::ToggleMouseNav
         }),
         rule::horizontal(1),
@@ -89,9 +94,12 @@ pub fn settings<'a>(
     #[cfg(feature = "disk-thumbs")]
     {
         rows = rows.push(rule::horizontal(1));
-        rows = rows.push(switch("Persistent thumbnails", config.disk_thumbs, |_| {
-            SettingsMessage::ToggleDiskThumbs
-        }));
+        rows = rows.push(switch(
+            "Persistent thumbnails",
+            config.disk_thumbs,
+            true,
+            |_| SettingsMessage::ToggleDiskThumbs,
+        ));
         let size_label = disk_cache_size
             .map(crate::ui::format_file_size)
             .unwrap_or_else(|| "…".to_string());
@@ -115,6 +123,7 @@ pub fn settings<'a>(
         rows = rows.push(switch(
             "Hardware video decode",
             config.hardware_decode,
+            true,
             |_| SettingsMessage::ToggleHardwareDecode,
         ));
     }
