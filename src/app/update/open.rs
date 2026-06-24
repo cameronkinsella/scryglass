@@ -12,6 +12,10 @@ pub enum Message {
     FileDialogResult(Option<PathBuf>),
     CloseFile,
     Quit,
+    /// The open folder changed on disk; trigger a re-scan.
+    DirectoryChanged(PathBuf),
+    /// A re-scan finished; reconcile the file list with it.
+    DirectoryRescanned(PathBuf, Option<Vec<PathBuf>>),
 }
 use iced::Task;
 use iced::time::Instant;
@@ -110,6 +114,31 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
         }
 
         Message::Quit => iced::exit(),
+
+        Message::DirectoryChanged(dir) => Task::perform(
+            async move {
+                let files = crate::nav::scan_directory(&dir).ok();
+                (dir, files)
+            },
+            |(dir, files)| AppMessage::Open(OpenMessage::DirectoryRescanned(dir, files)),
+        ),
+
+        Message::DirectoryRescanned(dir, files) => {
+            let Some(files) = files else {
+                return Task::none();
+            };
+            let Some(viewer) = app.viewer_mut() else {
+                return Task::none();
+            };
+            // Ignore a scan that arrives after navigating to another folder.
+            if !matches!(viewer.source, Source::Fs)
+                || viewer.nav.current().parent() != Some(dir.as_path())
+            {
+                return Task::none();
+            }
+            viewer.nav.replace_files(files);
+            Task::none()
+        }
     }
 }
 
@@ -157,6 +186,28 @@ mod tests {
         let mut app = empty_app();
         let _ = update(&mut app, Message::FileDialogResult(Some("x.png".into())));
         assert!(app.opening_since.is_some());
+    }
+
+    #[test]
+    fn directory_rescanned_reconciles_the_file_list() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        // The synthetic current file's parent is the empty path.
+        let files = vec![
+            PathBuf::from("a.png"),
+            PathBuf::from("b.png"),
+            PathBuf::from("c.png"),
+        ];
+        let _ = update(
+            &mut app,
+            Message::DirectoryRescanned(PathBuf::from(""), Some(files)),
+        );
+        assert_eq!(app.viewer().unwrap().nav.files().len(), 3);
+        // A scan for a different directory is ignored.
+        let _ = update(
+            &mut app,
+            Message::DirectoryRescanned(PathBuf::from("elsewhere"), Some(vec![PathBuf::from("z")])),
+        );
+        assert_eq!(app.viewer().unwrap().nav.files().len(), 3);
     }
 
     #[tokio::test]

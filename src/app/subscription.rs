@@ -2,13 +2,16 @@
 //! window) into messages, and drive the timers for spinners, animation,
 //! and video frame pacing.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
+use iced::futures::{SinkExt, Stream};
 use iced::keyboard::Key;
 use iced::keyboard::key::Named;
 use iced::{Event, Subscription, event, keyboard, mouse, window};
 
 use crate::anim::AnimMessage;
+use crate::media::pipeline::Source;
 
 use super::shortcuts;
 use super::{
@@ -55,9 +58,67 @@ pub fn subscription(app: &App) -> Subscription<Message> {
                     .map(|_| Message::VideoControls(VideoControlsMessage::Tick)),
             );
         }
+
+        // Keep the file list in sync with the folder on disk.
+        if matches!(viewer.source, Source::Fs)
+            && let Some(dir) = viewer.nav.current().parent()
+        {
+            subs.push(watch_dir(dir.to_path_buf()));
+        }
     }
 
     Subscription::batch(subs)
+}
+
+/// Subscribe to filesystem changes in `dir`, keyed by the directory so opening
+/// a different folder restarts the watch.
+fn watch_dir(dir: PathBuf) -> Subscription<Message> {
+    Subscription::run_with(dir, watch_stream)
+}
+
+/// The watcher runs on its own thread; events coalesce over a quiet window so a
+/// bulk change triggers a single refresh.
+// `run_with` hands the builder `&D`, so the parameter has to be `&PathBuf`.
+#[allow(clippy::ptr_arg)]
+fn watch_stream(dir: &PathBuf) -> impl Stream<Item = Message> + use<> {
+    use notify::{RecursiveMode, Watcher};
+
+    let dir = dir.clone();
+    iced::stream::channel(
+        4,
+        move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+            let mut watcher =
+                match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                    if res.is_ok() {
+                        let _ = tx.send(());
+                    }
+                }) {
+                    Ok(watcher) => watcher,
+                    Err(_) => return,
+                };
+            if watcher.watch(&dir, RecursiveMode::NonRecursive).is_err() {
+                return;
+            }
+            while rx.recv().await.is_some() {
+                // Drain the burst until the folder goes quiet, then refresh once.
+                while let Ok(again) =
+                    tokio::time::timeout(Duration::from_millis(300), rx.recv()).await
+                {
+                    if again.is_none() {
+                        return;
+                    }
+                }
+                if output
+                    .send(Message::Open(OpenMessage::DirectoryChanged(dir.clone())))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        },
+    )
 }
 
 /// Returns true if the key is a forward navigation key (ArrowRight or D).

@@ -90,6 +90,8 @@ pub fn is_menu_message(msg: &Message) -> bool {
                     | open::Message::CloseFile
                     | open::Message::Quit
                     | open::Message::DirectoryScanned(_, _, _)
+                    | open::Message::DirectoryChanged(_)
+                    | open::Message::DirectoryRescanned(_, _)
                     | open::Message::ArchiveScanned(_, _)
                     | open::Message::FileDialogResult(_)
             )
@@ -132,6 +134,8 @@ pub fn is_context_menu_message(msg: &Message) -> bool {
             | Message::Modal(modal::Message::RequestDelete | modal::Message::RequestRename)
             | Message::Open(
                 open::Message::DirectoryScanned(_, _, _)
+                    | open::Message::DirectoryChanged(_)
+                    | open::Message::DirectoryRescanned(_, _)
                     | open::Message::ArchiveScanned(_, _)
                     | open::Message::FileDialogResult(_)
             )

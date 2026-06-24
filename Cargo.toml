@@ -43,6 +43,8 @@ iced_fonts = { version = "0.3", features = ["bootstrap"] }
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.1.2"
 dirs = "6.0.0"
+# Watch the open folder so external file adds/removes stay reflected.
+notify = "8"
 tokio = { version = "1.52.3", features = ["fs", "io-util", "macros", "rt", "sync", "time"] }
 # Trimmed feature set: the decoders the registry claims plus qoi, the
 # disk thumbnail codec. The default set would add AV1/AVIF encoding via

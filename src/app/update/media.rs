@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::media::MediaError;
 use crate::media::pipeline::ThumbUrgency;
 
-use crate::app::state::{CachedImage, LoadedMedia, Thumb};
+use crate::app::state::{CachedImage, LoadedMedia, Session, Thumb};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -112,6 +112,21 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                     viewer.pending_since = None;
                     if is_pending {
                         viewer.pending_nav = None;
+                    }
+                    // The file vanished (deleted outside the app): drop it and
+                    // move on instead of erroring. The watcher usually removes it
+                    // first; this is the backstop for the race.
+                    if !path.exists() {
+                        viewer.cache.remove(&path);
+                        viewer.thumbs.remove(&path);
+                        viewer.anim_player.remove(&path);
+                        viewer.failed_thumbs.remove(&path);
+                        if !viewer.nav.remove(&path) {
+                            app.session = Session::Empty;
+                            return Task::none();
+                        }
+                        let cursor = viewer.nav.cursor();
+                        return complete_navigation(app, cursor, true);
                     }
                     let name = path
                         .file_name()
