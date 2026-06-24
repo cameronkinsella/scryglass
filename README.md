@@ -46,6 +46,27 @@ its Settings and pick it under Settings > Apps > Default apps. This
 registers every supported image, video, and comic format for the
 current user, no admin needed.
 
+## Uninstall
+
+How you remove scryglass depends on how it was installed:
+
+- **Windows installer**: run *Uninstall scryglass* from the Start menu or
+  Settings > Apps. It offers to also delete your settings and thumbnail
+  cache. Choose No to keep them for a reinstall.
+- **macOS**: drag `scryglass.app` to the Trash.
+- **Linux AppImage** or a **portable archive**: delete the file or folder.
+
+Apart from the Windows installer's prompt, removal leaves your data in the
+standard per-user locations, all safe to delete by hand:
+
+| Data                      | Windows                    | Linux                 | macOS                                    |
+|---------------------------|----------------------------|-----------------------|------------------------------------------|
+| Settings (`config.toml`)  | `%APPDATA%\scryglass`      | `~/.config/scryglass` | `~/Library/Application Support/scryglass` |
+| Thumbnail cache           | `%LOCALAPPDATA%\scryglass` | `~/.cache/scryglass`  | `~/Library/Caches/scryglass`             |
+
+The thumbnail cache is the larger of the two and can also be cleared anytime
+from File → Settings.
+
 ## Features
 
 - **Smooth navigation**: every keypress moves immediately, blurred placeholders cover slow loads, and
