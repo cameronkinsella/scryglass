@@ -273,11 +273,14 @@ pub(crate) fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
 }
 
 /// Mid-drag scrub step onto an already-loaded file: move display, title,
-/// and cursor together with minimal side effects: no generation bump, no
-/// prefetch, no probes, no filmstrip centering. Those run once on release.
+/// cursor, and filmstrip together with minimal side effects: no generation
+/// bump, no prefetch, no probes. Those run once on release.
 pub(crate) fn scrub_to(app: &mut App, index: usize) -> Task<Message> {
     let zoom_mode = app.config.zoom_mode;
     let viewport = app.viewport_size;
+    let window_w = app.window_size.width;
+    let show_filmstrip = app.config.show_filmstrip;
+    let pipeline = app.pipeline.clone();
     let Some(viewer) = app.viewer_mut() else {
         return Task::none();
     };
@@ -308,7 +311,26 @@ pub(crate) fn scrub_to(app: &mut App, index: usize) -> Task<Message> {
         viewer.pending_since = Some(Instant::now());
         show_placeholder_or_clear(viewer, &current, zoom_mode, viewport);
     }
-    Task::none()
+
+    // Keep the cursor on screen in the filmstrip, just like key navigation.
+    let mut tasks = Vec::new();
+    if show_filmstrip {
+        let offset = crate::components::filmstrip::keep_visible_offset(
+            viewer.filmstrip_scroll_x,
+            viewer.nav.cursor(),
+            window_w,
+            viewer.nav.len(),
+        );
+        if offset != viewer.filmstrip_scroll_x {
+            viewer.filmstrip_scroll_x = offset;
+            tasks.push(iced::widget::operation::scroll_to(
+                crate::components::filmstrip::filmstrip_id(),
+                iced::widget::scrollable::AbsoluteOffset { x: offset, y: 0.0 },
+            ));
+        }
+        tasks.extend(fire_visible_thumbs(&pipeline, viewer, window_w));
+    }
+    Task::batch(tasks)
 }
 
 /// A pending navigation's target just became displayable, finish the move.
@@ -520,5 +542,16 @@ mod tests {
         let v = app.viewer().unwrap();
         assert_eq!(v.nav.cursor(), 1);
         assert!(v.pending_nav.is_none());
+    }
+
+    #[test]
+    fn scrubbing_keeps_the_cursor_visible_in_the_filmstrip() {
+        let names: Vec<String> = (0..100).map(|i| format!("{i:03}.png")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut app = viewing_app(&refs, 0);
+        app.config.show_filmstrip = true;
+        assert_eq!(app.viewer().unwrap().filmstrip_scroll_x, 0.0);
+        let _ = scrub_to(&mut app, 99);
+        assert!(app.viewer().unwrap().filmstrip_scroll_x > 0.0);
     }
 }
