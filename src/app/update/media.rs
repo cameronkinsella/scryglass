@@ -166,10 +166,9 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                 return Task::none();
             };
 
-            viewer.in_flight_thumbs.remove(&path);
-
             match result {
                 Ok(thumb) => {
+                    viewer.in_flight_thumbs.remove(&path);
                     let cost = thumb.byte_cost();
                     viewer.thumbs.insert(path.clone(), thumb.clone(), cost);
                     if viewer.nav.current() == path
@@ -179,7 +178,11 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                         show_placeholder(viewer, &path, thumb, zoom_mode, viewport);
                     }
                 }
+                // A jump cleared this slot; a re-fire may own it now, so leave
+                // in_flight alone. The pump re-picks the path if nothing did.
+                Err(MediaError::Cancelled) => {}
                 Err(_) => {
+                    viewer.in_flight_thumbs.remove(&path);
                     if urgency == ThumbUrgency::Background {
                         viewer.failed_thumbs.insert(path.clone());
                     }
@@ -344,6 +347,28 @@ mod tests {
                 .failed_thumbs
                 .contains(Path::new("b.png"))
         );
+    }
+
+    #[test]
+    fn a_cancelled_thumb_keeps_its_slot_and_is_not_failed() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        app.viewer_mut()
+            .unwrap()
+            .in_flight_thumbs
+            .insert("b.png".into());
+        let _ = update(
+            &mut app,
+            Message::ThumbLoaded {
+                path: "b.png".into(),
+                urgency: ThumbUrgency::Background,
+                result: Err(crate::media::MediaError::Cancelled),
+            },
+        );
+        let v = app.viewer().unwrap();
+        // A re-fire after the jump may own the slot, so it isn't cleared, and a
+        // stale cancellation never marks the file as failed.
+        assert!(v.in_flight_thumbs.contains(Path::new("b.png")));
+        assert!(!v.failed_thumbs.contains(Path::new("b.png")));
     }
 
     #[test]

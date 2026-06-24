@@ -79,6 +79,9 @@ impl Source {
 #[derive(Clone)]
 pub struct Pipeline {
     generation: Arc<AtomicU64>,
+    /// Separate generation for background thumbnails, bumped when the cursor
+    /// jumps so stale filmstrip work yields to the new neighborhood.
+    thumb_generation: Arc<AtomicU64>,
     current_lane: Arc<Semaphore>,
     prefetch_lane: Arc<Semaphore>,
     thumb_lane: Arc<Semaphore>,
@@ -95,6 +98,7 @@ impl Pipeline {
             .unwrap_or(2);
         Self {
             generation: Arc::new(AtomicU64::new(0)),
+            thumb_generation: Arc::new(AtomicU64::new(0)),
             current_lane: Arc::new(Semaphore::new(2)),
             prefetch_lane: Arc::new(Semaphore::new(prefetch_permits)),
             thumb_lane: Arc::new(Semaphore::new(2)),
@@ -125,6 +129,17 @@ impl Pipeline {
     /// Mark a new navigation. Loads fired for older generations become stale.
     pub fn bump_generation(&self) -> u64 {
         self.generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// The current background-thumbnail generation.
+    pub fn thumb_generation(&self) -> u64 {
+        self.thumb_generation.load(Ordering::SeqCst)
+    }
+
+    /// Mark a cursor jump. Background thumbnails fired for older generations
+    /// bail at the lane so the new neighborhood loads first.
+    pub fn bump_thumb_generation(&self) -> u64 {
+        self.thumb_generation.fetch_add(1, Ordering::SeqCst) + 1
     }
 
     /// Load and decode `path`. Returns [`MediaError::Cancelled`] if a newer
@@ -221,18 +236,21 @@ pub enum ThumbUrgency {
 }
 
 impl Pipeline {
-    /// Produce a thumbnail for `path`. Thumbnails are never cancelled by
-    /// navigation. Every result is useful to the filmstrip eventually.
+    /// Produce a thumbnail for `path`. An urgent thumbnail (the current view's
+    /// blur) always runs; a background one fired before `generation` bails at
+    /// the lane, so a cursor jump reprioritizes the filmstrip.
     pub fn load_thumb(
         &self,
         source: Source,
         path: PathBuf,
         urgency: ThumbUrgency,
+        generation: u64,
     ) -> impl Future<Output = Result<ThumbData, MediaError>> + Send + 'static {
         let semaphore = match urgency {
             ThumbUrgency::Urgent => self.urgent_thumb_lane.clone(),
             ThumbUrgency::Background => self.thumb_lane.clone(),
         };
+        let live = self.thumb_generation.clone();
         let disk = self.disk();
 
         async move {
@@ -240,6 +258,10 @@ impl Pipeline {
                 .acquire_owned()
                 .await
                 .map_err(|_| MediaError::Cancelled)?;
+            // A background thumbnail from a stale neighborhood yields its lane.
+            if urgency == ThumbUrgency::Background && live.load(Ordering::SeqCst) != generation {
+                return Err(MediaError::Cancelled);
+            }
 
             let (container, name) = cache_key(&source, &path);
 
@@ -257,6 +279,11 @@ impl Pipeline {
 
             // Cheap path: embedded EXIF preview from the file prefix.
             let prefix = source.read_start(&path, thumbs::PREFIX_LEN).await?;
+            // The prefix read has latency on slow storage; bail if a jump
+            // happened during it rather than hold the lane through the decode.
+            if urgency == ThumbUrgency::Background && live.load(Ordering::SeqCst) != generation {
+                return Err(MediaError::Cancelled);
+            }
             let from_prefix =
                 tokio::task::spawn_blocking(move || thumbs::thumb_from_prefix(&prefix))
                     .await
@@ -272,6 +299,11 @@ impl Pipeline {
             // Background fallback: a registry decode capped at thumb size,
             // so every supported format gets filmstrip thumbnails.
             let bytes = source.read_all(&path).await?;
+            // A full read on slow storage is the costly part; bail if the
+            // cursor jumped away while it was in flight.
+            if live.load(Ordering::SeqCst) != generation {
+                return Err(MediaError::Cancelled);
+            }
             let thumb = tokio::task::spawn_blocking(move || {
                 let magic = &bytes[..bytes.len().min(16)];
                 let format = registry::global()
@@ -464,7 +496,34 @@ mod tests {
         let path = write_png(&dir, "a.png", 4, 2);
         let pipeline = Pipeline::new(None);
         let result = pipeline
-            .load_thumb(Source::Fs, path, ThumbUrgency::Urgent)
+            .load_thumb(Source::Fs, path, ThumbUrgency::Urgent, 0)
+            .await;
+        assert!(matches!(result, Err(MediaError::Unsupported)));
+    }
+
+    #[tokio::test]
+    async fn a_stale_background_thumb_bails_at_the_lane() {
+        let dir = TempDir::new().unwrap();
+        let path = write_png(&dir, "a.png", 600, 300);
+        let pipeline = Pipeline::new(None);
+        let stale = pipeline.thumb_generation();
+        pipeline.bump_thumb_generation();
+        let result = pipeline
+            .load_thumb(Source::Fs, path, ThumbUrgency::Background, stale)
+            .await;
+        assert!(matches!(result, Err(MediaError::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn an_urgent_thumb_ignores_the_generation() {
+        let dir = TempDir::new().unwrap();
+        // 4x2 has no embedded preview, so an urgent thumb fails fast rather
+        // than bailing as cancelled, proving the generation isn't checked.
+        let path = write_png(&dir, "a.png", 4, 2);
+        let pipeline = Pipeline::new(None);
+        pipeline.bump_thumb_generation();
+        let result = pipeline
+            .load_thumb(Source::Fs, path, ThumbUrgency::Urgent, 0)
             .await;
         assert!(matches!(result, Err(MediaError::Unsupported)));
     }
@@ -475,7 +534,7 @@ mod tests {
         let path = write_png(&dir, "a.png", 600, 300);
         let pipeline = Pipeline::new(None);
         let thumb = pipeline
-            .load_thumb(Source::Fs, path, ThumbUrgency::Background)
+            .load_thumb(Source::Fs, path, ThumbUrgency::Background, 0)
             .await
             .expect("fallback should produce a thumbnail");
         assert_eq!(thumb.original_size, (600, 300));
@@ -502,7 +561,7 @@ mod tests {
 
         let pipeline = Pipeline::new(None);
         let thumb = pipeline
-            .load_thumb(Source::Fs, path, ThumbUrgency::Background)
+            .load_thumb(Source::Fs, path, ThumbUrgency::Background, 0)
             .await
             .expect("animated fallback should produce a thumbnail");
         assert_eq!(thumb.original_size, (4, 4));

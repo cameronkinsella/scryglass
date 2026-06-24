@@ -232,7 +232,12 @@ pub(crate) fn fire_thumb(
     }
 
     viewer.in_flight_thumbs.insert(path.clone());
-    let load = pipeline.load_thumb(viewer.source.clone(), path.clone(), urgency);
+    let load = pipeline.load_thumb(
+        viewer.source.clone(),
+        path.clone(),
+        urgency,
+        pipeline.thumb_generation(),
+    );
     Task::perform(load, move |result| {
         Message::Media(MediaMessage::ThumbLoaded {
             path: path.clone(),

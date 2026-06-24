@@ -384,8 +384,13 @@ pub(crate) fn complete_navigation(
     viewer.pending_nav = None;
 
     if bump_generation {
-        // Everything in flight for the old position is now stale.
+        // Everything in flight for the old position is now stale, including
+        // background thumbnails for the neighborhood we just left.
         pipeline.bump_generation();
+        pipeline.bump_thumb_generation();
+        // Forget the queued thumbnails so the new neighborhood re-fires now
+        // instead of waiting behind the stale queue; the stale tasks bail.
+        viewer.in_flight_thumbs.clear();
     }
 
     viewer.anim_player.stop();
@@ -563,5 +568,48 @@ mod tests {
         let expected = crate::components::filmstrip::center_offset(50, 800.0, 100);
         assert_eq!(app.viewer().unwrap().filmstrip_scroll_x, expected);
         assert!(expected > 0.0);
+    }
+
+    fn many() -> Vec<String> {
+        (0..100).map(|i| format!("{i:03}.png")).collect()
+    }
+
+    #[test]
+    fn a_jump_drops_stale_far_in_flight_thumbnails() {
+        let names = many();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut app = viewing_app(&refs, 0);
+        // A thumbnail queued far from where we jump.
+        app.viewer_mut()
+            .unwrap()
+            .in_flight_thumbs
+            .insert("005.png".into());
+        let _ = complete_navigation(&mut app, 90, true);
+        // The far, stale entry is abandoned; only the new neighborhood re-fires.
+        assert!(
+            !app.viewer()
+                .unwrap()
+                .in_flight_thumbs
+                .contains(std::path::Path::new("005.png"))
+        );
+    }
+
+    #[test]
+    fn a_pending_resolve_keeps_far_in_flight_thumbnails() {
+        let names = many();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut app = viewing_app(&refs, 0);
+        app.viewer_mut()
+            .unwrap()
+            .in_flight_thumbs
+            .insert("005.png".into());
+        // Resolving a pending move (no bump) preserves the in-flight load.
+        let _ = complete_navigation(&mut app, 90, false);
+        assert!(
+            app.viewer()
+                .unwrap()
+                .in_flight_thumbs
+                .contains(std::path::Path::new("005.png"))
+        );
     }
 }
