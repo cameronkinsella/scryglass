@@ -1,8 +1,10 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use iced::Task;
 use iced::widget::image::Handle;
 
+use crate::components::modal::VideoResume;
 use crate::components::toasts::ToastKind;
 use crate::media::pipeline::Pipeline;
 
@@ -36,20 +38,39 @@ pub(crate) fn file_op_target(app: &mut App) -> Result<PathBuf, Task<Message>> {
         .unwrap_or_default())
 }
 
-/// Move a file to the recycle bin, off-thread.
-pub(crate) fn fire_delete(app: &mut App, path: PathBuf) -> Task<Message> {
+/// Move a file to the recycle bin, off-thread. `resume` restores a video that
+/// was torn down to free its handle, should the delete fail.
+pub(crate) fn fire_delete(
+    app: &mut App,
+    path: PathBuf,
+    resume: Option<VideoResume>,
+) -> Task<Message> {
     app.modal = None;
-    Task::perform(
-        async move {
-            let p = path.clone();
-            let result = tokio::task::spawn_blocking(move || trash::delete(&p))
-                .await
-                .map_err(|e| e.to_string())
-                .and_then(|r| r.map_err(|e| e.to_string()));
-            (path, result)
-        },
-        |(path, result)| Message::Modal(ModalMessage::DeleteFinished(path, result)),
-    )
+    let target = path.clone();
+    Task::perform(trash_with_retry(target), move |result| {
+        Message::Modal(ModalMessage::DeleteFinished(path, result, resume))
+    })
+}
+
+/// Recycle a file, retrying briefly: the video decoder can keep it open for a
+/// moment on Windows after its session drops.
+async fn trash_with_retry(path: PathBuf) -> Result<(), String> {
+    let mut err = String::new();
+    for attempt in 0..5 {
+        let p = path.clone();
+        let result = tokio::task::spawn_blocking(move || trash::delete(&p))
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| e.to_string()));
+        match result {
+            Ok(()) => return Ok(()),
+            Err(e) => err = e,
+        }
+        if attempt < 4 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    Err(err)
 }
 
 /// Put the displayed image on the clipboard as bitmap data.
