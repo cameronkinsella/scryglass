@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use iced::Task;
@@ -7,7 +7,7 @@ use iced::time::Instant;
 use crate::anim::AnimPlayer;
 use crate::app::state::{Direction, DisplayedImage, Session, Viewer};
 use crate::app::{App, MediaMessage, Message, OpenMessage};
-use crate::config::ZoomMode;
+use crate::config::{AppConfig, ZoomMode};
 use crate::media::archive::{self, ArchiveIndex};
 use crate::media::pipeline::{Lane, Source, ThumbUrgency};
 use crate::nav::{self, Nav};
@@ -173,6 +173,19 @@ pub(crate) fn open_viewer(
     Task::batch(tasks)
 }
 
+/// Without this guard the scan would drop the file and the open fail later
+/// with the opaque "start file not found in directory listing".
+fn unsupported_file_message(path: &Path) -> Option<String> {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) if AppConfig::is_supported_extension(ext) => None,
+        Some(ext) => Some(format!(
+            "unsupported file type (.{})",
+            ext.to_ascii_lowercase()
+        )),
+        None => Some(String::from("unsupported file type")),
+    }
+}
+
 /// Shared logic for opening a path (from drop, dialog, or CLI argument).
 ///
 /// A file opens at that file within its parent directory. A directory
@@ -200,6 +213,9 @@ pub(crate) fn open_path(path: PathBuf) -> Task<Message> {
             let (dir, start) = if path.is_dir() {
                 (path, None)
             } else {
+                if let Some(reason) = unsupported_file_message(&path) {
+                    return (path, false, Err(reason));
+                }
                 let dir = path
                     .parent()
                     .map(|p| p.to_path_buf())
@@ -504,6 +520,28 @@ pub(crate) fn complete_navigation(
 mod tests {
     use super::*;
     use crate::app::test_support::viewing_app;
+
+    #[test]
+    fn supported_files_have_no_unsupported_message() {
+        assert!(unsupported_file_message(Path::new("a.png")).is_none());
+        assert!(unsupported_file_message(Path::new("PHOTO.PNG")).is_none());
+    }
+
+    #[test]
+    fn unsupported_files_report_their_type() {
+        let msg = unsupported_file_message(Path::new("notes.txt")).unwrap();
+        assert!(msg.contains("unsupported"));
+        assert!(msg.contains("txt"));
+        assert_eq!(
+            unsupported_file_message(Path::new("READ.TXT")).as_deref(),
+            Some("unsupported file type (.txt)")
+        );
+    }
+
+    #[test]
+    fn extensionless_files_are_unsupported() {
+        assert!(unsupported_file_message(Path::new("LICENSE")).is_some());
+    }
 
     #[test]
     fn a_step_is_dropped_while_a_move_is_pending() {
