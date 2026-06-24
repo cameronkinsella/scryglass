@@ -13,6 +13,8 @@ mod media;
 mod nav;
 mod platform;
 mod ui;
+#[cfg(feature = "update-check")]
+mod update_check;
 #[cfg(feature = "video")]
 mod video;
 #[cfg(not(feature = "video"))]

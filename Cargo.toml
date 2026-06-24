@@ -78,6 +78,11 @@ rodio = { version = "0.22", default-features = false, features = ["playback"], o
 ffmpeg-next = { version = "8", default-features = false, features = ["codec", "format", "software-resampling", "software-scaling"], optional = true }
 # Enable wgpu's SPIR-V frontend.
 wgpu = { version = "27", features = ["spirv"], optional = true }
+# Manual update check (the `update-check` feature). rustls only, never
+# native-tls: TLS in this app must be rustls (a hard project rule).
+ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }
+serde_json = { version = "1", optional = true }
+semver = { version = "1", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_Foundation", "Win32_System_Com", "Win32_System_Console", "Win32_System_Ole", "Win32_System_Registry"] }
@@ -100,8 +105,11 @@ zune-jpegxl = "0.5.2"
 [features]
 # RAR support builds the vendored unrar C++ sources. On by default,
 # disable with --no-default-features if the toolchain can't build it.
-default = ["rar", "disk-thumbs", "jxl", "svg", "raw"]
+default = ["rar", "disk-thumbs", "jxl", "svg", "raw", "update-check"]
 rar = ["dep:unrar"]
+# Manual "check for updates" button in settings (queries the GitHub releases
+# API). Off => no network code compiles at all.
+update-check = ["dep:ureq", "dep:serde_json", "dep:semver"]
 # Persistent thumbnail cache on disk (privacy-conscious: reconciled
 # against deleted files on folder open, 90-day expiry, size-capped).
 # Also gated at runtime by the `disk_thumbs` config setting.

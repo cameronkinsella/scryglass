@@ -53,6 +53,8 @@ pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Message>) {
         opening_since: None,
         toasts: Vec::new(),
         next_toast_id: 0,
+        #[cfg(feature = "update-check")]
+        update_status: None,
     };
     recalc_viewport(&mut app);
 

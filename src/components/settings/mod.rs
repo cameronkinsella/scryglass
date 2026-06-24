@@ -12,6 +12,12 @@ pub enum Message {
     ToggleDiskThumbs,
     ToggleHardwareDecode,
     ToggleFileAssociations,
+    #[cfg(feature = "update-check")]
+    CheckForUpdates,
+    #[cfg(feature = "update-check")]
+    UpdateChecked(crate::update_check::UpdateStatus),
+    #[cfg(feature = "update-check")]
+    OpenReleasePage(String),
 }
 use iced::{Element, Task};
 
@@ -26,6 +32,8 @@ pub(crate) fn view(app: &App) -> Element<'_, AppMessage> {
             &app.config,
             app.disk_cache_size,
             app.associations_registered,
+            #[cfg(feature = "update-check")]
+            app.update_status.as_ref(),
         )
         .map(AppMessage::Settings),
         _ => empty(),
@@ -44,6 +52,11 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
 
         Message::Close => {
             app.modal = None;
+            // Start fresh next open, so a reopen never shows a stale verdict.
+            #[cfg(feature = "update-check")]
+            {
+                app.update_status = None;
+            }
             Task::none()
         }
 
@@ -135,6 +148,26 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             app.config.hardware_decode = !app.config.hardware_decode;
             save_config(app)
         }
+
+        #[cfg(feature = "update-check")]
+        Message::CheckForUpdates => {
+            app.update_status = Some(crate::update_check::UpdateStatus::Checking);
+            Task::perform(crate::update_check::fetch_latest(), |status| {
+                AppMessage::Settings(Message::UpdateChecked(status))
+            })
+        }
+
+        #[cfg(feature = "update-check")]
+        Message::UpdateChecked(status) => {
+            app.update_status = Some(status);
+            Task::none()
+        }
+
+        #[cfg(feature = "update-check")]
+        Message::OpenReleasePage(url) => {
+            let _ = open::that(url);
+            Task::none()
+        }
     }
 }
 mod widget;
@@ -197,5 +230,25 @@ mod tests {
         let _ = update(&mut app, Message::ShowHelp);
         assert!(app.modal.is_none());
         assert!(app.help_open);
+    }
+
+    #[cfg(feature = "update-check")]
+    #[test]
+    fn update_checked_stores_the_status() {
+        use crate::update_check::UpdateStatus;
+        let mut app = empty_app();
+        let _ = update(&mut app, Message::UpdateChecked(UpdateStatus::UpToDate));
+        assert_eq!(app.update_status, Some(UpdateStatus::UpToDate));
+    }
+
+    #[cfg(feature = "update-check")]
+    #[test]
+    fn closing_settings_clears_the_update_status() {
+        use crate::update_check::UpdateStatus;
+        let mut app = empty_app();
+        app.modal = Some(Modal::Settings);
+        app.update_status = Some(UpdateStatus::UpToDate);
+        let _ = update(&mut app, Message::Close);
+        assert!(app.update_status.is_none());
     }
 }

@@ -13,6 +13,7 @@ pub fn settings<'a>(
     config: &AppConfig,
     disk_cache_size: Option<u64>,
     associations_registered: bool,
+    #[cfg(feature = "update-check")] update_status: Option<&crate::update_check::UpdateStatus>,
 ) -> Element<'a, SettingsMessage> {
     let switch = |label: &str, on: bool, msg: fn(bool) -> SettingsMessage| {
         toggler(on)
@@ -129,7 +130,72 @@ pub fn settings<'a>(
         );
     }
 
+    rows = rows.push(rule::horizontal(1));
+    rows = rows.push(
+        text(concat!("scryglass v", env!("CARGO_PKG_VERSION")))
+            .size(11)
+            .style(theme::secondary_text),
+    );
+    #[cfg(feature = "update-check")]
+    {
+        rows = rows.push(update_section(update_status));
+    }
+
     crate::ui::overlay_card(rows, SettingsMessage::Close)
+}
+
+/// A check button with the last result styled inline to its right.
+#[cfg(feature = "update-check")]
+fn update_section<'a>(
+    status: Option<&crate::update_check::UpdateStatus>,
+) -> Element<'a, SettingsMessage> {
+    use crate::ui::icons;
+    use crate::update_check::UpdateStatus;
+
+    let checking = matches!(status, Some(UpdateStatus::Checking));
+    let check = button(text("Check for updates").size(13))
+        // Disabled mid-check so a double press can't fire two requests.
+        .on_press_maybe((!checking).then_some(SettingsMessage::CheckForUpdates))
+        .padding([3, 12])
+        .style(button::secondary);
+
+    let Some(status) = status else {
+        return check.into();
+    };
+    let result: Element<'a, SettingsMessage> = match status {
+        UpdateStatus::Checking => text("Checking…")
+            .size(13)
+            .style(theme::secondary_text)
+            .into(),
+        UpdateStatus::UpToDate => row![
+            icons::check_lg().size(13).style(theme::success_text),
+            text("Up to date").size(13).style(theme::success_text),
+        ]
+        .spacing(5)
+        .align_y(iced::Alignment::Center)
+        .into(),
+        UpdateStatus::Available { version, url } => button(
+            row![
+                icons::arrow_repeat().size(13),
+                text(format!("v{version} available")).size(13),
+            ]
+            .spacing(5)
+            .align_y(iced::Alignment::Center),
+        )
+        .on_press(SettingsMessage::OpenReleasePage(url.clone()))
+        .padding([2, 6])
+        .style(theme::link_button)
+        .into(),
+        UpdateStatus::Failed => text("Couldn't check for updates")
+            .size(13)
+            .style(theme::secondary_text)
+            .into(),
+    };
+
+    row![check, result]
+        .spacing(10)
+        .align_y(iced::Alignment::Center)
+        .into()
 }
 
 #[cfg(test)]
@@ -140,7 +206,13 @@ mod tests {
 
     #[test]
     fn renders_title_and_steppers() {
-        let mut ui = simulator(settings(&AppConfig::default(), None, false));
+        let mut ui = simulator(settings(
+            &AppConfig::default(),
+            None,
+            false,
+            #[cfg(feature = "update-check")]
+            None,
+        ));
         assert!(ui.find("Settings").is_ok());
         assert!(ui.find("Prefetch depth").is_ok());
         assert!(ui.find("Image cache budget").is_ok());
@@ -148,7 +220,37 @@ mod tests {
 
     #[test]
     fn shows_the_thumbnail_store_size() {
-        let mut ui = simulator(settings(&AppConfig::default(), Some(2048), false));
+        let mut ui = simulator(settings(
+            &AppConfig::default(),
+            Some(2048),
+            false,
+            #[cfg(feature = "update-check")]
+            None,
+        ));
         assert!(ui.find("Thumbnail store: 2.0 KB").is_ok());
+    }
+
+    #[cfg(feature = "update-check")]
+    #[test]
+    fn shows_version_and_check_button() {
+        let mut ui = simulator(settings(&AppConfig::default(), None, false, None));
+        assert!(
+            ui.find(concat!("scryglass v", env!("CARGO_PKG_VERSION")))
+                .is_ok()
+        );
+        assert!(ui.find("Check for updates").is_ok());
+    }
+
+    #[cfg(feature = "update-check")]
+    #[test]
+    fn shows_an_available_update_with_a_link() {
+        use crate::update_check::UpdateStatus;
+        let status = UpdateStatus::Available {
+            version: "9.9.9".into(),
+            url: "https://example/release".into(),
+        };
+        let mut ui = simulator(settings(&AppConfig::default(), None, false, Some(&status)));
+        // The version-and-link is one compact clickable element.
+        assert!(ui.find("v9.9.9 available").is_ok());
     }
 }

@@ -160,6 +160,13 @@ pub fn accent_text(theme: &Theme) -> text::Style {
     }
 }
 
+/// Green text for a positive status (e.g. "up to date").
+pub fn success_text(theme: &Theme) -> text::Style {
+    text::Style {
+        color: Some(theme.palette().success),
+    }
+}
+
 /// Multiply a color's alpha, for fading a subtree iced can't fade directly.
 pub fn fade(color: Color, opacity: f32) -> Color {
     Color {
@@ -264,6 +271,25 @@ pub fn icon_button(theme: &Theme, status: button::Status) -> button::Style {
         text_color,
         border: Border {
             radius: 6.0.into(),
+            ..Border::default()
+        },
+        ..button::Style::default()
+    }
+}
+
+/// Inline accent link: borderless, accent text, faint wash on hover.
+pub fn link_button(theme: &Theme, status: button::Status) -> button::Style {
+    let t = tokens(theme);
+    let background = match status {
+        button::Status::Hovered => Some(Background::Color(with_alpha(t.accent, 0.12))),
+        button::Status::Pressed => Some(Background::Color(with_alpha(t.accent, 0.18))),
+        _ => None,
+    };
+    button::Style {
+        background,
+        text_color: t.accent,
+        border: Border {
+            radius: 4.0.into(),
             ..Border::default()
         },
         ..button::Style::default()
