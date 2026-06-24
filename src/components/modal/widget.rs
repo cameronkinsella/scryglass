@@ -38,30 +38,41 @@ pub fn confirm_delete<'a>(file_name: &str) -> Element<'a, ModalMessage> {
     overlay(card.into())
 }
 
-/// Inline rename dialog with a focused text input.
-pub fn rename_dialog<'a>(input: &str) -> Element<'a, ModalMessage> {
-    let card = column![
-        text("Rename").size(15),
-        text_input("File name", input)
-            .id(rename_input_id())
-            .on_input(ModalMessage::RenameInput)
-            .on_submit(ModalMessage::CommitRename)
-            .size(13)
-            .width(Length::Fixed(280.0)),
-        row![
-            button(text("Rename").size(13))
-                .on_press(ModalMessage::CommitRename)
-                .padding([5, 14])
-                .style(button::primary),
-            button(text("Cancel").size(13))
-                .on_press(ModalMessage::Cancel)
-                .padding([5, 14])
-                .style(button::secondary),
-        ]
-        .spacing(8),
+/// Inline rename dialog with a focused text input. `warning`, when present, is
+/// shown under the field to flag an extension that misrepresents the file.
+pub fn rename_dialog<'a>(input: &str, warning: Option<&str>) -> Element<'a, ModalMessage> {
+    let field = text_input("File name", input)
+        .id(rename_input_id())
+        .on_input(ModalMessage::RenameInput)
+        .on_submit(ModalMessage::CommitRename)
+        .size(13)
+        .width(Length::Fixed(280.0));
+
+    let buttons = row![
+        button(text("Rename").size(13))
+            .on_press(ModalMessage::CommitRename)
+            .padding([5, 14])
+            .style(button::primary),
+        button(text("Cancel").size(13))
+            .on_press(ModalMessage::Cancel)
+            .padding([5, 14])
+            .style(button::secondary),
     ]
-    .spacing(12)
-    .padding(18);
+    .spacing(8);
+
+    let mut items: Vec<Element<'a, ModalMessage>> =
+        vec![text("Rename").size(15).into(), field.into()];
+    if let Some(w) = warning {
+        items.push(
+            text(w.to_string())
+                .size(11)
+                .style(theme::secondary_text)
+                .into(),
+        );
+    }
+    items.push(buttons.into());
+
+    let card = column(items).spacing(12).padding(18);
 
     overlay(card.into())
 }
@@ -90,7 +101,13 @@ mod tests {
     #[test]
     fn rename_dialog_builds_with_a_stable_input_id() {
         let _ = rename_input_id();
-        let mut ui = simulator(rename_dialog("photo.jpg"));
+        let mut ui = simulator(rename_dialog("photo.jpg", None));
         assert!(ui.find("Cancel").is_ok());
+    }
+
+    #[test]
+    fn rename_dialog_shows_a_mismatch_warning() {
+        let mut ui = simulator(rename_dialog("photo.jpg", Some("Saving as .jpg, but PNG")));
+        assert!(ui.find("Saving as .jpg, but PNG").is_ok());
     }
 }

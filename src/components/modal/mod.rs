@@ -44,7 +44,10 @@ pub(crate) fn view(app: &App) -> Element<'_, AppMessage> {
                 .unwrap_or_default();
             widget::confirm_delete(&name).map(AppMessage::Modal)
         }
-        Some(Modal::Rename { input }) => widget::rename_dialog(input).map(AppMessage::Modal),
+        Some(Modal::Rename { input, format }) => {
+            let warning = format.and_then(|f| rename_warning(input, f));
+            widget::rename_dialog(input, warning.as_deref()).map(AppMessage::Modal)
+        }
         _ => empty(),
     }
 }
@@ -104,22 +107,27 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            app.modal = Some(Modal::Rename { input });
-            Task::batch([
-                iced::widget::operation::focus(widget::rename_input_id()),
-                iced::widget::operation::select_all(widget::rename_input_id()),
-            ])
+            let format = sniff_file_format(&target);
+            // Preselect the name but not the extension, so a quick retype keeps
+            // the extension. Whole-field select when there's nothing to protect.
+            let id = widget::rename_input_id();
+            let select = match name_stem_len(&input) {
+                Some(len) => iced::widget::operation::select_range(id.clone(), 0, len),
+                None => iced::widget::operation::select_all(id.clone()),
+            };
+            app.modal = Some(Modal::Rename { input, format });
+            Task::batch([iced::widget::operation::focus(id), select])
         }
 
         Message::RenameInput(text) => {
-            if let Some(Modal::Rename { input }) = &mut app.modal {
+            if let Some(Modal::Rename { input, .. }) = &mut app.modal {
                 *input = text;
             }
             Task::none()
         }
 
         Message::CommitRename => {
-            let Some(Modal::Rename { input }) = &app.modal else {
+            let Some(Modal::Rename { input, .. }) = &app.modal else {
                 return Task::none();
             };
             let name = match validate_rename(input) {
@@ -266,6 +274,36 @@ fn resume_video(app: &mut App, resume: VideoResume, path: PathBuf) {
     viewer.video = Some(session);
 }
 
+/// Where the name ends and the extension begins, so the rename field can
+/// preselect just the name. `None` when there's no extension to leave alone.
+fn name_stem_len(name: &str) -> Option<usize> {
+    let path = Path::new(name);
+    path.extension()?;
+    Some(path.file_stem()?.to_str()?.chars().count())
+}
+
+/// Read a file's leading bytes and sniff its real format for the rename hint.
+fn sniff_file_format(path: &Path) -> Option<crate::media::FileFormat> {
+    use std::io::Read;
+    let mut magic = [0u8; 16];
+    let mut file = std::fs::File::open(path).ok()?;
+    let read = file.read(&mut magic).ok()?;
+    crate::media::sniff_format(&magic[..read])
+}
+
+/// A note for the rename dialog when the typed extension would mislabel the
+/// file (naming a PNG ".jpg", say). `None` when the extension fits or is absent.
+fn rename_warning(name: &str, format: crate::media::FileFormat) -> Option<String> {
+    let ext = Path::new(name).extension()?.to_str()?.to_ascii_lowercase();
+    if format.extensions.contains(&ext.as_str()) {
+        return None;
+    }
+    Some(format!(
+        "Saving as .{ext}, but the contents are {}.",
+        format.label
+    ))
+}
+
 mod widget;
 
 #[cfg(test)]
@@ -278,9 +316,10 @@ mod tests {
         let mut app = empty_app();
         app.modal = Some(Modal::Rename {
             input: "old".into(),
+            format: None,
         });
         let _ = update(&mut app, Message::RenameInput("new".into()));
-        assert!(matches!(&app.modal, Some(Modal::Rename { input }) if input.as_str() == "new"));
+        assert!(matches!(&app.modal, Some(Modal::Rename { input, .. }) if input.as_str() == "new"));
     }
 
     #[test]
@@ -297,7 +336,7 @@ mod tests {
         app.config.read_only = false;
         let _ = update(&mut app, Message::RequestRename);
         assert!(
-            matches!(&app.modal, Some(Modal::Rename { input }) if input.as_str() == "photo.png")
+            matches!(&app.modal, Some(Modal::Rename { input, .. }) if input.as_str() == "photo.png")
         );
     }
 
@@ -323,6 +362,7 @@ mod tests {
         let mut app = viewing_app(&["photo.png", "b.png"], 0);
         app.modal = Some(Modal::Rename {
             input: "photo.png".into(),
+            format: None,
         });
         let _ = update(&mut app, Message::CommitRename);
         // The dialog closes, and an unchanged name is a no-op (no rename task).
@@ -338,6 +378,7 @@ mod tests {
         let mut app = viewing_app(&["photo.png", "b.png"], 0);
         app.modal = Some(Modal::Rename {
             input: "renamed.png".into(),
+            format: None,
         });
         let _ = update(&mut app, Message::CommitRename);
         assert!(app.modal.is_none());
@@ -427,5 +468,34 @@ mod tests {
             Message::RenameFinished("a.png".into(), "b.png".into(), Err("nope".into()), None),
         );
         assert!(app.toasts.len() > before);
+    }
+
+    #[test]
+    fn stem_selection_stops_before_the_extension() {
+        assert_eq!(name_stem_len("photo.png"), Some(5));
+        assert_eq!(name_stem_len("my.photo.png"), Some(8));
+        assert_eq!(name_stem_len("IMG.JPG"), Some(3));
+        // Nothing to protect: no extension, or a leading-dot name.
+        assert_eq!(name_stem_len("noext"), None);
+        assert_eq!(name_stem_len(".png"), None);
+    }
+
+    #[test]
+    fn warns_only_when_the_extension_misrepresents_the_file() {
+        let png = crate::media::FileFormat {
+            label: "PNG",
+            extensions: &["png"],
+        };
+        assert!(rename_warning("photo.jpg", png).unwrap().contains("PNG"));
+        assert!(rename_warning("photo.png", png).is_none());
+        // Case-insensitive, and a missing extension says nothing.
+        assert!(rename_warning("photo.PNG", png).is_none());
+        assert!(rename_warning("photo", png).is_none());
+        // Every honest extension for the format is accepted.
+        let jpeg = crate::media::FileFormat {
+            label: "JPEG",
+            extensions: &["jpg", "jpeg"],
+        };
+        assert!(rename_warning("photo.jpeg", jpeg).is_none());
     }
 }

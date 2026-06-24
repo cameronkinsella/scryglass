@@ -70,3 +70,89 @@ pub enum MediaError {
     #[error("could not decode image: {0}")]
     Decode(String),
 }
+
+/// A file's true format, sniffed from its leading bytes. Used to warn when a
+/// rename would give the file an extension that misrepresents its contents.
+/// Only formats worth warning about are recognized; anything else is `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileFormat {
+    /// Human-facing label, e.g. "PNG".
+    pub label: &'static str,
+    /// Extensions that honestly name this format, e.g. `["jpg", "jpeg"]`.
+    pub extensions: &'static [&'static str],
+}
+
+/// Identify a file's format from its first bytes, the same magic-byte signals
+/// the decoder dispatch uses. `None` when it isn't a format we recognize.
+pub fn sniff_format(magic: &[u8]) -> Option<FileFormat> {
+    use image::ImageFormat as Kind;
+
+    // SVG is XML text, so the binary signature table below misses it.
+    if looks_like_svg(magic) {
+        return Some(FileFormat {
+            label: "SVG",
+            extensions: &["svg", "svgz"],
+        });
+    }
+
+    let kind = image::guess_format(magic).ok()?;
+    let label = match kind {
+        Kind::Png => "PNG",
+        Kind::Jpeg => "JPEG",
+        Kind::Gif => "GIF",
+        Kind::WebP => "WebP",
+        Kind::Tiff => "TIFF",
+        Kind::Bmp => "BMP",
+        Kind::Ico => "ICO",
+        Kind::Avif => "AVIF",
+        Kind::Qoi => "QOI",
+        _ => return None,
+    };
+    Some(FileFormat {
+        label,
+        extensions: kind.extensions_str(),
+    })
+}
+
+/// Whether the bytes begin an SVG document, allowing a BOM and leading space.
+fn looks_like_svg(magic: &[u8]) -> bool {
+    let trimmed = magic
+        .strip_prefix(&[0xEF, 0xBB, 0xBF])
+        .unwrap_or(magic)
+        .trim_ascii_start();
+    trimmed.starts_with(b"<svg") || trimmed.starts_with(b"<?xml")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn png_bytes() -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn sniffs_png_by_content() {
+        let format = sniff_format(&png_bytes()).expect("png should sniff");
+        assert_eq!(format.label, "PNG");
+        assert!(format.extensions.contains(&"png"));
+    }
+
+    #[test]
+    fn sniffs_svg_text() {
+        assert_eq!(sniff_format(b"<svg xmlns=").map(|f| f.label), Some("SVG"));
+        assert_eq!(
+            sniff_format(b"  <?xml version=").map(|f| f.label),
+            Some("SVG")
+        );
+    }
+
+    #[test]
+    fn unrecognized_bytes_are_none() {
+        assert!(sniff_format(b"not an image at all").is_none());
+        assert!(sniff_format(&[]).is_none());
+    }
+}

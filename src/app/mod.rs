@@ -145,8 +145,12 @@ impl App {
 pub enum Modal {
     /// Confirm moving the file to the recycle bin.
     ConfirmDelete(PathBuf),
-    /// Rename the file in place.
-    Rename { input: String },
+    /// Rename the file in place. `format` is the file's sniffed format, used to
+    /// flag a rename that would mislabel it (`None` if it couldn't be sniffed).
+    Rename {
+        input: String,
+        format: Option<crate::media::FileFormat>,
+    },
     /// The settings card.
     Settings,
 }
