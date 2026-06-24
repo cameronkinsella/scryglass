@@ -1,7 +1,7 @@
 //! Toolbar: "File", "Zoom", and "Layout" dropdown menus, styled to look
 //! like a native menu bar.
 
-use iced::widget::{button, column, container, row, rule, text, toggler};
+use iced::widget::{button, column, container, mouse_area, row, rule, text, toggler};
 use iced::{Alignment, Element, Length, Padding};
 
 use crate::app::{Message, OpenMessage, SettingsMessage, ToolbarMessage, ViewerMessage};
@@ -85,6 +85,12 @@ pub fn dropdown<'a>(
 ) -> Option<Element<'a, Message>> {
     let open = open_menu?;
 
+    let keep_open = |panel: Element<'a, Message>| -> Element<'a, Message> {
+        mouse_area(panel)
+            .on_press(Message::Toolbar(ToolbarMessage::KeepMenuOpen))
+            .into()
+    };
+
     // A plain action item: label only, aligned with checkable items.
     let item = |label: &str, msg: Message| {
         button(text(label.to_string()).size(13))
@@ -127,7 +133,7 @@ pub fn dropdown<'a>(
             .padding(Padding::from(4))
             .style(theme::panel);
 
-            let positioned = container(panel).padding(Padding {
+            let positioned = container(keep_open(panel.into())).padding(Padding {
                 top: 2.0,
                 right: 0.0,
                 bottom: 0.0,
@@ -162,7 +168,7 @@ pub fn dropdown<'a>(
                 .padding(Padding::from(4))
                 .style(theme::panel);
 
-            let positioned = container(panel).padding(Padding {
+            let positioned = container(keep_open(panel.into())).padding(Padding {
                 top: 2.0,
                 right: 0.0,
                 bottom: 0.0,
@@ -197,7 +203,7 @@ pub fn dropdown<'a>(
                 .padding(Padding::from(4))
                 .style(theme::panel);
 
-            let positioned = container(panel).padding(Padding {
+            let positioned = container(keep_open(panel.into())).padding(Padding {
                 top: 2.0,
                 right: 0.0,
                 bottom: 0.0,
@@ -243,7 +249,7 @@ pub fn dropdown<'a>(
             .style(theme::panel);
 
             // Position under the "Layout" tab.
-            let positioned = container(panel).padding(Padding {
+            let positioned = container(keep_open(panel.into())).padding(Padding {
                 top: 2.0,
                 right: 0.0,
                 bottom: 0.0,

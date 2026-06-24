@@ -16,6 +16,8 @@ pub enum Message {
     ToggleToolbar,
     ToggleTheme,
     ToggleCrispPixels,
+    /// No-op: swallows a click on a dropdown's surface so it doesn't dismiss.
+    KeepMenuOpen,
 }
 use iced::widget::column;
 use iced::{Element, Length, Task};
@@ -92,7 +94,6 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             Task::none()
         }
         Message::SetSortKey(key) => {
-            app.open_menu = None;
             app.config.sort_key = key;
             Task::batch([save_config(app), fire_resort(app)])
         }
@@ -105,7 +106,6 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             Task::none()
         }
         Message::SetZoomMode(mode) => {
-            app.open_menu = None;
             app.config.zoom_mode = mode;
             let zoom_mode = app.config.zoom_mode;
             let viewport = app.viewport_size;
@@ -150,6 +150,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             app.config.crisp_pixels = !app.config.crisp_pixels;
             save_config(app)
         }
+        Message::KeepMenuOpen => Task::none(),
     }
 }
 mod widget;
@@ -231,23 +232,31 @@ mod tests {
     }
 
     #[test]
-    fn set_zoom_mode_closes_the_menu_and_clears_manual_zoom() {
+    fn set_zoom_mode_keeps_the_menu_open_and_clears_manual_zoom() {
         let mut app = viewing_app(&["a.png"], 0);
         app.open_menu = Some(OpenMenu::Zoom);
         app.viewer_mut().unwrap().manual_zoom = true;
         let _ = update(&mut app, Message::SetZoomMode(ZoomMode::default()));
-        assert!(app.open_menu.is_none());
+        assert_eq!(app.open_menu, Some(OpenMenu::Zoom));
         assert_eq!(app.config.zoom_mode, ZoomMode::default());
         assert!(!app.viewer().unwrap().manual_zoom);
     }
 
     #[test]
-    fn set_sort_key_closes_the_menu_and_records_the_key() {
+    fn set_sort_key_keeps_the_menu_open_and_records_the_key() {
         let mut app = viewing_app(&["a.png"], 0);
         app.open_menu = Some(OpenMenu::Sort);
         let _ = update(&mut app, Message::SetSortKey(SortKey::default()));
-        assert!(app.open_menu.is_none());
+        assert_eq!(app.open_menu, Some(OpenMenu::Sort));
         assert_eq!(app.config.sort_key, SortKey::default());
+    }
+
+    #[test]
+    fn keeping_the_menu_open_is_a_noop() {
+        let mut app = viewing_app(&["a.png"], 0);
+        app.open_menu = Some(OpenMenu::Layout);
+        let _ = update(&mut app, Message::KeepMenuOpen);
+        assert_eq!(app.open_menu, Some(OpenMenu::Layout));
     }
 
     #[test]
