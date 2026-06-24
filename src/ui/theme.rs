@@ -146,6 +146,21 @@ pub fn panel(theme: &Theme) -> container::Style {
     }
 }
 
+/// Translucent backing disc so the edge arrows read over any image.
+pub fn edge_nav_arrow(theme: &Theme) -> container::Style {
+    let t = tokens(theme);
+    container::Style {
+        background: Some(Background::Color(with_alpha(t.bg_elevated, 0.55))),
+        text_color: Some(t.text_primary),
+        border: Border {
+            color: with_alpha(t.border, 0.6),
+            width: 1.0,
+            radius: 18.0.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
 /// De-emphasized text (prompts, hints).
 pub fn secondary_text(theme: &Theme) -> text::Style {
     text::Style {

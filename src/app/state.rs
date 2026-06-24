@@ -152,6 +152,10 @@ pub struct Viewer {
     pub dwell_pending: bool,
     /// Which direction key is currently held, and when the hold started.
     pub held_direction: Option<(Direction, Instant)>,
+    /// Which edge strip the cursor is over.
+    pub edge_hover: Option<Direction>,
+    /// An edge strip held with the mouse, pacing the repeat timer.
+    pub edge_held: Option<Direction>,
     /// Animated GIF player that handles decode cache and animation.
     pub anim_player: AnimPlayer,
     /// File size in bytes of the current image. `None` while the async
@@ -228,6 +232,8 @@ impl Viewer {
             slider_drag: None,
             dwell_pending: false,
             held_direction: None,
+            edge_hover: None,
+            edge_held: None,
             anim_player,
             current_file_size: None,
             zoom: 1.0,

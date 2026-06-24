@@ -65,6 +65,9 @@ pub fn settings<'a>(
         switch("Confirm before deleting", config.confirm_delete, |_| {
             SettingsMessage::ToggleConfirmDelete
         }),
+        switch("Mouse edge navigation", config.mouse_nav, |_| {
+            SettingsMessage::ToggleMouseNav
+        }),
         rule::horizontal(1),
         stepper(
             "Prefetch depth",

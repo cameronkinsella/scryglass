@@ -10,6 +10,7 @@ pub enum Message {
     SetCacheBudget(usize),
     ToggleReadOnly,
     ToggleConfirmDelete,
+    ToggleMouseNav,
     #[cfg(feature = "disk-thumbs")]
     ToggleDiskThumbs,
     #[cfg(feature = "video")]
@@ -137,6 +138,11 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             save_config(app)
         }
 
+        Message::ToggleMouseNav => {
+            app.config.mouse_nav = !app.config.mouse_nav;
+            save_config(app)
+        }
+
         #[cfg(feature = "disk-thumbs")]
         Message::ToggleDiskThumbs => {
             app.config.disk_thumbs = !app.config.disk_thumbs;
@@ -197,6 +203,14 @@ mod tests {
         let before = app.config.confirm_delete;
         let _ = update(&mut app, Message::ToggleConfirmDelete);
         assert_eq!(app.config.confirm_delete, !before);
+    }
+
+    #[test]
+    fn toggle_mouse_nav_flips_the_flag() {
+        let mut app = empty_app();
+        let before = app.config.mouse_nav;
+        let _ = update(&mut app, Message::ToggleMouseNav);
+        assert_eq!(app.config.mouse_nav, !before);
     }
 
     #[cfg(feature = "video")]

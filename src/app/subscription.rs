@@ -59,6 +59,15 @@ pub fn subscription(app: &App) -> Subscription<Message> {
             );
         }
 
+        // A held edge press has no OS key-repeat, so drive it here. Leaving
+        // the strip clears edge_held, so this stops the moment the cursor does.
+        if viewer.edge_held.is_some() {
+            subs.push(
+                iced::time::every(crate::app::EDGE_NAV_REPEAT)
+                    .map(|_| Message::Viewer(ViewerMessage::EdgeRepeat)),
+            );
+        }
+
         // Keep the file list in sync with the folder on disk.
         if matches!(viewer.source, Source::Fs)
             && let Some(dir) = viewer.nav.current().parent()

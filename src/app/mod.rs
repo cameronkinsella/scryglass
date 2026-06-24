@@ -61,6 +61,10 @@ use state::{Session, Viewer};
 /// How long the arrow key must be held before continuous scrolling begins.
 pub(crate) const HOLD_THRESHOLD: Duration = Duration::from_millis(300);
 
+/// Repeat interval for a held mouse edge press, which has no OS key-repeat to
+/// pace it. The initial delay still comes from `HOLD_THRESHOLD`.
+pub(crate) const EDGE_NAV_REPEAT: Duration = Duration::from_millis(90);
+
 /// Scroll-wheel zoom step multiplier (each notch = ×1.1 or ÷1.1).
 pub(crate) const ZOOM_STEP: f32 = 1.1;
 

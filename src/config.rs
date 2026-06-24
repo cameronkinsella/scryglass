@@ -126,6 +126,8 @@ pub struct AppConfig {
     pub read_only: bool,
     /// Ask before moving a file to the recycle bin.
     pub confirm_delete: bool,
+    /// Show click-to-navigate arrows on the left and right image edges.
+    pub mouse_nav: bool,
     /// Last window size, restored at startup.
     pub window_width: f32,
     pub window_height: f32,
@@ -164,6 +166,7 @@ impl Default for AppConfig {
             disk_thumbs: true,
             read_only: false,
             confirm_delete: true,
+            mouse_nav: true,
             window_width: 1024.0,
             window_height: 768.0,
             video_volume: 1.0,
@@ -261,6 +264,7 @@ mod tests {
             disk_thumbs: false,
             read_only: true,
             confirm_delete: false,
+            mouse_nav: false,
             window_width: 640.0,
             window_height: 480.0,
             video_volume: 0.5,
@@ -280,6 +284,11 @@ mod tests {
     #[test]
     fn default_theme_is_dark() {
         assert_eq!(AppConfig::default().theme, ThemeChoice::Dark);
+    }
+
+    #[test]
+    fn mouse_nav_is_on_by_default() {
+        assert!(AppConfig::default().mouse_nav);
     }
 
     #[test]

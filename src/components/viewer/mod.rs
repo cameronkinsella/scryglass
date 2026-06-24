@@ -30,6 +30,10 @@ pub enum Message {
     DragMove(iced::Point),
     CursorLeft,
     DragEnd,
+    EdgeEnter(Direction),
+    EdgeExit,
+    EdgePress(Direction),
+    EdgeRepeat,
 }
 use iced::Task;
 use iced::time::Instant;
@@ -286,7 +290,43 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             if let Some(viewer) = app.viewer_mut() {
                 viewer.drag = None;
             }
+            end_edge_hold(app)
+        }
+        Message::EdgeEnter(dir) => {
+            if let Some(viewer) = app.viewer_mut() {
+                viewer.edge_hover = Some(dir);
+            }
             Task::none()
+        }
+        // Leaving the strip ends the hold like a release, so it can't resume
+        // when the cursor wanders back in. A fresh press is needed.
+        Message::EdgeExit => {
+            if let Some(viewer) = app.viewer_mut() {
+                viewer.edge_hover = None;
+            }
+            end_edge_hold(app)
+        }
+        // Reuse the keyboard step, with edge_held arming the repeat timer.
+        Message::EdgePress(dir) => {
+            let Some(viewer) = app.viewer_mut() else {
+                return Task::none();
+            };
+            viewer.edge_held = Some(dir);
+            let step = match dir {
+                Direction::Forward => Message::Next,
+                Direction::Backward => Message::Prev,
+            };
+            update(app, step)
+        }
+        Message::EdgeRepeat => {
+            let Some(dir) = app.viewer().and_then(|v| v.edge_held) else {
+                return Task::none();
+            };
+            let repeat = match dir {
+                Direction::Forward => Message::NextRepeat,
+                Direction::Backward => Message::PrevRepeat,
+            };
+            update(app, repeat)
         }
         Message::Rotate(turns) => {
             let Some(viewer) = app.viewer_mut() else {
@@ -359,6 +399,18 @@ fn release_hold(app: &mut App, dir: Direction) -> Task<AppMessage> {
         Some(cursor) => complete_navigation(app, cursor, true),
         None => Task::none(),
     }
+}
+
+/// End an active mouse edge-hold (the button came up or the cursor left the
+/// strip), committing the frame it scrubbed to.
+fn end_edge_hold(app: &mut App) -> Task<AppMessage> {
+    let Some(dir) = app.viewer().and_then(|v| v.edge_held) else {
+        return Task::none();
+    };
+    if let Some(viewer) = app.viewer_mut() {
+        viewer.edge_held = None;
+    }
+    release_hold(app, dir)
 }
 
 #[cfg(test)]
@@ -564,6 +616,65 @@ mod tests {
         let _ = update(&mut app, Message::Next);
         let _ = update(&mut app, Message::NextReleased);
         assert!(viewer(&app).held_direction.is_none());
+    }
+
+    #[test]
+    fn edge_enter_and_exit_track_the_hovered_side() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        let _ = update(&mut app, Message::EdgeEnter(Direction::Backward));
+        assert_eq!(viewer(&app).edge_hover, Some(Direction::Backward));
+        let _ = update(&mut app, Message::EdgeExit);
+        assert!(viewer(&app).edge_hover.is_none());
+    }
+
+    #[test]
+    fn edge_press_steps_once_and_arms_the_hold() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        let _ = update(&mut app, Message::EdgePress(Direction::Forward));
+        let v = viewer(&app);
+        assert_eq!(v.edge_held, Some(Direction::Forward));
+        assert_eq!(v.held_direction.map(|(d, _)| d), Some(Direction::Forward));
+    }
+
+    #[test]
+    fn edge_repeat_scrubs_a_held_press() {
+        let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
+        let held =
+            Instant::now() - crate::app::HOLD_THRESHOLD - std::time::Duration::from_millis(10);
+        {
+            let v = app.viewer_mut().unwrap();
+            v.edge_held = Some(Direction::Forward);
+            v.held_direction = Some((Direction::Forward, held));
+        }
+        let _ = update(&mut app, Message::EdgeRepeat);
+        assert_eq!(viewer(&app).nav.cursor(), 1);
+    }
+
+    #[test]
+    fn leaving_the_strip_cancels_the_hold() {
+        let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
+        let held =
+            Instant::now() - crate::app::HOLD_THRESHOLD - std::time::Duration::from_millis(10);
+        {
+            let v = app.viewer_mut().unwrap();
+            v.edge_held = Some(Direction::Forward);
+            v.edge_hover = Some(Direction::Forward);
+            v.held_direction = Some((Direction::Forward, held));
+        }
+        let _ = update(&mut app, Message::EdgeExit);
+        assert!(viewer(&app).edge_held.is_none());
+        // A later repeat tick can't resume it without a fresh press.
+        let cursor = viewer(&app).nav.cursor();
+        let _ = update(&mut app, Message::EdgeRepeat);
+        assert_eq!(viewer(&app).nav.cursor(), cursor);
+    }
+
+    #[test]
+    fn drag_end_clears_an_active_edge_hold() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        app.viewer_mut().unwrap().edge_held = Some(Direction::Forward);
+        let _ = update(&mut app, Message::DragEnd);
+        assert!(viewer(&app).edge_held.is_none());
     }
 
     #[test]
