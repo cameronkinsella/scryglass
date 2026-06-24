@@ -121,7 +121,27 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
         Message::ToggleFilmstrip => {
             app.config.show_filmstrip = !app.config.show_filmstrip;
             recalc_viewport(app);
-            save_config(app)
+            let saved = save_config(app);
+            if !app.config.show_filmstrip {
+                return saved;
+            }
+            // Showing the strip mid-session: position it on the cursor, as
+            // opening the directory with the strip already on would.
+            let window_w = app.window_size.width;
+            let Some(viewer) = app.viewer_mut() else {
+                return saved;
+            };
+            let offset = crate::components::filmstrip::open_offset(
+                viewer.nav.cursor(),
+                window_w,
+                viewer.nav.len(),
+            );
+            viewer.filmstrip_scroll_x = offset;
+            let scroll = iced::widget::operation::scroll_to(
+                crate::components::filmstrip::filmstrip_id(),
+                iced::widget::scrollable::AbsoluteOffset { x: offset, y: 0.0 },
+            );
+            Task::batch([saved, scroll])
         }
         Message::ToggleSlider => {
             app.config.show_slider = !app.config.show_slider;
@@ -185,6 +205,21 @@ mod tests {
         let _ = update(&mut app, Message::ToggleLayoutMenu);
         let _ = update(&mut app, Message::DismissOverlay);
         assert!(app.open_menu.is_none());
+    }
+
+    #[test]
+    fn showing_the_filmstrip_positions_it_on_the_cursor() {
+        let names: Vec<String> = (0..1000).map(|i| format!("{i:04}.png")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut app = viewing_app(&refs, 600);
+        app.config.show_filmstrip = false;
+        app.viewer_mut().unwrap().filmstrip_scroll_x = 0.0;
+        let window_w = app.window_size.width;
+        let _ = update(&mut app, Message::ToggleFilmstrip);
+        // Lands where opening at 600 with the strip on would, not at the start.
+        let expected = crate::components::filmstrip::open_offset(600, window_w, 1000);
+        assert_eq!(app.viewer().unwrap().filmstrip_scroll_x, expected);
+        assert!(expected > 0.0);
     }
 
     #[test]
