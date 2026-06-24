@@ -327,8 +327,10 @@ pub(crate) fn scrub_to(app: &mut App, index: usize) -> Task<Message> {
                 iced::widget::scrollable::AbsoluteOffset { x: offset, y: 0.0 },
             ));
         }
-        tasks.extend(fire_visible_thumbs(&pipeline, viewer, window_w));
     }
+    // Follow the cursor with the outward-fan thumbnailer rather than batching
+    // the whole visible row every step; the full batch fires once you settle.
+    tasks.extend(fire_thumbnailer(&pipeline, viewer, 3));
     Task::batch(tasks)
 }
 

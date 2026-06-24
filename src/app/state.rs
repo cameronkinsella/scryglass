@@ -323,10 +323,6 @@ impl Viewer {
 pub struct SliderDrag {
     /// The index under the user's hand.
     pub target: usize,
-    /// Whether the fallback bubble has been triggered. Sticky: once true,
-    /// it stays for the rest of the drag so it never flickers in and out
-    /// across warm/cold boundaries.
-    pub bubble: bool,
     /// When `target` was last set, so a slider resting here can load it.
     pub since: Instant,
 }

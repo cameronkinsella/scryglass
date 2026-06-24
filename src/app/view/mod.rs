@@ -3,7 +3,7 @@ use iced::{Element, Length};
 
 use super::{App, Message};
 use crate::components::{
-    context_menu, empty, modal, nav_slider, settings, toasts, toolbar, viewer, zoom_slider,
+    context_menu, empty, modal, settings, toasts, toolbar, viewer, zoom_slider,
 };
 
 pub fn view(app: &App) -> Element<'_, Message> {
@@ -11,7 +11,6 @@ pub fn view(app: &App) -> Element<'_, Message> {
         viewer::view(app),
         viewer::spinner(app),
         zoom_slider::view(app),
-        nav_slider::scrub_bubble(app),
         toolbar::dropdown(app),
         context_menu::view(app),
         modal::view(app),
