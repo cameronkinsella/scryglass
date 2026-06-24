@@ -1,4 +1,6 @@
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 
 use iced::widget::image::Handle;
 use iced::{Size, Task};
@@ -10,7 +12,7 @@ use crate::cache;
 use crate::config::ZoomMode;
 use crate::media::pipeline::{Lane, Pipeline, Source, ThumbUrgency};
 use crate::media::registry::DecodeOpts;
-use crate::media::{DecodedMedia, MediaError};
+use crate::media::{DecodedMedia, MediaError, ThumbData};
 
 /// Rotate the displayed texture to the desired view rotation, off-thread.
 /// Rotating the pixels (not the geometry) leaves zoom, pan, and crop math
@@ -194,58 +196,20 @@ pub(crate) fn fire_thumb(
         return Task::none();
     }
 
-    if crate::video::is_video(&path) {
-        // First-frame grab via FFmpeg, which needs a real file on disk.
-        if !matches!(viewer.source, Source::Fs) {
-            return Task::none();
-        }
-        viewer.in_flight_thumbs.insert(path.clone());
-        let disk = pipeline.disk();
-        let probe = async move {
-            tokio::task::spawn_blocking(move || {
-                let container = path
-                    .parent()
-                    .unwrap_or(std::path::Path::new(""))
-                    .to_path_buf();
-                let name = path.file_name().unwrap_or_default().to_owned();
-                if let Some(disk) = &disk
-                    && let Some(hit) = disk.load(&container, &name)
-                {
-                    return (path, Ok(hit));
-                }
-                match crate::video::first_frame_thumb(&path, crate::media::THUMB_DIM) {
-                    Some(thumb) => {
-                        if let Some(disk) = &disk {
-                            disk.store(&container, &name, &thumb, None, 0);
-                        }
-                        (path, Ok(thumb))
-                    }
-                    None => (path, Err(MediaError::Unsupported)),
-                }
-            })
-            .await
-            .expect("video thumb task panicked")
-        };
-        return Task::perform(probe, move |(path, result)| {
-            Message::Media(MediaMessage::ThumbLoaded {
-                path,
-                urgency,
-                result: result.map(|data| Thumb {
-                    handle: Handle::from_rgba(data.width, data.height, data.pixels),
-                    size: (data.width, data.height),
-                    original_size: data.original_size,
-                }),
-            })
-        });
+    let is_video = crate::video::is_video(&path);
+    // A video thumbnail is an FFmpeg first-frame grab, which needs a real file
+    // on disk, so videos inside archives get none.
+    if is_video && !matches!(viewer.source, Source::Fs) {
+        return Task::none();
     }
 
     viewer.in_flight_thumbs.insert(path.clone());
-    let load = pipeline.load_thumb(
-        viewer.source.clone(),
-        path.clone(),
-        urgency,
-        pipeline.thumb_generation(),
-    );
+    let generation = pipeline.thumb_generation();
+    let load: Pin<Box<dyn Future<Output = Result<ThumbData, MediaError>> + Send>> = if is_video {
+        Box::pin(pipeline.load_video_thumb(path.clone(), urgency, generation))
+    } else {
+        Box::pin(pipeline.load_thumb(viewer.source.clone(), path.clone(), urgency, generation))
+    };
     Task::perform(load, move |result| {
         Message::Media(MediaMessage::ThumbLoaded {
             path: path.clone(),

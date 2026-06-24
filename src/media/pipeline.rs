@@ -342,6 +342,56 @@ impl Pipeline {
             Ok(thumb)
         }
     }
+
+    /// Produce a thumbnail for a video by grabbing its first frame. Shares the
+    /// thumbnail lane and generation with [`load_thumb`], so a video queues and
+    /// cancels like an image rather than running unthrottled.
+    pub fn load_video_thumb(
+        &self,
+        path: PathBuf,
+        urgency: ThumbUrgency,
+        generation: u64,
+    ) -> impl Future<Output = Result<ThumbData, MediaError>> + Send + 'static {
+        let semaphore = match urgency {
+            ThumbUrgency::Urgent => self.urgent_thumb_lane.clone(),
+            ThumbUrgency::Background => self.thumb_lane.clone(),
+        };
+        let live = self.thumb_generation.clone();
+        let disk = self.disk();
+
+        async move {
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .map_err(|_| MediaError::Cancelled)?;
+            if urgency == ThumbUrgency::Background && live.load(Ordering::SeqCst) != generation {
+                return Err(MediaError::Cancelled);
+            }
+
+            let (container, name) = cache_key(&Source::Fs, &path);
+
+            // Fastest path: a thumbnail persisted by an earlier session.
+            if let Some(disk) = disk.clone() {
+                let (c, n) = (container.clone(), name.clone());
+                let hit = tokio::task::spawn_blocking(move || disk.load(&c, &n))
+                    .await
+                    .ok()
+                    .flatten();
+                if let Some(thumb) = hit {
+                    return Ok(thumb);
+                }
+            }
+
+            let thumb = tokio::task::spawn_blocking(move || {
+                crate::video::first_frame_thumb(&path, super::THUMB_DIM)
+            })
+            .await
+            .map_err(|e| MediaError::Decode(e.to_string()))?
+            .ok_or(MediaError::Unsupported)?;
+            persist(&disk, &container, &name, &thumb).await;
+            Ok(thumb)
+        }
+    }
 }
 
 /// Read curated EXIF fields for the info panel from the file prefix.
@@ -510,6 +560,19 @@ mod tests {
         pipeline.bump_thumb_generation();
         let result = pipeline
             .load_thumb(Source::Fs, path, ThumbUrgency::Background, stale)
+            .await;
+        assert!(matches!(result, Err(MediaError::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn a_stale_background_video_thumb_bails_at_the_lane() {
+        let pipeline = Pipeline::new(None);
+        let stale = pipeline.thumb_generation();
+        pipeline.bump_thumb_generation();
+        // Bails on the generation before reaching FFmpeg, so the path need
+        // not exist.
+        let result = pipeline
+            .load_video_thumb("nope.mp4".into(), ThumbUrgency::Background, stale)
             .await;
         assert!(matches!(result, Err(MediaError::Cancelled)));
     }
