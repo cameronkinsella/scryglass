@@ -35,7 +35,9 @@ use iced::Task;
 use iced::time::Instant;
 
 use crate::app::state::{Direction, DisplayedImage, DragState};
-use crate::app::update::{NavTarget, fire_exif, fire_rotate, navigate, save_config};
+use crate::app::update::{
+    NavTarget, complete_navigation, fire_exif, fire_rotate, navigate, save_config, scrub_to,
+};
 use crate::app::viewer_math::{
     clamp_pan, compute_zoom, nudge_zoom_percent, pan_for_zoom_toward_cursor,
 };
@@ -57,6 +59,9 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             viewer.held_direction = Some((Direction::Backward, Instant::now()));
             navigate(app, NavTarget::Delta(Direction::Backward))
         }
+        // A held key scrubs at the repeat rate: the cursor advances no matter
+        // what's loaded, showing each frame's blur or a spinner. The sharp
+        // image loads once the key is released.
         Message::NextRepeat => {
             let Some(viewer) = app.viewer_mut() else {
                 return Task::none();
@@ -65,10 +70,12 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                 .held_direction
                 .map(|(_, t)| t.elapsed() >= crate::app::HOLD_THRESHOLD)
                 .unwrap_or(false);
-            if !past {
+            let len = viewer.nav.len();
+            if !past || len == 0 {
                 return Task::none();
             }
-            navigate(app, NavTarget::Delta(Direction::Forward))
+            let next = (viewer.nav.cursor() + 1) % len;
+            scrub_to(app, next)
         }
         Message::PrevRepeat => {
             let Some(viewer) = app.viewer_mut() else {
@@ -78,10 +85,12 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                 .held_direction
                 .map(|(_, t)| t.elapsed() >= crate::app::HOLD_THRESHOLD)
                 .unwrap_or(false);
-            if !past {
+            let len = viewer.nav.len();
+            if !past || len == 0 {
                 return Task::none();
             }
-            navigate(app, NavTarget::Delta(Direction::Backward))
+            let prev = (viewer.nav.cursor() + len - 1) % len;
+            scrub_to(app, prev)
         }
         Message::First => navigate(app, NavTarget::Index(0)),
         Message::Last => {
@@ -120,28 +129,8 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             app.context_menu_pos = None;
             Task::none()
         }
-        Message::NextReleased => {
-            if let Some(viewer) = app.viewer_mut()
-                && viewer
-                    .held_direction
-                    .map(|(d, _)| d == Direction::Forward)
-                    .unwrap_or(false)
-            {
-                viewer.held_direction = None;
-            }
-            Task::none()
-        }
-        Message::PrevReleased => {
-            if let Some(viewer) = app.viewer_mut()
-                && viewer
-                    .held_direction
-                    .map(|(d, _)| d == Direction::Backward)
-                    .unwrap_or(false)
-            {
-                viewer.held_direction = None;
-            }
-            Task::none()
-        }
+        Message::NextReleased => release_hold(app, Direction::Forward),
+        Message::PrevReleased => release_hold(app, Direction::Backward),
         Message::ScrollZoom(delta_y) => {
             let viewport = app.viewport_size;
             let cursor = app.last_cursor_pos;
@@ -348,6 +337,27 @@ fn apply_zoom(app: &mut App, zoom: f32) {
         let img_w = w as f32 * new;
         let img_h = h as f32 * new;
         viewer.pan = clamp_pan(viewer.pan, img_w, img_h, viewport);
+    }
+}
+
+/// On releasing a held navigation key, load the frame the scrub landed on. A
+/// quick tap (under the hold threshold) never scrubbed, so leave it be.
+fn release_hold(app: &mut App, dir: Direction) -> Task<AppMessage> {
+    let mut was_hold = false;
+    if let Some(viewer) = app.viewer_mut()
+        && viewer.held_direction.is_some_and(|(d, _)| d == dir)
+    {
+        was_hold = viewer
+            .held_direction
+            .is_some_and(|(_, t)| t.elapsed() >= crate::app::HOLD_THRESHOLD);
+        viewer.held_direction = None;
+    }
+    if !was_hold {
+        return Task::none();
+    }
+    match app.viewer().map(|v| v.nav.cursor()) {
+        Some(cursor) => complete_navigation(app, cursor, true),
+        None => Task::none(),
     }
 }
 
@@ -561,5 +571,25 @@ mod tests {
         let mut app = viewing_app(&["a.png"], 0);
         let _ = update(&mut app, Message::Rotate(1));
         assert_eq!(viewer(&app).rotation, 0);
+    }
+
+    #[test]
+    fn a_held_repeat_scrubs_the_cursor_even_with_no_thumbnail() {
+        let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
+        // A key held past the repeat threshold.
+        let held =
+            Instant::now() - crate::app::HOLD_THRESHOLD - std::time::Duration::from_millis(10);
+        app.viewer_mut().unwrap().held_direction = Some((Direction::Forward, held));
+        let _ = update(&mut app, Message::NextRepeat);
+        // The cursor advances without waiting on b.png's blur.
+        assert_eq!(viewer(&app).nav.cursor(), 1);
+    }
+
+    #[test]
+    fn a_repeat_before_the_hold_threshold_does_not_move() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        app.viewer_mut().unwrap().held_direction = Some((Direction::Forward, Instant::now()));
+        let _ = update(&mut app, Message::NextRepeat);
+        assert_eq!(viewer(&app).nav.cursor(), 0);
     }
 }
