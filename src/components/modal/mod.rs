@@ -326,7 +326,8 @@ fn sniff_file_format(path: &Path) -> Option<crate::media::FileFormat> {
     let mut magic = [0u8; 16];
     let mut file = std::fs::File::open(path).ok()?;
     let read = file.read(&mut magic).ok()?;
-    crate::media::sniff_format(&magic[..read])
+    let magic = &magic[..read];
+    crate::media::sniff_format(magic).or_else(|| crate::media::sniff_video(magic))
 }
 
 /// A note for the rename dialog when the typed extension would mislabel the
@@ -376,6 +377,19 @@ mod tests {
         assert!(
             matches!(&app.modal, Some(Modal::Rename { input, .. }) if input.as_str() == "photo.png")
         );
+    }
+
+    #[test]
+    fn rename_warning_flags_video_renamed_to_an_image() {
+        let mp4 = crate::media::FileFormat {
+            label: "MP4",
+            extensions: &["mp4", "m4v"],
+        };
+        assert_eq!(
+            rename_warning("clip.png", mp4),
+            Some("Saving as .png, but the contents are MP4.".to_string())
+        );
+        assert!(rename_warning("clip.mp4", mp4).is_none());
     }
 
     #[test]

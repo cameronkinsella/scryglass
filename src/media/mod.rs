@@ -114,6 +114,44 @@ pub fn sniff_format(magic: &[u8]) -> Option<FileFormat> {
     })
 }
 
+/// Identify a video container from its leading bytes, for the rename hint.
+/// Callers try [`sniff_format`] first, so AVIF/HEIF stills are already claimed
+/// and this matches only video `ftyp` brands and the other containers.
+pub fn sniff_video(magic: &[u8]) -> Option<FileFormat> {
+    if magic.len() < 12 {
+        return None;
+    }
+    if &magic[4..8] == b"ftyp" {
+        let brand: [u8; 4] = magic[8..12].try_into().ok()?;
+        return match &brand {
+            b"isom" | b"iso2" | b"mp41" | b"mp42" | b"mp4v" | b"avc1" | b"dash" | b"M4V "
+            | b"M4VH" | b"M4VP" => Some(FileFormat {
+                label: "MP4",
+                extensions: &["mp4", "m4v"],
+            }),
+            b"qt  " => Some(FileFormat {
+                label: "QuickTime",
+                extensions: &["mov"],
+            }),
+            _ => None,
+        };
+    }
+    if magic.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        // Matroska and WebM share the EBML header, so one label covers both.
+        return Some(FileFormat {
+            label: "Matroska",
+            extensions: &["mkv", "webm"],
+        });
+    }
+    if magic.starts_with(b"RIFF") && &magic[8..12] == b"AVI " {
+        return Some(FileFormat {
+            label: "AVI",
+            extensions: &["avi"],
+        });
+    }
+    None
+}
+
 /// Whether the bytes begin an SVG document, allowing a BOM and leading space.
 fn looks_like_svg(magic: &[u8]) -> bool {
     let trimmed = magic
@@ -154,5 +192,38 @@ mod tests {
     fn unrecognized_bytes_are_none() {
         assert!(sniff_format(b"not an image at all").is_none());
         assert!(sniff_format(&[]).is_none());
+    }
+
+    fn ftyp(brand: &[u8; 4]) -> Vec<u8> {
+        let mut m = vec![0, 0, 0, 0x18];
+        m.extend_from_slice(b"ftyp");
+        m.extend_from_slice(brand);
+        m.extend_from_slice(&[0, 0, 0, 0]);
+        m
+    }
+
+    #[test]
+    fn sniffs_video_containers() {
+        assert_eq!(sniff_video(&ftyp(b"isom")).unwrap().label, "MP4");
+        assert_eq!(sniff_video(&ftyp(b"mp42")).unwrap().label, "MP4");
+        assert_eq!(sniff_video(&ftyp(b"M4V ")).unwrap().label, "MP4");
+        assert_eq!(sniff_video(&ftyp(b"qt  ")).unwrap().label, "QuickTime");
+        assert_eq!(
+            sniff_video(&[0x1A, 0x45, 0xDF, 0xA3, 0, 0, 0, 0, 0, 0, 0, 0])
+                .unwrap()
+                .label,
+            "Matroska"
+        );
+        let mut avi = b"RIFF\0\0\0\0AVI ".to_vec();
+        avi.extend_from_slice(&[0, 0, 0, 0]);
+        assert_eq!(sniff_video(&avi).unwrap().label, "AVI");
+    }
+
+    #[test]
+    fn sniff_video_leaves_images_to_sniff_format() {
+        // AVIF/HEIF are ftyp too, but the image path claims them first.
+        assert!(sniff_video(&ftyp(b"avif")).is_none());
+        assert!(sniff_video(&ftyp(b"heic")).is_none());
+        assert!(sniff_video(&png_bytes()).is_none());
     }
 }
