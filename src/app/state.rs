@@ -285,9 +285,17 @@ impl Viewer {
     pub fn next_unthumbed(&self) -> Option<PathBuf> {
         let files = self.nav.files();
         let len = files.len();
-        let start = self.nav.cursor();
+        let cursor = self.nav.cursor();
+        // Fan outward from the cursor (cursor, +1, -1, +2, -2, ...) so the
+        // thumbnails nearest the current view fill in first.
         (0..len)
-            .map(|i| &files[(start + i) % len])
+            .flat_map(|d| {
+                let forward = cursor.checked_add(d).filter(|&i| i < len);
+                let backward = (d > 0).then(|| cursor.checked_sub(d)).flatten();
+                [forward, backward]
+            })
+            .flatten()
+            .map(|i| &files[i])
             .find(|p| {
                 !self.thumbs.contains(p)
                     && !self.in_flight_thumbs.contains(*p)
@@ -350,9 +358,14 @@ mod tests {
     }
 
     #[test]
-    fn next_unthumbed_scans_forward_from_cursor_and_wraps() {
-        let viewer = test_viewer(&["a.png", "b.png", "c.png"], 1);
-        assert_eq!(viewer.next_unthumbed(), Some(PathBuf::from("b.png")));
+    fn next_unthumbed_fans_outward_from_the_cursor() {
+        let mut viewer = test_viewer(&["a.png", "b.png", "c.png", "d.png", "e.png"], 2);
+        // Cursor first, then alternate outward: c, d, b, e, a.
+        for expected in ["c.png", "d.png", "b.png", "e.png", "a.png"] {
+            assert_eq!(viewer.next_unthumbed(), Some(PathBuf::from(expected)));
+            viewer.in_flight_thumbs.insert(PathBuf::from(expected));
+        }
+        assert_eq!(viewer.next_unthumbed(), None);
     }
 
     #[test]
