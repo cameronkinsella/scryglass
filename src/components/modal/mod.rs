@@ -159,50 +159,62 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             })
         }
 
-        Message::RenameFinished(old, new, result, resume) => {
-            let resume = resume.map(|r| {
-                (
-                    r,
-                    if result.is_ok() {
-                        new.clone()
-                    } else {
-                        old.clone()
-                    },
-                )
-            });
-            let task = match result {
-                Err(e) => push_toast(app, ToastKind::Error, format!("Couldn't rename: {e}")),
-                Ok(()) => {
-                    let purge = purge_disk_thumb(&app.pipeline, &old);
-                    if let Some(viewer) = app.viewer_mut() {
-                        viewer.nav.rename(&old, new.clone());
-                        if let Some(image) = viewer.cache.remove(&old) {
-                            let cost = image.byte_cost();
-                            viewer.cache.insert(new.clone(), image, cost);
-                        }
-                        if let Some(thumb) = viewer.thumbs.remove(&old) {
-                            let cost = thumb.byte_cost();
-                            viewer.thumbs.insert(new.clone(), thumb, cost);
-                        }
-                        viewer.anim_player.remove(&old);
-                        if viewer.displayed_path.as_deref() == Some(&*old) {
-                            viewer.displayed_path = Some(new.clone());
-                        }
-                        if let Some((p, _)) = &mut viewer.exif
-                            && *p == old
-                        {
-                            *p = new.clone();
-                        }
-                    }
-                    purge
+        Message::RenameFinished(old, new, result, resume) => match result {
+            Err(e) => {
+                // The rename failed, so put the torn-down video back as it was.
+                if let Some(resume) = resume {
+                    resume_video(app, resume, old.clone());
                 }
-            };
-            // Resume the video on the renamed file, or the original if it failed.
-            if let Some((resume, path)) = resume {
-                resume_video(app, resume, path);
+                push_toast(app, ToastKind::Error, format!("Couldn't rename: {e}"))
             }
-            task
-        }
+            Ok(()) => {
+                let purge = purge_disk_thumb(&app.pipeline, &old);
+                if let Some(viewer) = app.viewer_mut() {
+                    viewer.nav.rename(&old, new.clone());
+                    if let Some(image) = viewer.cache.remove(&old) {
+                        let cost = image.byte_cost();
+                        viewer.cache.insert(new.clone(), image, cost);
+                    }
+                    if let Some(thumb) = viewer.thumbs.remove(&old) {
+                        let cost = thumb.byte_cost();
+                        viewer.thumbs.insert(new.clone(), thumb, cost);
+                    }
+                    viewer.anim_player.remove(&old);
+                    if viewer.displayed_path.as_deref() == Some(&*old) {
+                        viewer.displayed_path = Some(new.clone());
+                    }
+                    if let Some((p, _)) = &mut viewer.exif
+                        && *p == old
+                    {
+                        *p = new.clone();
+                    }
+                }
+
+                let refresh = rename_refresh(
+                    crate::video::is_video(&old),
+                    crate::video::is_video(&new),
+                    resume.is_some(),
+                );
+                match refresh {
+                    // Still a video: resume it on the new file at its position.
+                    RenameRefresh::Resume => {
+                        if let Some(resume) = resume {
+                            resume_video(app, resume, new);
+                        }
+                        purge
+                    }
+                    // The rename crossed the image/video line, so reload the
+                    // current file to show or hide the player and its controls.
+                    RenameRefresh::Reload => match app.viewer().map(|v| v.nav.cursor()) {
+                        Some(cursor) => {
+                            Task::batch([purge, complete_navigation(app, cursor, true)])
+                        }
+                        None => purge,
+                    },
+                    RenameRefresh::Keep => purge,
+                }
+            }
+        },
 
         Message::Submit => match &app.modal {
             Some(Modal::ConfirmDelete(_)) => update(app, Message::ConfirmDeleteNow),
@@ -272,6 +284,30 @@ fn resume_video(app: &mut App, resume: VideoResume, path: PathBuf) {
         session.pause();
     }
     viewer.video = Some(session);
+}
+
+/// How the view should react to a successful rename.
+#[derive(Debug, PartialEq, Eq)]
+enum RenameRefresh {
+    /// The open video kept a video name; resume it at its saved position.
+    Resume,
+    /// The rename crossed the image/video line; reload to match the new kind.
+    Reload,
+    /// Same kind on both sides; the current display already fits.
+    Keep,
+}
+
+/// Decide how to refresh after a rename. A video that stays a video resumes in
+/// place; a rename that flips image to video (or back) reloads so the player
+/// and its controls appear or disappear without a manual navigation.
+fn rename_refresh(old_is_video: bool, new_is_video: bool, had_open_video: bool) -> RenameRefresh {
+    if had_open_video && new_is_video {
+        RenameRefresh::Resume
+    } else if old_is_video != new_is_video {
+        RenameRefresh::Reload
+    } else {
+        RenameRefresh::Keep
+    }
 }
 
 /// Where the name ends and the extension begins, so the rename field can
@@ -468,6 +504,18 @@ mod tests {
             Message::RenameFinished("a.png".into(), "b.png".into(), Err("nope".into()), None),
         );
         assert!(app.toasts.len() > before);
+    }
+
+    #[test]
+    fn rename_refresh_tracks_the_image_video_boundary() {
+        // The open video keeps a video name: resume in place at its position.
+        assert_eq!(rename_refresh(true, true, true), RenameRefresh::Resume);
+        // Crossing the line either way reloads so controls appear or vanish.
+        assert_eq!(rename_refresh(false, true, false), RenameRefresh::Reload);
+        assert_eq!(rename_refresh(true, false, true), RenameRefresh::Reload);
+        // Staying on the same side leaves the current display untouched.
+        assert_eq!(rename_refresh(false, false, false), RenameRefresh::Keep);
+        assert_eq!(rename_refresh(true, true, false), RenameRefresh::Keep);
     }
 
     #[test]
