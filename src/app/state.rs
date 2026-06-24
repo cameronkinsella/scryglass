@@ -1,6 +1,6 @@
 //! Session and viewer state.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use iced::time::Instant;
@@ -88,6 +88,9 @@ pub enum DisplayedImage {
     /// Live video, drawn by the GPU YUV surface. Carries dimensions for
     /// zoom and the info panel. The frame planes live on the viewer.
     Video { original_size: (u32, u32) },
+    /// The file couldn't be decoded; the image area shows this message
+    /// instead of an image, so a broken file is a visible, navigable stop.
+    Error { message: String },
 }
 
 impl DisplayedImage {
@@ -98,6 +101,7 @@ impl DisplayedImage {
             DisplayedImage::Placeholder(thumb) => Some(thumb.original_size),
             DisplayedImage::Full { original_size, .. } => Some(*original_size),
             DisplayedImage::Video { original_size } => Some(*original_size),
+            DisplayedImage::Error { .. } => None,
         }
     }
 }
@@ -124,6 +128,9 @@ pub struct Viewer {
     /// Paths whose background thumbnail attempt failed (corrupt or
     /// undecodable), never re-picked by the thumbnailer.
     pub failed_thumbs: HashSet<PathBuf>,
+    /// Paths whose full decode failed, mapped to the error to show. Keeps a
+    /// broken file navigable (it displays the message) instead of a dead end.
+    pub failed_loads: HashMap<PathBuf, String>,
     /// Which file the image area currently shows (full or placeholder).
     /// `None` until the first image appears.
     pub displayed_path: Option<PathBuf>,
@@ -205,6 +212,7 @@ impl Viewer {
             in_flight: HashSet::new(),
             in_flight_thumbs: HashSet::new(),
             failed_thumbs: HashSet::new(),
+            failed_loads: HashMap::new(),
             displayed_path: None,
             pending_since: Some(Instant::now()),
             pending_nav: None,
@@ -253,6 +261,9 @@ impl Viewer {
             // Videos display as soon as their first frame decodes, so
             // navigation never waits on them.
             || crate::video::is_video(path)
+            // A known-bad file shows its error in place, so the cursor can
+            // land on it rather than stalling before it.
+            || self.failed_loads.contains_key(path)
     }
 
     /// The next file for the background thumbnailer to pick: one with no
@@ -350,5 +361,15 @@ mod tests {
         let viewer = test_viewer(&["a.png", "b.png"], 0);
         assert!(matches!(viewer.displayed, DisplayedImage::None));
         assert_eq!(viewer.displayed_path.as_deref(), None::<&Path>);
+    }
+
+    #[test]
+    fn a_failed_load_is_displayable_so_the_cursor_can_land() {
+        let mut viewer = test_viewer(&["a.png", "b.png"], 0);
+        assert!(!viewer.displayable(Path::new("b.png")));
+        viewer
+            .failed_loads
+            .insert("b.png".into(), "could not decode".into());
+        assert!(viewer.displayable(Path::new("b.png")));
     }
 }

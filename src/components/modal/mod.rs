@@ -85,6 +85,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                 viewer.thumbs.remove(&path);
                 viewer.anim_player.remove(&path);
                 viewer.failed_thumbs.remove(&path);
+                viewer.failed_loads.remove(&path);
 
                 if !viewer.nav.remove(&path) {
                     app.session = Session::Empty;
@@ -180,6 +181,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                         viewer.thumbs.insert(new.clone(), thumb, cost);
                     }
                     viewer.anim_player.remove(&old);
+                    viewer.failed_loads.remove(&old);
                     if viewer.displayed_path.as_deref() == Some(&*old) {
                         viewer.displayed_path = Some(new.clone());
                     }

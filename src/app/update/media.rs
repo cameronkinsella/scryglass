@@ -31,13 +31,12 @@ use iced::Task;
 use crate::anim::AnimMessage;
 use crate::app::state::DisplayedImage;
 use crate::app::update::{
-    complete_navigation, fire_load, fire_rotate, fire_thumbnailer, fire_visible_thumbs, push_toast,
+    complete_navigation, fire_load, fire_rotate, fire_thumbnailer, fire_visible_thumbs,
     resolve_pending_nav, show_loaded, show_placeholder,
 };
 use crate::app::viewer_math::compute_zoom;
 use crate::app::{App, Message as AppMessage};
 use crate::components::filmstrip;
-use crate::components::toasts::ToastKind;
 use crate::config::ZoomMode;
 use crate::media::pipeline::Lane;
 
@@ -101,9 +100,8 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                     }
                 }
                 Err(err) => {
-                    let pending_path = viewer
-                        .pending_nav
-                        .map(|i| viewer.nav.files()[i].to_path_buf());
+                    let pending_index = viewer.pending_nav;
+                    let pending_path = pending_index.map(|i| viewer.nav.files()[i].to_path_buf());
                     let is_current = viewer.nav.current() == path;
                     let is_pending = pending_path.as_deref() == Some(&*path);
                     if !is_current && !is_pending {
@@ -121,6 +119,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                         viewer.thumbs.remove(&path);
                         viewer.anim_player.remove(&path);
                         viewer.failed_thumbs.remove(&path);
+                        viewer.failed_loads.remove(&path);
                         if !viewer.nav.remove(&path) {
                             app.session = Session::Empty;
                             return Task::none();
@@ -128,11 +127,29 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                         let cursor = viewer.nav.cursor();
                         return complete_navigation(app, cursor, true);
                     }
+                    // The file exists but won't decode (a video renamed to .png,
+                    // a truncated image). Remember it and land on it with the
+                    // error on screen, so it stays a visible, navigable stop
+                    // rather than a wall the cursor can't cross.
                     let name = path
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_default();
-                    push_toast(app, ToastKind::Error, format!("{name}: {err}"))
+                    let message = format!("{name}\n\n{err}");
+                    viewer.failed_loads.insert(path.clone(), message.clone());
+
+                    if is_pending && let Some(index) = pending_index {
+                        return complete_navigation(app, index, false);
+                    }
+                    // The current file failed in place: show the error unless a
+                    // good image for it is already on screen.
+                    let already_shown = matches!(viewer.displayed, DisplayedImage::Full { .. })
+                        && viewer.displayed_path.as_deref() == Some(&*path);
+                    if !already_shown {
+                        viewer.displayed = DisplayedImage::Error { message };
+                        viewer.displayed_path = Some(path.clone());
+                    }
+                    Task::none()
                 }
             }
         }
@@ -358,5 +375,49 @@ mod tests {
         let mut app = viewing_app(&["a.png"], 0);
         let _ = update(&mut app, Message::SpinnerTick);
         assert_eq!(app.viewer().unwrap().nav.cursor(), 0);
+    }
+
+    #[test]
+    fn a_broken_file_becomes_a_navigable_error_stop() {
+        use std::io::Write;
+        // Real files so the not-found backstop doesn't fire; the cursor starts
+        // on `a` with a pending move onto the (undecodable) `b`.
+        let dir = std::env::temp_dir().join(format!("scryglass-broken-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.png"), dir.join("b.png"));
+        for p in [&a, &b] {
+            std::fs::File::create(p)
+                .unwrap()
+                .write_all(b"not really a png")
+                .unwrap();
+        }
+        let (a_s, b_s) = (
+            a.to_string_lossy().into_owned(),
+            b.to_string_lossy().into_owned(),
+        );
+        let mut app = viewing_app(&[&a_s, &b_s], 0);
+        {
+            let v = app.viewer_mut().unwrap();
+            v.pending_nav = Some(1);
+            v.pending_since = Some(iced::time::Instant::now());
+        }
+
+        let _ = update(
+            &mut app,
+            Message::Loaded {
+                path: b.clone(),
+                result: Err(crate::media::MediaError::Decode("bad".into())),
+            },
+        );
+
+        let v = app.viewer().unwrap();
+        // The cursor crossed onto the broken file rather than stalling before it,
+        // and the file now shows an error instead of nothing.
+        assert_eq!(v.nav.cursor(), 1);
+        assert!(matches!(v.displayed, DisplayedImage::Error { .. }));
+        assert!(v.failed_loads.contains_key(b.as_path()));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

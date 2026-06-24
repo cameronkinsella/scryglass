@@ -5,7 +5,7 @@ use iced::Task;
 use iced::time::Instant;
 
 use crate::anim::AnimPlayer;
-use crate::app::state::{Direction, Session, Viewer};
+use crate::app::state::{Direction, DisplayedImage, Session, Viewer};
 use crate::app::{App, MediaMessage, Message, OpenMessage};
 use crate::config::ZoomMode;
 use crate::media::archive::{self, ArchiveIndex};
@@ -383,7 +383,12 @@ pub(crate) fn complete_navigation(
     let current = viewer.nav.current().to_path_buf();
     let mut tasks = vec![probe_size(viewer, current.clone())];
 
-    if crate::video::is_video(&current) {
+    if let Some(message) = viewer.failed_loads.get(&current).cloned() {
+        // Known-bad file: land on it showing the error, never re-decode.
+        viewer.pending_since = None;
+        viewer.displayed = DisplayedImage::Error { message };
+        viewer.displayed_path = Some(current.clone());
+    } else if crate::video::is_video(&current) {
         // Video: blur-free spinner until the first frame arrives. The
         // session's tick subscription drives frames from here.
         viewer.pending_since = Some(Instant::now());

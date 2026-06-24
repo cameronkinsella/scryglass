@@ -137,6 +137,9 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                 return Task::none();
             }
             viewer.nav.replace_files(files);
+            // A file may have been fixed on disk, so drop remembered errors and
+            // let the next visit decode afresh.
+            viewer.failed_loads.clear();
             Task::none()
         }
     }

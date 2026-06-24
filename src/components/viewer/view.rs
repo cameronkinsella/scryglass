@@ -181,15 +181,19 @@ fn image_view(app: &App) -> Element<'_, Message> {
             ),
             _ => ui::image_display::empty_viewport(),
         },
+        DisplayedImage::Error { message } => ui::image_display::error_viewport(message),
     };
 
     // Optional checkerboard behind the image reveals transparency.
-    let image_view: Element<'_, Message> =
-        if app.config.show_checkerboard && !matches!(viewer.displayed, DisplayedImage::None) {
-            Stack::with_children(vec![ui::checkerboard::checkerboard(), image_view]).into()
-        } else {
-            image_view
-        };
+    let image_view: Element<'_, Message> = if app.config.show_checkerboard
+        && !matches!(
+            viewer.displayed,
+            DisplayedImage::None | DisplayedImage::Error { .. }
+        ) {
+        Stack::with_children(vec![ui::checkerboard::checkerboard(), image_view]).into()
+    } else {
+        image_view
+    };
 
     // Video transport controls, faded in/out by the per-tick opacity ease.
     match &viewer.video {

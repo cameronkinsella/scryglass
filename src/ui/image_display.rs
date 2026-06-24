@@ -171,6 +171,21 @@ pub fn empty_viewport<'a>() -> Element<'a, Message> {
         .into()
 }
 
+/// Shown in the image area for a file that could not be decoded, so a broken
+/// file reads as an error rather than a blank, uncrossable gap.
+pub fn error_viewport<'a>(message: &str) -> Element<'a, Message> {
+    center(
+        text(message.to_string())
+            .size(16)
+            .width(Length::Fill)
+            .center()
+            .style(crate::ui::theme::secondary_text),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,6 +302,13 @@ mod tests {
         use iced_test::simulator;
         let mut ui = simulator(super::drop_prompt());
         assert!(ui.find("Drop an image here to begin").is_ok());
+    }
+
+    #[test]
+    fn error_viewport_shows_the_message() {
+        use iced_test::simulator;
+        let mut ui = simulator(super::error_viewport("could not decode image"));
+        assert!(ui.find("could not decode image").is_ok());
     }
 
     #[test]
