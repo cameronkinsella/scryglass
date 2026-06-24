@@ -5,10 +5,10 @@ use std::pin::Pin;
 use iced::widget::image::Handle;
 use iced::{Size, Task};
 
+use crate::allocation;
 use crate::app::state::{CachedImage, DisplayedImage, LoadedMedia, Thumb, Viewer};
 use crate::app::viewer_math::compute_zoom;
 use crate::app::{App, MediaMessage, Message};
-use crate::cache;
 use crate::config::ZoomMode;
 use crate::media::pipeline::{Lane, Pipeline, Source, ThumbUrgency};
 use crate::media::registry::DecodeOpts;
@@ -38,7 +38,7 @@ pub(crate) fn fire_rotate(viewer: &mut Viewer) -> Task<Message> {
             return Task::none();
         };
         let p = path.clone();
-        cache::allocate_handle(Handle::from_rgba(width, height, pixels)).map(move |upload| {
+        allocation::allocate_handle(Handle::from_rgba(width, height, pixels)).map(move |upload| {
             match upload {
                 Ok(allocation) => Message::Media(MediaMessage::ViewRotated {
                     path: p.clone(),
@@ -281,7 +281,7 @@ pub(crate) fn fire_load(
             });
             let handle = Handle::from_rgba(img.width, img.height, img.pixels);
             let p = path.clone();
-            cache::allocate_handle(handle).map(move |upload| {
+            allocation::allocate_handle(handle).map(move |upload| {
                 let result = upload
                     .map(|allocation| LoadedMedia::Static {
                         image: CachedImage {

@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use iced::time::Instant;
 use iced::widget::image::Handle;
 
+use crate::allocation::Allocation;
 use crate::anim::AnimPlayer;
-use crate::cache::Allocation;
 use crate::media::cache::ImageCache;
 use crate::media::pipeline::Source;
 use crate::nav::Nav;

@@ -2,9 +2,9 @@
 // the console for decoder and panic output.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod allocation;
 mod anim;
 mod app;
-mod cache;
 mod components;
 mod config;
 #[cfg(feature = "video")]

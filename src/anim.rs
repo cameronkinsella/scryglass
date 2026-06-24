@@ -11,15 +11,15 @@ use std::time::Duration;
 use iced::Task;
 use iced::widget::image::Handle;
 
-use crate::cache;
-use crate::cache::Allocation;
+use crate::allocation;
+use crate::allocation::Allocation;
 use crate::media::animation::{AnimatedImage, FrameCanvas};
 
 /// Messages produced and consumed by `AnimPlayer`.
 #[derive(Debug, Clone)]
 pub enum AnimMessage {
     /// A composited frame was allocated to GPU memory.
-    FrameAllocated(PathBuf, Result<Allocation, cache::Error>),
+    FrameAllocated(PathBuf, Result<Allocation, allocation::Error>),
     /// Timer tick, advance to the next frame.
     Tick,
 }
@@ -94,7 +94,7 @@ impl AnimPlayer {
                 let pixels = active.canvas.pixels().to_vec();
                 let handle = Handle::from_rgba(active.decoded.width, active.decoded.height, pixels);
                 let p = current_path.to_path_buf();
-                let task = cache::allocate_handle(handle)
+                let task = allocation::allocate_handle(handle)
                     .map(move |result| AnimMessage::FrameAllocated(p.clone(), result));
                 (task, None)
             }
@@ -125,7 +125,7 @@ impl AnimPlayer {
         }));
 
         let p = path.to_path_buf();
-        cache::allocate_handle(handle)
+        allocation::allocate_handle(handle)
             .map(move |result| AnimMessage::FrameAllocated(p.clone(), result))
     }
 
