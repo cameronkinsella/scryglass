@@ -49,7 +49,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
     }
 }
 
-pub(crate) use widget::{filmstrip_id, keep_visible_offset, open_offset, visible_range};
+pub(crate) use widget::{center_offset, filmstrip_id, open_offset, visible_range};
 mod widget;
 
 #[cfg(test)]

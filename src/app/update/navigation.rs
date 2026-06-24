@@ -312,11 +312,10 @@ pub(crate) fn scrub_to(app: &mut App, index: usize) -> Task<Message> {
         show_placeholder_or_clear(viewer, &current, zoom_mode, viewport);
     }
 
-    // Keep the cursor on screen in the filmstrip, just like key navigation.
+    // Keep the cursor centered in the filmstrip while scrubbing.
     let mut tasks = Vec::new();
     if show_filmstrip {
-        let offset = crate::components::filmstrip::keep_visible_offset(
-            viewer.filmstrip_scroll_x,
+        let offset = crate::components::filmstrip::center_offset(
             viewer.nav.cursor(),
             window_w,
             viewer.nav.len(),
@@ -445,10 +444,8 @@ pub(crate) fn complete_navigation(
     viewer.cache.evict_over_budget(&pinned);
 
     if show_filmstrip {
-        // Move the strip only enough to keep the cursor on screen, otherwise
-        // hold it. Warm whatever thumbs become visible.
-        let offset = crate::components::filmstrip::keep_visible_offset(
-            viewer.filmstrip_scroll_x,
+        // Center the cursor in the strip. Warm whatever thumbs become visible.
+        let offset = crate::components::filmstrip::center_offset(
             viewer.nav.cursor(),
             window_w,
             viewer.nav.len(),
@@ -545,13 +542,16 @@ mod tests {
     }
 
     #[test]
-    fn scrubbing_keeps_the_cursor_visible_in_the_filmstrip() {
+    fn scrubbing_centers_the_cursor_in_the_filmstrip() {
         let names: Vec<String> = (0..100).map(|i| format!("{i:03}.png")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut app = viewing_app(&refs, 0);
         app.config.show_filmstrip = true;
         assert_eq!(app.viewer().unwrap().filmstrip_scroll_x, 0.0);
-        let _ = scrub_to(&mut app, 99);
-        assert!(app.viewer().unwrap().filmstrip_scroll_x > 0.0);
+        // Scrubbing to the middle centers the cursor (not pinned to an edge).
+        let _ = scrub_to(&mut app, 50);
+        let expected = crate::components::filmstrip::center_offset(50, 800.0, 100);
+        assert_eq!(app.viewer().unwrap().filmstrip_scroll_x, expected);
+        assert!(expected > 0.0);
     }
 }

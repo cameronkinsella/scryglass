@@ -81,21 +81,11 @@ pub fn open_offset(cursor: usize, viewport_w: f32, len: usize) -> f32 {
     }
 }
 
-/// Smallest change from `scroll_x` that keeps `cursor`'s cell fully on
-/// screen: unchanged if it already is, otherwise its near edge pinned to the
-/// matching viewport edge.
-pub fn keep_visible_offset(scroll_x: f32, cursor: usize, viewport_w: f32, len: usize) -> f32 {
-    let usable = usable_width(viewport_w);
-    let cell_start = cursor as f32 * STRIDE;
-    let cell_end = cell_start + STRIDE;
-    let moved = if cell_start < scroll_x {
-        cell_start
-    } else if cell_end > scroll_x + usable {
-        cell_end - usable
-    } else {
-        scroll_x
-    };
-    moved.clamp(0.0, max_scroll(len, viewport_w))
+/// Scroll offset that centers `cursor` on screen, clamped so it never scrolls
+/// past either end. Near the start or end the cursor sits off-center because
+/// there's nothing more to scroll to.
+pub fn center_offset(cursor: usize, viewport_w: f32, len: usize) -> f32 {
+    centering_offset(cursor, viewport_w).min(max_scroll(len, viewport_w))
 }
 
 /// Render the filmstrip: a virtualized, horizontally scrollable thumbnail row.
@@ -288,39 +278,23 @@ mod tests {
     }
 
     #[test]
-    fn keep_visible_holds_when_the_cursor_is_on_screen() {
-        let scroll = 10.0 * STRIDE;
-        assert_eq!(keep_visible_offset(scroll, 12, 800.0, 1000), scroll);
+    fn center_offset_clamps_at_the_start() {
+        // The first cursor can't scroll left of zero.
+        assert_eq!(center_offset(0, 800.0, 1000), 0.0);
     }
 
     #[test]
-    fn keep_visible_pins_to_the_right_edge() {
-        let cursor = 13; // cell ends past the usable width
-        assert_eq!(
-            keep_visible_offset(0.0, cursor, 800.0, 1000),
-            (cursor as f32 + 1.0) * STRIDE - usable_width(800.0)
-        );
+    fn center_offset_clamps_at_the_end() {
+        let len = 1000;
+        assert_eq!(center_offset(len - 1, 800.0, len), max_scroll(len, 800.0));
     }
 
     #[test]
-    fn keep_visible_pins_to_the_left_edge() {
-        let scroll = 20.0 * STRIDE;
-        assert_eq!(keep_visible_offset(scroll, 15, 800.0, 1000), 15.0 * STRIDE);
-    }
-
-    #[test]
-    fn keep_visible_clamps_to_the_end() {
-        // A tiny list never scrolls, even if asked.
-        assert_eq!(keep_visible_offset(500.0, 2, 800.0, 4), 0.0);
-    }
-
-    #[test]
-    fn keep_visible_keeps_the_last_cell_fully_on_screen() {
-        // Pinning the final cursor right must not overshoot the usable width,
-        // or the cursor's right border is clipped.
-        let len = 50;
-        let scroll = keep_visible_offset(0.0, len - 1, 800.0, len);
-        let cell_end = len as f32 * STRIDE;
-        assert!(cell_end <= scroll + usable_width(800.0) + 0.01);
+    fn center_offset_centers_a_mid_list_cursor() {
+        // A cursor in the deep middle lands roughly centered, not at an edge.
+        let centered = center_offset(500, 800.0, 1000);
+        assert!(centered > 0.0 && centered < max_scroll(1000, 800.0));
+        let cell_mid = 500.0 * STRIDE + STRIDE / 2.0;
+        assert!((cell_mid - (centered + usable_width(800.0) / 2.0)).abs() < STRIDE);
     }
 }
