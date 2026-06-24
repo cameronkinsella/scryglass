@@ -94,22 +94,30 @@ pub(crate) fn fire_exif(app: &mut App) -> Task<Message> {
     })
 }
 
-/// Fire thumbnail probes for every filmstrip cell currently in view.
-pub(crate) fn fire_visible_thumbs(
-    pipeline: &Pipeline,
-    viewer: &mut Viewer,
+/// Where background thumbnailing should aim, as a `(center, range)` pair to
+/// fan outward from: the cursor across the whole directory, or the visible row
+/// alone once the cursor has scrolled off the filmstrip.
+pub(crate) fn thumb_focus(
+    viewer: &Viewer,
     viewport_w: f32,
-) -> Vec<Task<Message>> {
-    let range = crate::components::filmstrip::visible_range(
-        viewer.filmstrip_scroll_x,
-        viewport_w,
-        viewer.nav.len(),
-    );
-    let paths: Vec<PathBuf> = viewer.nav.files()[range].to_vec();
-    paths
-        .into_iter()
-        .map(|p| fire_thumb(pipeline, viewer, p, ThumbUrgency::Background))
-        .collect()
+    filmstrip_shown: bool,
+) -> (usize, std::ops::Range<usize>) {
+    let len = viewer.nav.len();
+    let cursor = viewer.nav.cursor();
+    if !filmstrip_shown
+        || crate::components::filmstrip::cursor_on_screen(
+            viewer.filmstrip_scroll_x,
+            cursor,
+            viewport_w,
+        )
+    {
+        (cursor, 0..len)
+    } else {
+        let range =
+            crate::components::filmstrip::visible_range(viewer.filmstrip_scroll_x, viewport_w, len);
+        let center = range.start + (range.end - range.start) / 2;
+        (center, range)
+    }
 }
 
 /// Put a loaded image on screen, computing zoom from its true dimensions.
@@ -251,17 +259,19 @@ pub(crate) fn fire_thumb(
     })
 }
 
-/// Start (or continue) background thumbnailing: up to `chains` parallel
-/// job streams that work outward from the cursor until every file in the
-/// directory has a thumbnail.
+/// Start (or continue) background thumbnailing: up to `chains` jobs from the
+/// current [`thumb_focus`].
 pub(crate) fn fire_thumbnailer(
     pipeline: &Pipeline,
     viewer: &mut Viewer,
     chains: usize,
+    viewport_w: f32,
+    filmstrip_shown: bool,
 ) -> Vec<Task<Message>> {
     let mut tasks = Vec::new();
     for _ in 0..chains {
-        let Some(path) = viewer.next_unthumbed() else {
+        let (center, range) = thumb_focus(viewer, viewport_w, filmstrip_shown);
+        let Some(path) = viewer.next_unthumbed_in(center, range) else {
             break;
         };
         tasks.push(fire_thumb(pipeline, viewer, path, ThumbUrgency::Background));
@@ -382,4 +392,44 @@ fn probe_file_size(path: PathBuf) -> Task<Message> {
         },
         |(path, size)| Message::Media(MediaMessage::FileSizeProbed(path, size)),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::test_support::viewing_app;
+
+    fn names(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("{i:04}.png")).collect()
+    }
+
+    fn at_scroll(cursor: usize, scroll_x: f32) -> crate::app::App {
+        let ns = names(50);
+        let refs: Vec<&str> = ns.iter().map(String::as_str).collect();
+        let mut app = viewing_app(&refs, cursor);
+        app.viewer_mut().unwrap().filmstrip_scroll_x = scroll_x;
+        app
+    }
+
+    #[test]
+    fn thumb_focus_follows_the_cursor_when_on_screen() {
+        let app = at_scroll(2, 0.0);
+        assert_eq!(thumb_focus(app.viewer().unwrap(), 800.0, true), (2, 0..50));
+    }
+
+    #[test]
+    fn thumb_focus_switches_to_the_visible_row_off_screen() {
+        let app = at_scroll(2, 3000.0);
+        let (center, range) = thumb_focus(app.viewer().unwrap(), 800.0, true);
+        let expected = crate::components::filmstrip::visible_range(3000.0, 800.0, 50);
+        assert_eq!(range, expected);
+        assert_eq!(center, expected.start + (expected.end - expected.start) / 2);
+        assert_ne!(center, 2);
+    }
+
+    #[test]
+    fn thumb_focus_ignores_the_scroll_when_the_filmstrip_is_hidden() {
+        let app = at_scroll(2, 3000.0);
+        assert_eq!(thumb_focus(app.viewer().unwrap(), 800.0, false), (2, 0..50));
+    }
 }

@@ -31,8 +31,8 @@ use iced::Task;
 use crate::anim::AnimMessage;
 use crate::app::state::DisplayedImage;
 use crate::app::update::{
-    complete_navigation, fire_load, fire_rotate, fire_thumbnailer, fire_visible_thumbs,
-    resolve_pending_nav, show_loaded, show_placeholder,
+    complete_navigation, fire_load, fire_rotate, fire_thumbnailer, resolve_pending_nav,
+    show_loaded, show_placeholder,
 };
 use crate::app::viewer_math::compute_zoom;
 use crate::app::{App, Message as AppMessage};
@@ -161,6 +161,8 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
         } => {
             let zoom_mode = app.config.zoom_mode;
             let viewport = app.viewport_size;
+            let window_w = app.window_size.width;
+            let show_filmstrip = app.config.show_filmstrip;
             let pipeline = app.pipeline.clone();
             let Some(viewer) = app.viewer_mut() else {
                 return Task::none();
@@ -189,7 +191,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                 }
             }
 
-            let mut tasks = fire_thumbnailer(&pipeline, viewer, 1);
+            let mut tasks = fire_thumbnailer(&pipeline, viewer, 1, window_w, show_filmstrip);
             tasks.push(resolve_pending_nav(app));
             Task::batch(tasks)
         }
@@ -232,7 +234,13 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                     filmstrip::filmstrip_id(),
                     iced::widget::scrollable::AbsoluteOffset { x: offset, y: 0.0 },
                 ));
-                tasks.extend(fire_visible_thumbs(&pipeline, viewer, window_w));
+                tasks.extend(fire_thumbnailer(
+                    &pipeline,
+                    viewer,
+                    3,
+                    window_w,
+                    show_filmstrip,
+                ));
             }
             Task::batch(tasks)
         }

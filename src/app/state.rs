@@ -167,6 +167,12 @@ pub struct Viewer {
     pub drag: Option<DragState>,
     /// Filmstrip scroll offset in logical pixels. Drives virtualization.
     pub filmstrip_scroll_x: f32,
+    /// Whether a filmstrip-settle check is scheduled, so a moving scroll
+    /// reuses one timer instead of arming one per scroll event.
+    pub visible_settle_pending: bool,
+    /// When the filmstrip scroll offset last changed, so the settle check can
+    /// tell scrolling has stopped.
+    pub filmstrip_scrolled_at: Instant,
     /// EXIF fields for the info panel, tagged with the file they describe.
     pub exif: Option<(PathBuf, Vec<(String, String)>)>,
     /// Desired view rotation in quarter turns clockwise (0-3).
@@ -229,6 +235,8 @@ impl Viewer {
             pan: (0.0, 0.0),
             drag: None,
             filmstrip_scroll_x: 0.0,
+            visible_settle_pending: false,
+            filmstrip_scrolled_at: Instant::now(),
             exif: None,
             rotation: 0,
             displayed_rotation: 0,
@@ -279,19 +287,24 @@ impl Viewer {
             || self.failed_loads.contains_key(path)
     }
 
-    /// The next file for the background thumbnailer to pick: one with no
-    /// thumbnail, none in flight, and no full load underway (a full load
+    /// The next file for the background thumbnailer to pick within `range`,
+    /// fanning outward from `center` (center, +1, -1, +2, -2, ...): one with
+    /// no thumbnail, none in flight, and no full load underway (a full load
     /// produces a thumbnail anyway).
-    pub fn next_unthumbed(&self) -> Option<PathBuf> {
+    pub fn next_unthumbed_in(
+        &self,
+        center: usize,
+        range: std::ops::Range<usize>,
+    ) -> Option<PathBuf> {
         let files = self.nav.files();
-        let len = files.len();
-        let cursor = self.nav.cursor();
-        // Fan outward from the cursor (cursor, +1, -1, +2, -2, ...) so the
-        // thumbnails nearest the current view fill in first.
-        (0..len)
+        let span = range.end.saturating_sub(range.start);
+        (0..span)
             .flat_map(|d| {
-                let forward = cursor.checked_add(d).filter(|&i| i < len);
-                let backward = (d > 0).then(|| cursor.checked_sub(d)).flatten();
+                let forward = center.checked_add(d).filter(|i| range.contains(i));
+                let backward = (d > 0)
+                    .then(|| center.checked_sub(d))
+                    .flatten()
+                    .filter(|i| range.contains(i));
                 [forward, backward]
             })
             .flatten()
@@ -358,10 +371,41 @@ mod tests {
         let mut viewer = test_viewer(&["a.png", "b.png", "c.png", "d.png", "e.png"], 2);
         // Cursor first, then alternate outward: c, d, b, e, a.
         for expected in ["c.png", "d.png", "b.png", "e.png", "a.png"] {
-            assert_eq!(viewer.next_unthumbed(), Some(PathBuf::from(expected)));
+            assert_eq!(
+                viewer.next_unthumbed_in(2, 0..5),
+                Some(PathBuf::from(expected))
+            );
             viewer.in_flight_thumbs.insert(PathBuf::from(expected));
         }
-        assert_eq!(viewer.next_unthumbed(), None);
+        assert_eq!(viewer.next_unthumbed_in(2, 0..5), None);
+    }
+
+    #[test]
+    fn next_unthumbed_in_fans_outward_within_a_subrange() {
+        let mut viewer = test_viewer(&["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"], 0);
+        // Window 3..8 centered on 5: 5, 6, 4, 7, 3 and never 2 or 8.
+        for expected in ["5", "6", "4", "7", "3"] {
+            assert_eq!(
+                viewer.next_unthumbed_in(5, 3..8),
+                Some(PathBuf::from(expected))
+            );
+            viewer.in_flight_thumbs.insert(PathBuf::from(expected));
+        }
+        assert_eq!(viewer.next_unthumbed_in(5, 3..8), None);
+    }
+
+    #[test]
+    fn next_unthumbed_in_never_leaves_the_range() {
+        let mut viewer = test_viewer(&["0", "1", "2", "3", "4"], 0);
+        // Window 1..4 centered on 2: 2, 3, 1 and never the out-of-range 0 or 4.
+        for expected in ["2", "3", "1"] {
+            assert_eq!(
+                viewer.next_unthumbed_in(2, 1..4),
+                Some(PathBuf::from(expected))
+            );
+            viewer.in_flight_thumbs.insert(PathBuf::from(expected));
+        }
+        assert_eq!(viewer.next_unthumbed_in(2, 1..4), None);
     }
 
     #[test]
@@ -370,14 +414,17 @@ mod tests {
         viewer.in_flight_thumbs.insert("a.png".into());
         viewer.failed_thumbs.insert("b.png".into());
         viewer.in_flight.insert("c.png".into());
-        assert_eq!(viewer.next_unthumbed(), Some(PathBuf::from("d.png")));
+        assert_eq!(
+            viewer.next_unthumbed_in(0, 0..4),
+            Some(PathBuf::from("d.png"))
+        );
     }
 
     #[test]
     fn next_unthumbed_returns_none_when_exhausted() {
         let mut viewer = test_viewer(&["a.png"], 0);
         viewer.failed_thumbs.insert("a.png".into());
-        assert_eq!(viewer.next_unthumbed(), None);
+        assert_eq!(viewer.next_unthumbed_in(0, 0..1), None);
     }
 
     #[test]

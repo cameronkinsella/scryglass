@@ -59,6 +59,16 @@ pub fn visible_range(scroll_x: f32, viewport_w: f32, len: usize) -> Range<usize>
     start..end
 }
 
+/// Whether the cursor's cell overlaps the visible viewport (overscan
+/// excluded) at this scroll offset.
+pub fn cursor_on_screen(scroll_x: f32, cursor: usize, viewport_w: f32) -> bool {
+    let view_left = scroll_x;
+    let view_right = scroll_x + usable_width(viewport_w);
+    let cell_left = cursor as f32 * STRIDE;
+    let cell_right = cell_left + STRIDE;
+    cell_right > view_left && cell_left < view_right
+}
+
 /// Scroll offset that horizontally centers `index` in the strip.
 pub fn centering_offset(index: usize, viewport_w: f32) -> f32 {
     (index as f32 * STRIDE - (usable_width(viewport_w) - STRIDE) / 2.0).max(0.0)
@@ -254,6 +264,22 @@ mod tests {
         let range = visible_range(0.0, 10_000.0, 5);
         assert_eq!(range, 0..5);
         assert_eq!(visible_range(0.0, 800.0, 0), 0..0);
+    }
+
+    #[test]
+    fn cursor_on_screen_sees_the_left_aligned_cursor() {
+        assert!(cursor_on_screen(0.0, 0, 800.0));
+        assert!(cursor_on_screen(0.0, 5, 800.0));
+    }
+
+    #[test]
+    fn cursor_on_screen_is_false_when_scrolled_away() {
+        // Cursor 50 is far right of a viewport pinned at the left.
+        assert!(!cursor_on_screen(0.0, 50, 800.0));
+        // Scroll onto it and it's visible again.
+        assert!(cursor_on_screen(50.0 * STRIDE, 50, 800.0));
+        // ...and cursor 0 has fallen off the left edge.
+        assert!(!cursor_on_screen(50.0 * STRIDE, 0, 800.0));
     }
 
     #[test]

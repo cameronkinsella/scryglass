@@ -14,8 +14,8 @@ use crate::nav::{self, Nav};
 
 use super::NavTarget;
 use super::media_tasks::{
-    fire_exif, fire_load, fire_prefetch, fire_thumb, fire_thumbnailer, fire_visible_thumbs,
-    probe_size, show_loaded, show_placeholder_or_clear,
+    fire_exif, fire_load, fire_prefetch, fire_thumb, fire_thumbnailer, probe_size, show_loaded,
+    show_placeholder_or_clear,
 };
 use super::video_flow::start_video;
 
@@ -80,6 +80,7 @@ pub(crate) fn open_viewer(
     let depth = app.config.prefetch_depth;
     let budget = app.config.cache_budget_mb * 1024 * 1024;
     let window_w = app.window_size.width;
+    let show_filmstrip = app.config.show_filmstrip;
     let pipeline = app.pipeline.clone();
 
     // Privacy hygiene: purge persisted thumbnails of files that were
@@ -133,13 +134,9 @@ pub(crate) fn open_viewer(
         tasks.push(fire_load(&pipeline, &mut viewer, current, Lane::Current));
     }
     tasks.extend(fire_prefetch(&pipeline, &mut viewer, depth));
-    tasks.extend(fire_visible_thumbs(&pipeline, &mut viewer, window_w));
-    // Background-thumbnail the whole directory so the filmstrip and
-    // placeholders are warm everywhere, not just near the cursor.
-    tasks.extend(fire_thumbnailer(&pipeline, &mut viewer, 3));
 
-    // Open centered on the cursor when it would otherwise be off-screen
-    // (deep into the directory), flush left or right at the edges.
+    // Set the scroll offset before the thumbnailer fires, so it reads the
+    // cursor as on screen and fans from there, not from index 0.
     if app.config.show_filmstrip {
         let offset = crate::components::filmstrip::open_offset(
             viewer.nav.cursor(),
@@ -152,6 +149,14 @@ pub(crate) fn open_viewer(
             iced::widget::scrollable::AbsoluteOffset { x: offset, y: 0.0 },
         ));
     }
+
+    tasks.extend(fire_thumbnailer(
+        &pipeline,
+        &mut viewer,
+        3,
+        window_w,
+        show_filmstrip,
+    ));
 
     viewer.resort_to_first = opened_container;
     app.session = Session::Viewing(Box::new(viewer));
@@ -335,9 +340,14 @@ pub(crate) fn scrub_to(app: &mut App, index: usize, center: bool) -> Task<Messag
             ));
         }
     }
-    // Follow the cursor with the outward-fan thumbnailer rather than batching
-    // the whole visible row every step; the full batch fires once you settle.
-    tasks.extend(fire_thumbnailer(&pipeline, viewer, 3));
+    // Follow the cursor with the outward fan.
+    tasks.extend(fire_thumbnailer(
+        &pipeline,
+        viewer,
+        3,
+        window_w,
+        show_filmstrip,
+    ));
     Task::batch(tasks)
 }
 
@@ -472,8 +482,16 @@ pub(crate) fn complete_navigation(
                 iced::widget::scrollable::AbsoluteOffset { x: offset, y: 0.0 },
             ));
         }
-        tasks.extend(fire_visible_thumbs(&pipeline, viewer, window_w));
     }
+
+    // Re-aim the cursor fan at the new position.
+    tasks.extend(fire_thumbnailer(
+        &pipeline,
+        viewer,
+        3,
+        window_w,
+        show_filmstrip,
+    ));
 
     if app.config.show_info {
         tasks.push(fire_exif(app));
@@ -495,6 +513,24 @@ mod tests {
         let v = app.viewer().unwrap();
         assert_eq!(v.nav.cursor(), 0); // never moved
         assert_eq!(v.pending_nav, Some(1)); // pending target untouched
+    }
+
+    #[test]
+    fn opening_deep_fans_thumbnails_from_the_cursor() {
+        let names: Vec<String> = (0..200).map(|i| format!("{i:04}.png")).collect();
+        let files: Vec<std::path::PathBuf> = names.iter().map(std::path::PathBuf::from).collect();
+        let start = files[100].clone();
+        let nav = crate::nav::Nav::new(files, &start).unwrap();
+        let mut app = crate::app::test_support::empty_app();
+        app.config.show_filmstrip = true;
+        let _ = open_viewer(&mut app, nav, crate::media::pipeline::Source::Fs, false);
+        let v = app.viewer().unwrap();
+        // Queued thumbnails cluster on the cursor (100), never stranded at 0.
+        assert!(!v.in_flight_thumbs.is_empty());
+        assert!(v.in_flight_thumbs.iter().all(|p| {
+            let n: usize = p.file_stem().unwrap().to_str().unwrap().parse().unwrap();
+            (90..=110).contains(&n)
+        }));
     }
 
     #[test]
