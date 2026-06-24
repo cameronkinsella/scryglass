@@ -36,8 +36,6 @@ impl DiskThumbs {
 
     pub fn housekeep(&self) {}
 
-    pub fn clear(&self) {}
-
     pub fn total_size(&self) -> u64 {
         0
     }

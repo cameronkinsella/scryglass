@@ -4,12 +4,15 @@ pub enum Message {
     Close,
     ShowHelp,
     DiskCacheSize(u64),
+    #[cfg(feature = "disk-thumbs")]
     ClearDiskThumbs,
     SetPrefetchDepth(usize),
     SetCacheBudget(usize),
     ToggleReadOnly,
     ToggleConfirmDelete,
+    #[cfg(feature = "disk-thumbs")]
     ToggleDiskThumbs,
+    #[cfg(feature = "video")]
     ToggleHardwareDecode,
     ToggleFileAssociations,
     #[cfg(feature = "update-check")]
@@ -91,6 +94,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             Task::none()
         }
 
+        #[cfg(feature = "disk-thumbs")]
         Message::ClearDiskThumbs => {
             let Some(disk) = app.pipeline.disk() else {
                 return Task::none();
@@ -133,6 +137,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             save_config(app)
         }
 
+        #[cfg(feature = "disk-thumbs")]
         Message::ToggleDiskThumbs => {
             app.config.disk_thumbs = !app.config.disk_thumbs;
             app.pipeline
@@ -144,6 +149,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
         }
 
         // Applies to the next video opened.
+        #[cfg(feature = "video")]
         Message::ToggleHardwareDecode => {
             app.config.hardware_decode = !app.config.hardware_decode;
             save_config(app)
@@ -193,6 +199,7 @@ mod tests {
         assert_eq!(app.config.confirm_delete, !before);
     }
 
+    #[cfg(feature = "video")]
     #[test]
     fn toggle_hardware_decode_flips_the_flag() {
         let mut app = empty_app();

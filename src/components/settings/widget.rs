@@ -7,8 +7,8 @@ use crate::app::SettingsMessage;
 use crate::config::AppConfig;
 use crate::ui::theme;
 
-/// Render the settings card. `disk_cache_size` is `None` while the
-/// thumbnail-store probe is still running.
+/// Render the settings card.
+#[cfg_attr(not(feature = "disk-thumbs"), allow(unused_variables))]
 pub fn settings<'a>(
     config: &AppConfig,
     disk_cache_size: Option<u64>,
@@ -78,37 +78,43 @@ pub fn settings<'a>(
             (budget > 128).then(|| SettingsMessage::SetCacheBudget(budget - 128)),
             (budget < 4096).then(|| SettingsMessage::SetCacheBudget(budget + 128)),
         ),
-        rule::horizontal(1),
-        switch("Persistent thumbnails", config.disk_thumbs, |_| {
-            SettingsMessage::ToggleDiskThumbs
-        }),
     ]
     .spacing(10)
     .padding(18)
     .width(Length::Fixed(360.0));
 
-    let size_label = disk_cache_size
-        .map(crate::ui::format_file_size)
-        .unwrap_or_else(|| "…".to_string());
-    rows = rows.push(
-        row![
-            text(format!("Thumbnail store: {size_label}"))
-                .size(13)
-                .width(Length::Fill),
-            button(text("Clear").size(13))
-                .on_press(SettingsMessage::ClearDiskThumbs)
-                .padding([3, 12])
-                .style(button::secondary),
-        ]
-        .align_y(iced::Alignment::Center),
-    );
+    #[cfg(feature = "disk-thumbs")]
+    {
+        rows = rows.push(rule::horizontal(1));
+        rows = rows.push(switch("Persistent thumbnails", config.disk_thumbs, |_| {
+            SettingsMessage::ToggleDiskThumbs
+        }));
+        let size_label = disk_cache_size
+            .map(crate::ui::format_file_size)
+            .unwrap_or_else(|| "…".to_string());
+        rows = rows.push(
+            row![
+                text(format!("Thumbnail store: {size_label}"))
+                    .size(13)
+                    .width(Length::Fill),
+                button(text("Clear").size(13))
+                    .on_press(SettingsMessage::ClearDiskThumbs)
+                    .padding([3, 12])
+                    .style(button::secondary),
+            ]
+            .align_y(iced::Alignment::Center),
+        );
+    }
 
-    rows = rows.push(rule::horizontal(1));
-    rows = rows.push(switch(
-        "Hardware video decode",
-        config.hardware_decode,
-        |_| SettingsMessage::ToggleHardwareDecode,
-    ));
+    #[cfg(feature = "video")]
+    {
+        rows = rows.push(rule::horizontal(1));
+        rows = rows.push(switch(
+            "Hardware video decode",
+            config.hardware_decode,
+            |_| SettingsMessage::ToggleHardwareDecode,
+        ));
+    }
 
     // Windows "Open with" needs a one-time per-user registration.
     if cfg!(target_os = "windows") {
@@ -201,39 +207,49 @@ fn update_section<'a>(
 #[cfg(test)]
 mod tests {
     use super::settings;
+    use crate::app::SettingsMessage;
     use crate::config::AppConfig;
+    use iced::Element;
     use iced_test::simulator;
 
-    #[test]
-    fn renders_title_and_steppers() {
-        let mut ui = simulator(settings(
+    fn card<'a>(disk_cache_size: Option<u64>) -> Element<'a, SettingsMessage> {
+        settings(
             &AppConfig::default(),
-            None,
+            disk_cache_size,
             false,
             #[cfg(feature = "update-check")]
             None,
-        ));
+        )
+    }
+
+    #[test]
+    fn renders_title_and_steppers() {
+        let mut ui = simulator(card(None));
         assert!(ui.find("Settings").is_ok());
         assert!(ui.find("Prefetch depth").is_ok());
         assert!(ui.find("Image cache budget").is_ok());
     }
 
+    // Toggler labels aren't surfaced to `find`, so the disk-thumbs section is
+    // checked through its findable store-size text.
+    #[cfg(feature = "disk-thumbs")]
     #[test]
-    fn shows_the_thumbnail_store_size() {
-        let mut ui = simulator(settings(
-            &AppConfig::default(),
-            Some(2048),
-            false,
-            #[cfg(feature = "update-check")]
-            None,
-        ));
+    fn shows_the_thumbnail_store_when_enabled() {
+        let mut ui = simulator(card(Some(2048)));
         assert!(ui.find("Thumbnail store: 2.0 KB").is_ok());
+    }
+
+    #[cfg(not(feature = "disk-thumbs"))]
+    #[test]
+    fn hides_the_thumbnail_store_when_disabled() {
+        let mut ui = simulator(card(Some(2048)));
+        assert!(ui.find("Thumbnail store: 2.0 KB").is_err());
     }
 
     #[cfg(feature = "update-check")]
     #[test]
     fn shows_version_and_check_button() {
-        let mut ui = simulator(settings(&AppConfig::default(), None, false, None));
+        let mut ui = simulator(card(None));
         assert!(
             ui.find(concat!("scryglass v", env!("CARGO_PKG_VERSION")))
                 .is_ok()
@@ -250,7 +266,6 @@ mod tests {
             url: "https://example/release".into(),
         };
         let mut ui = simulator(settings(&AppConfig::default(), None, false, Some(&status)));
-        // The version-and-link is one compact clickable element.
         assert!(ui.find("v9.9.9 available").is_ok());
     }
 }

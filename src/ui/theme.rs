@@ -161,6 +161,7 @@ pub fn accent_text(theme: &Theme) -> text::Style {
 }
 
 /// Green text for a positive status (e.g. "up to date").
+#[cfg(feature = "update-check")]
 pub fn success_text(theme: &Theme) -> text::Style {
     text::Style {
         color: Some(theme.palette().success),
@@ -278,6 +279,7 @@ pub fn icon_button(theme: &Theme, status: button::Status) -> button::Style {
 }
 
 /// Inline accent link: borderless, accent text, faint wash on hover.
+#[cfg(feature = "update-check")]
 pub fn link_button(theme: &Theme, status: button::Status) -> button::Style {
     let t = tokens(theme);
     let background = match status {

@@ -114,6 +114,7 @@ impl Pipeline {
     }
 
     /// Swap the persistent store in or out (settings toggle).
+    #[cfg(feature = "disk-thumbs")]
     pub fn set_disk(&self, disk: Option<DiskThumbs>) {
         if let Ok(mut slot) = self.disk.write() {
             *slot = disk;
