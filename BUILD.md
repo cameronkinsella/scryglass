@@ -30,6 +30,7 @@ Feature requirements:
 | `jxl`          | JPEG XL decoding                    | No native library                                  |
 | `svg`          | SVG rendering                       | No native library                                  |
 | `raw`          | Camera RAW embedded previews        | No native library                                  |
+| `update-check` | "Check for updates" button (GitHub) | No native library (rustls networking)              |
 | `heif`         | HEIC/HEIF decoding                  | `libheif` headers and libraries                    |
 | `video`        | Video playback and AVIF decoding    | FFmpeg dev libraries, libclang, audio system libs  |
 | `video-static` | Static FFmpeg link for `video`      | Static FFmpeg libraries; use vcpkg instructions below |
