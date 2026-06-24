@@ -272,10 +272,11 @@ pub(crate) fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
     Task::batch(tasks)
 }
 
-/// Mid-drag scrub step onto an already-loaded file: move display, title,
-/// cursor, and filmstrip together with minimal side effects: no generation
-/// bump, no prefetch, no probes. Those run once on release.
-pub(crate) fn scrub_to(app: &mut App, index: usize) -> Task<Message> {
+/// Move display, title, cursor, and filmstrip onto `index` with minimal side
+/// effects (no generation bump, no prefetch, no probes; those run on settle).
+/// The slider centers the cursor in the filmstrip; key navigation (`center`
+/// false) only scrolls enough to keep it on screen.
+pub(crate) fn scrub_to(app: &mut App, index: usize, center: bool) -> Task<Message> {
     let zoom_mode = app.config.zoom_mode;
     let viewport = app.viewport_size;
     let window_w = app.window_size.width;
@@ -306,20 +307,26 @@ pub(crate) fn scrub_to(app: &mut App, index: usize) -> Task<Message> {
     if let Some(cached) = viewer.cache.get(&current).cloned() {
         show_loaded(viewer, &current, cached, zoom_mode, viewport);
     } else {
-        // Scrub targets are guaranteed at least a thumb. The sharp image
-        // loads if the drag ends here.
+        // Show the blur if one exists, otherwise a spinner. The sharp image
+        // loads on settle.
         viewer.pending_since = Some(Instant::now());
         show_placeholder_or_clear(viewer, &current, zoom_mode, viewport);
     }
 
-    // Keep the cursor centered in the filmstrip while scrubbing.
     let mut tasks = Vec::new();
     if show_filmstrip {
-        let offset = crate::components::filmstrip::center_offset(
-            viewer.nav.cursor(),
-            window_w,
-            viewer.nav.len(),
-        );
+        let cursor = viewer.nav.cursor();
+        let len = viewer.nav.len();
+        let offset = if center {
+            crate::components::filmstrip::center_offset(cursor, window_w, len)
+        } else {
+            crate::components::filmstrip::keep_visible_offset(
+                viewer.filmstrip_scroll_x,
+                cursor,
+                window_w,
+                len,
+            )
+        };
         if offset != viewer.filmstrip_scroll_x {
             viewer.filmstrip_scroll_x = offset;
             tasks.push(iced::widget::operation::scroll_to(
@@ -446,8 +453,9 @@ pub(crate) fn complete_navigation(
     viewer.cache.evict_over_budget(&pinned);
 
     if show_filmstrip {
-        // Center the cursor in the strip. Warm whatever thumbs become visible.
-        let offset = crate::components::filmstrip::center_offset(
+        // Scroll only enough to keep the cursor on screen. Warm visible thumbs.
+        let offset = crate::components::filmstrip::keep_visible_offset(
+            viewer.filmstrip_scroll_x,
             viewer.nav.cursor(),
             window_w,
             viewer.nav.len(),
@@ -550,8 +558,8 @@ mod tests {
         let mut app = viewing_app(&refs, 0);
         app.config.show_filmstrip = true;
         assert_eq!(app.viewer().unwrap().filmstrip_scroll_x, 0.0);
-        // Scrubbing to the middle centers the cursor (not pinned to an edge).
-        let _ = scrub_to(&mut app, 50);
+        // Scrubbing the slider (center = true) centers the cursor.
+        let _ = scrub_to(&mut app, 50, true);
         let expected = crate::components::filmstrip::center_offset(50, 800.0, 100);
         assert_eq!(app.viewer().unwrap().filmstrip_scroll_x, expected);
         assert!(expected > 0.0);

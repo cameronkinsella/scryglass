@@ -75,7 +75,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                 return Task::none();
             }
             let next = (viewer.nav.cursor() + 1) % len;
-            scrub_to(app, next)
+            scrub_to(app, next, false)
         }
         Message::PrevRepeat => {
             let Some(viewer) = app.viewer_mut() else {
@@ -90,7 +90,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                 return Task::none();
             }
             let prev = (viewer.nav.cursor() + len - 1) % len;
-            scrub_to(app, prev)
+            scrub_to(app, prev, false)
         }
         Message::First => navigate(app, NavTarget::Index(0)),
         Message::Last => {

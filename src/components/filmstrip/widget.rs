@@ -88,6 +88,23 @@ pub fn center_offset(cursor: usize, viewport_w: f32, len: usize) -> f32 {
     centering_offset(cursor, viewport_w).min(max_scroll(len, viewport_w))
 }
 
+/// Smallest change from `scroll_x` that keeps `cursor`'s cell fully on
+/// screen: unchanged if it already is, otherwise its near edge pinned to the
+/// matching viewport edge.
+pub fn keep_visible_offset(scroll_x: f32, cursor: usize, viewport_w: f32, len: usize) -> f32 {
+    let usable = usable_width(viewport_w);
+    let cell_start = cursor as f32 * STRIDE;
+    let cell_end = cell_start + STRIDE;
+    let moved = if cell_start < scroll_x {
+        cell_start
+    } else if cell_end > scroll_x + usable {
+        cell_end - usable
+    } else {
+        scroll_x
+    };
+    moved.clamp(0.0, max_scroll(len, viewport_w))
+}
+
 /// Render the filmstrip: a virtualized, horizontally scrollable thumbnail row.
 pub fn filmstrip<'a>(
     files: &'a [PathBuf],
@@ -296,5 +313,16 @@ mod tests {
         assert!(centered > 0.0 && centered < max_scroll(1000, 800.0));
         let cell_mid = 500.0 * STRIDE + STRIDE / 2.0;
         assert!((cell_mid - (centered + usable_width(800.0) / 2.0)).abs() < STRIDE);
+    }
+
+    #[test]
+    fn keep_visible_holds_an_on_screen_cursor_then_pins_the_edge() {
+        let scroll = 10.0 * STRIDE;
+        // Already on screen: no scroll.
+        assert_eq!(keep_visible_offset(scroll, 12, 800.0, 1000), scroll);
+        // Off the right edge: pin its far edge, far less than centering.
+        let pinned = keep_visible_offset(0.0, 13, 800.0, 1000);
+        assert_eq!(pinned, 14.0 * STRIDE - usable_width(800.0));
+        assert!(pinned < center_offset(13, 800.0, 1000));
     }
 }

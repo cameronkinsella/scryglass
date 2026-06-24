@@ -7,7 +7,7 @@ pub enum Message {
 use iced::Element;
 use iced::Task;
 
-use crate::app::update::{NavTarget, fire_visible_thumbs, navigate};
+use crate::app::update::{complete_navigation, fire_visible_thumbs};
 use crate::app::{App, Message as AppMessage};
 
 pub(crate) fn view(app: &App) -> Element<'_, AppMessage> {
@@ -45,11 +45,13 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             Task::batch(fire_visible_thumbs(&pipeline, viewer, window_w))
         }
 
-        Message::Clicked(index) => navigate(app, NavTarget::Index(index)),
+        Message::Clicked(index) => complete_navigation(app, index, true),
     }
 }
 
-pub(crate) use widget::{center_offset, filmstrip_id, open_offset, visible_range};
+pub(crate) use widget::{
+    center_offset, filmstrip_id, keep_visible_offset, open_offset, visible_range,
+};
 mod widget;
 
 #[cfg(test)]
@@ -65,9 +67,10 @@ mod tests {
     }
 
     #[test]
-    fn clicked_defers_navigation_to_the_target() {
+    fn clicking_opens_the_target_instantly() {
         let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
         let _ = update(&mut app, Message::Clicked(2));
-        assert_eq!(app.viewer().unwrap().pending_nav, Some(2));
+        // The cursor jumps straight to the clicked frame (no deferred wait).
+        assert_eq!(app.viewer().unwrap().nav.cursor(), 2);
     }
 }

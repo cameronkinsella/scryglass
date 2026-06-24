@@ -55,9 +55,10 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             }
 
             // Move to the frame immediately, showing its blur or a spinner; the
-            // sharp image loads on the dwell or on release.
+            // sharp image loads on the dwell or on release. The slider centers
+            // the cursor in the filmstrip.
             let scrub = if index != cursor {
-                scrub_to(app, index)
+                scrub_to(app, index, true)
             } else {
                 Task::none()
             };
