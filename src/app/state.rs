@@ -147,6 +147,9 @@ pub struct Viewer {
     /// display live-follows through loaded files and the fallback bubble
     /// covers cold ones. Committed on release.
     pub slider_drag: Option<SliderDrag>,
+    /// Whether a dwell-load check is already scheduled, so a moving slider
+    /// reuses one timer instead of spawning one per step.
+    pub dwell_pending: bool,
     /// Which direction key is currently held, and when the hold started.
     pub held_direction: Option<(Direction, Instant)>,
     /// Animated GIF player that handles decode cache and animation.
@@ -217,6 +220,7 @@ impl Viewer {
             pending_since: Some(Instant::now()),
             pending_nav: None,
             slider_drag: None,
+            dwell_pending: false,
             held_direction: None,
             anim_player,
             current_file_size: None,
@@ -266,6 +270,15 @@ impl Viewer {
             || self.failed_loads.contains_key(path)
     }
 
+    /// Whether the sharp image for `path` is already in hand, so a resting
+    /// slider has nothing left to load. A thumbnail blur does not count.
+    pub fn has_full(&self, path: &std::path::Path) -> bool {
+        self.cache.contains(path)
+            || self.anim_player.has_cached(path)
+            || crate::video::is_video(path)
+            || self.failed_loads.contains_key(path)
+    }
+
     /// The next file for the background thumbnailer to pick: one with no
     /// thumbnail, none in flight, and no full load underway (a full load
     /// produces a thumbnail anyway).
@@ -306,6 +319,8 @@ pub struct SliderDrag {
     /// it stays for the rest of the drag so it never flickers in and out
     /// across warm/cold boundaries.
     pub bubble: bool,
+    /// When `target` was last set, so a slider resting here can load it.
+    pub since: Instant,
 }
 
 #[derive(Debug, Clone, Copy)]
