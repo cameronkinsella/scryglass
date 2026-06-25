@@ -16,6 +16,15 @@ use super::frame::copy_plane;
 use super::hw::{download_frame, is_hw_frame, try_init_hw};
 use super::{VideoFrame, YuvFormat, YuvMatrix, YuvRange, init_ffmpeg};
 
+/// Items sent to a decode thread. `Loop` is the in-band boundary marker the
+/// demuxer inserts after a seek back to the start, so post-seek packets can
+/// never overtake it. `offset` is how far to shift the loop's timestamps so
+/// they keep climbing in step with the playback clock.
+enum DecodeCmd {
+    Packet(ffmpeg::codec::packet::Packet),
+    Loop { offset: Duration },
+}
+
 /// Spawn the decode pipeline: a demux thread routes compressed packets
 /// into per-stream queues consumed by independent video and audio decode
 /// threads. The pipelines must not share backpressure. A full video
@@ -31,6 +40,7 @@ pub(crate) fn spawn_decode_thread(
     video_done: Arc<AtomicBool>,
     pcm_tx: mpsc::SyncSender<f32>,
     hardware: bool,
+    looping: Arc<AtomicBool>,
 ) -> mpsc::Receiver<VideoFrame> {
     let (tx, rx) = mpsc::sync_channel::<VideoFrame>(4);
 
@@ -47,6 +57,7 @@ pub(crate) fn spawn_decode_thread(
             tx,
             pcm_tx,
             hardware,
+            &looping,
         )
         .is_err()
         {
@@ -72,14 +83,18 @@ fn run_pipeline(
     tx: mpsc::SyncSender<VideoFrame>,
     pcm_tx: mpsc::SyncSender<f32>,
     hardware: bool,
+    looping: &Arc<AtomicBool>,
 ) -> Result<(), ffmpeg::Error> {
     init_ffmpeg()?;
     let mut input = ffmpeg::format::input(path)?;
 
-    if input.duration() > 0 {
+    let container_secs = if input.duration() > 0 {
         // `duration()` is in AV_TIME_BASE units (microseconds).
         duration_us.store(input.duration() as u64, Ordering::Relaxed);
-    }
+        input.duration() as f64 / 1_000_000.0
+    } else {
+        0.0
+    };
     if !start.is_zero() {
         let ts = start.as_micros() as i64;
         input.seek(ts, ..ts)?;
@@ -93,6 +108,7 @@ fn run_pipeline(
         .ok_or(ffmpeg::Error::StreamNotFound)?;
     let video_index = video_stream.index();
     let video_tb = f64::from(video_stream.time_base());
+    let video_period_secs = stream_duration_secs(video_stream.duration(), video_tb);
     // Frame duration for stepping, from the average frame rate.
     let fps = f64::from(video_stream.avg_frame_rate());
     if fps > 0.0 {
@@ -109,67 +125,90 @@ fn run_pipeline(
     }
     let mut video_decoder = video_context.decoder().video()?;
 
-    let (video_pkt_tx, video_pkt_rx) =
-        mpsc::sync_channel::<ffmpeg::codec::packet::Packet>(PACKET_QUEUE);
+    let (video_pkt_tx, video_pkt_rx) = mpsc::sync_channel::<DecodeCmd>(PACKET_QUEUE);
     let video_stop = stop.clone();
     let video_finished = video_done.clone();
     std::thread::spawn(move || {
         let mut scaler: Option<ffmpeg::software::scaling::Context> = None;
         let mut frame = ffmpeg::frame::Video::empty();
         let mut sw_frame = ffmpeg::frame::Video::empty();
-        // The first kept frame is time zero: the seek target, not the
-        // keyframe before it.
+        // The first kept frame is time zero: the seek target, not the keyframe
+        // before it. A loop resets `base`/`origin` to re-anchor at the start
+        // and bumps `offset` so the new loop's timestamps keep climbing.
         let mut origin: Option<f64> = None;
-        let mut drain = |decoder: &mut ffmpeg::decoder::Video,
-                         scaler: &mut Option<ffmpeg::software::scaling::Context>|
-         -> Result<(), ()> {
-            while decoder.receive_frame(&mut frame).is_ok() {
-                if video_stop.load(Ordering::Relaxed) {
-                    return Err(());
-                }
-                let pts = frame.pts().unwrap_or(0) as f64 * video_tb;
-                let Some(relative) = rebase_pts(pts, base, &mut origin) else {
-                    continue;
-                };
-                // Hardware frames live in GPU memory: copy them down to
-                // system memory (NV12) before the planes can be read. A
-                // failed copy drops just that frame.
-                let source = if is_hw_frame(&frame) {
-                    match download_frame(&frame) {
-                        Some(downloaded) => {
-                            sw_frame = downloaded;
-                            &sw_frame
-                        }
-                        None => continue,
-                    }
-                } else {
-                    &frame
-                };
-                send_video_frame(scaler, source, relative, &tx)?;
-            }
-            Ok(())
-        };
+        let mut base = base;
+        let mut offset = 0.0;
 
-        while let Ok(packet) = video_pkt_rx.recv() {
+        while let Ok(cmd) = video_pkt_rx.recv() {
             if video_stop.load(Ordering::Relaxed) {
                 return;
             }
-            if video_decoder.send_packet(&packet).is_err() {
-                continue;
-            }
-            if drain(&mut video_decoder, &mut scaler).is_err() {
-                return;
+            match cmd {
+                DecodeCmd::Packet(packet) => {
+                    if video_decoder.send_packet(&packet).is_err() {
+                        continue;
+                    }
+                    if drain_video(
+                        &mut video_decoder,
+                        &mut scaler,
+                        &mut frame,
+                        &mut sw_frame,
+                        video_tb,
+                        base,
+                        &mut origin,
+                        offset,
+                        &video_stop,
+                        &tx,
+                    )
+                    .is_err()
+                    {
+                        return;
+                    }
+                }
+                DecodeCmd::Loop { offset: next } => {
+                    // Emit the finishing loop's buffered tail (old anchor),
+                    // then reset the decoder for the post-seek keyframe.
+                    let _ = video_decoder.send_eof();
+                    let _ = drain_video(
+                        &mut video_decoder,
+                        &mut scaler,
+                        &mut frame,
+                        &mut sw_frame,
+                        video_tb,
+                        base,
+                        &mut origin,
+                        offset,
+                        &video_stop,
+                        &tx,
+                    );
+                    video_decoder.flush();
+                    origin = None;
+                    base = 0.0;
+                    offset = next.as_secs_f64();
+                }
             }
         }
-        // Demuxer hung up: flush the decoder.
+        // Demuxer hung up (true end of stream): flush the decoder.
         let _ = video_decoder.send_eof();
-        let _ = drain(&mut video_decoder, &mut scaler);
+        let _ = drain_video(
+            &mut video_decoder,
+            &mut scaler,
+            &mut frame,
+            &mut sw_frame,
+            video_tb,
+            base,
+            &mut origin,
+            offset,
+            &video_stop,
+            &tx,
+        );
         video_finished.store(true, Ordering::Relaxed);
     });
 
     // --- Audio decode thread (optional) ---
     let audio_stream = input.streams().best(ffmpeg::media::Type::Audio);
     let audio_index = audio_stream.as_ref().map(|s| s.index());
+    let mut audio_period_secs = 0.0;
     let audio_pkt_tx = match &audio_stream {
         Some(stream) => {
             let mut audio_decoder =
@@ -177,31 +216,53 @@ fn run_pipeline(
                     .decoder()
                     .audio()?;
             let audio_tb = f64::from(stream.time_base());
-            let (pkt_tx, pkt_rx) =
-                mpsc::sync_channel::<ffmpeg::codec::packet::Packet>(PACKET_QUEUE);
+            audio_period_secs = stream_duration_secs(stream.duration(), audio_tb);
+            let (pkt_tx, pkt_rx) = mpsc::sync_channel::<DecodeCmd>(PACKET_QUEUE);
             let audio_stop = stop.clone();
             std::thread::spawn(move || {
                 let mut resampler: Option<ffmpeg::software::resampling::Context> = None;
                 let mut frame = ffmpeg::frame::Audio::empty();
-                while let Ok(packet) = pkt_rx.recv() {
+                let mut base = base;
+                while let Ok(cmd) = pkt_rx.recv() {
                     if audio_stop.load(Ordering::Relaxed) {
                         return;
                     }
-                    if audio_decoder.send_packet(&packet).is_err() {
-                        continue;
-                    }
-                    while audio_decoder.receive_frame(&mut frame).is_ok() {
-                        if audio_stop.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        let pts = frame.pts().unwrap_or(0) as f64 * audio_tb;
-                        if !audio_reached_target(pts, base) {
-                            continue;
-                        }
-                        if send_audio_frame(&mut resampler, &audio_decoder, &frame, &pcm_tx)
+                    match cmd {
+                        DecodeCmd::Packet(packet) => {
+                            if audio_decoder.send_packet(&packet).is_err() {
+                                continue;
+                            }
+                            if drain_audio(
+                                &mut audio_decoder,
+                                &mut frame,
+                                &mut resampler,
+                                audio_tb,
+                                base,
+                                &audio_stop,
+                                &pcm_tx,
+                            )
                             .is_err()
-                        {
-                            return;
+                            {
+                                return;
+                            }
+                        }
+                        DecodeCmd::Loop { .. } => {
+                            // Flush the finishing loop's tail samples so the
+                            // PCM stream (and the master clock) stays unbroken,
+                            // then reset for the seek. Keep the resampler: its
+                            // buffer joins the loops without a click.
+                            let _ = audio_decoder.send_eof();
+                            let _ = drain_audio(
+                                &mut audio_decoder,
+                                &mut frame,
+                                &mut resampler,
+                                audio_tb,
+                                base,
+                                &audio_stop,
+                                &pcm_tx,
+                            );
+                            audio_decoder.flush();
+                            base = 0.0;
                         }
                     }
                 }
@@ -212,23 +273,138 @@ fn run_pipeline(
         None => None,
     };
 
-    // --- Demux loop: route packets, never decode ---
-    for (stream, packet) in input.packets() {
-        if stop.load(Ordering::Relaxed) {
-            return Ok(());
-        }
-        if stream.index() == video_index {
-            if video_pkt_tx.send(packet).is_err() {
+    // The loop period the clock advances by each pass: the audio length when
+    // there is audio (the sink position is the clock), else the video length,
+    // else the container. Zero means the duration is unknown, so don't loop
+    // in-pipeline; the end-of-stream fallback reopens instead.
+    let loop_period_secs = [audio_period_secs, video_period_secs, container_secs]
+        .into_iter()
+        .find(|d| *d > 0.0)
+        .unwrap_or(0.0);
+
+    // --- Demux loop: route packets, never decode. At end of stream, if
+    // looping with a known period, seek back to the start and keep feeding the
+    // same threads, marking the boundary in-band so timestamps stay ordered. ---
+    let mut iteration = 0u64;
+    loop {
+        for (stream, packet) in input.packets() {
+            if stop.load(Ordering::Relaxed) {
                 return Ok(());
             }
-        } else if Some(stream.index()) == audio_index
-            && let Some(tx) = &audio_pkt_tx
-            && tx.send(packet).is_err()
+            if stream.index() == video_index {
+                if video_pkt_tx.send(DecodeCmd::Packet(packet)).is_err() {
+                    return Ok(());
+                }
+            } else if Some(stream.index()) == audio_index
+                && let Some(tx) = &audio_pkt_tx
+                && tx.send(DecodeCmd::Packet(packet)).is_err()
+            {
+                return Ok(());
+            }
+        }
+        if !should_loop(looping.load(Ordering::Relaxed), loop_period_secs) {
+            break;
+        }
+        if input.seek(0, ..0).is_err() {
+            break;
+        }
+        iteration += 1;
+        let offset = loop_offset(loop_period_secs, iteration, base);
+        if video_pkt_tx.send(DecodeCmd::Loop { offset }).is_err() {
+            return Ok(());
+        }
+        if let Some(tx) = &audio_pkt_tx
+            && tx.send(DecodeCmd::Loop { offset }).is_err()
         {
             return Ok(());
         }
     }
-    // Senders drop here and the decode threads flush and finish.
+    // Senders drop here and the decode threads flush and finish (true EOF).
+    Ok(())
+}
+
+/// A stream's duration in seconds, or 0.0 when it is unknown (0 or NOPTS).
+fn stream_duration_secs(ts: i64, time_base: f64) -> f64 {
+    if ts > 0 { ts as f64 * time_base } else { 0.0 }
+}
+
+/// Whether to loop at end of stream: only with looping on and a known period.
+/// An unknown period falls back to the reopen path at the call site.
+fn should_loop(looping: bool, period_secs: f64) -> bool {
+    looping && period_secs > 0.0
+}
+
+/// The timestamp shift for loop pass `iteration` (1-based). Each pass adds one
+/// period; a seeked start (`base_secs > 0`) makes the first pass short, so
+/// subtract it to keep the looped timestamps in step with the clock.
+fn loop_offset(period_secs: f64, iteration: u64, base_secs: f64) -> Duration {
+    Duration::from_secs_f64((period_secs * iteration as f64 - base_secs).max(0.0))
+}
+
+/// Drain every video frame the decoder has ready to the session, shifting each
+/// timestamp by `offset` so looped passes keep climbing with the clock. `Err`
+/// means the session is stopping, so the thread should exit.
+#[allow(clippy::too_many_arguments)]
+fn drain_video(
+    decoder: &mut ffmpeg::decoder::Video,
+    scaler: &mut Option<ffmpeg::software::scaling::Context>,
+    frame: &mut ffmpeg::frame::Video,
+    sw_frame: &mut ffmpeg::frame::Video,
+    video_tb: f64,
+    base: f64,
+    origin: &mut Option<f64>,
+    offset: f64,
+    stop: &AtomicBool,
+    tx: &mpsc::SyncSender<VideoFrame>,
+) -> Result<(), ()> {
+    while decoder.receive_frame(frame).is_ok() {
+        if stop.load(Ordering::Relaxed) {
+            return Err(());
+        }
+        let pts = frame.pts().unwrap_or(0) as f64 * video_tb;
+        let Some(relative) = rebase_pts(pts, base, origin) else {
+            continue;
+        };
+        // Hardware frames live in GPU memory: copy them down to system memory
+        // (NV12) before the planes can be read. A failed copy drops just that
+        // frame.
+        let source = if is_hw_frame(frame) {
+            match download_frame(frame) {
+                Some(downloaded) => {
+                    *sw_frame = downloaded;
+                    &*sw_frame
+                }
+                None => continue,
+            }
+        } else {
+            &*frame
+        };
+        send_video_frame(scaler, source, relative + offset, tx)?;
+    }
+    Ok(())
+}
+
+/// Drain every decoded audio frame and stream it to the sink as PCM. `Err`
+/// means the session is stopping.
+fn drain_audio(
+    decoder: &mut ffmpeg::decoder::Audio,
+    frame: &mut ffmpeg::frame::Audio,
+    resampler: &mut Option<ffmpeg::software::resampling::Context>,
+    audio_tb: f64,
+    base: f64,
+    stop: &AtomicBool,
+    pcm_tx: &mpsc::SyncSender<f32>,
+) -> Result<(), ()> {
+    while decoder.receive_frame(frame).is_ok() {
+        if stop.load(Ordering::Relaxed) {
+            return Err(());
+        }
+        let pts = frame.pts().unwrap_or(0) as f64 * audio_tb;
+        if !audio_reached_target(pts, base) {
+            continue;
+        }
+        send_audio_frame(resampler, decoder, frame, pcm_tx)?;
+    }
     Ok(())
 }
 
@@ -410,5 +586,39 @@ mod tests {
     #[test]
     fn without_a_seek_all_audio_plays() {
         assert!(audio_reached_target(0.0, 0.0));
+    }
+
+    #[test]
+    fn stream_duration_is_zero_when_unknown() {
+        assert_eq!(stream_duration_secs(1000, 0.001), 1.0);
+        assert_eq!(stream_duration_secs(0, 0.001), 0.0);
+        // AV_NOPTS_VALUE comes through as a large negative.
+        assert_eq!(stream_duration_secs(i64::MIN, 0.001), 0.0);
+    }
+
+    #[test]
+    fn loops_only_with_a_known_period() {
+        assert!(should_loop(true, 5.0));
+        assert!(!should_loop(false, 5.0));
+        assert!(!should_loop(true, 0.0));
+    }
+
+    #[test]
+    fn loop_offset_climbs_by_a_period_and_accounts_for_a_seek() {
+        // From the start, each pass adds one full period.
+        assert_eq!(loop_offset(5.0, 1, 0.0), Duration::from_secs(5));
+        assert_eq!(loop_offset(5.0, 2, 0.0), Duration::from_secs(10));
+        // A 2s seeked start shortens the first pass, so the offset trails by 2s.
+        assert_eq!(loop_offset(5.0, 1, 2.0), Duration::from_secs(3));
+    }
+
+    #[test]
+    fn a_looped_frame_keeps_climbing_by_the_offset() {
+        // After a loop re-anchors (origin reset, base 0), the first frame
+        // rebases to zero and the offset carries it forward with the clock.
+        let mut origin = None;
+        let relative = rebase_pts(0.0, 0.0, &mut origin).unwrap();
+        let offset = 5.0;
+        assert_eq!(relative + offset, 5.0);
     }
 }

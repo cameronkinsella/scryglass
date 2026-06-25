@@ -147,6 +147,7 @@ impl VideoSession {
             video_done.clone(),
             pcm_tx,
             hardware,
+            looping.clone(),
         );
         let audio = spawn_audio_output(
             pcm_rx,
@@ -225,10 +226,7 @@ impl VideoSession {
 
     /// Absolute playback position in the file.
     pub fn position(&self) -> Duration {
-        let position = self.base + self.clock();
-        self.duration()
-            .map(|duration| position.min(duration))
-            .unwrap_or(position)
+        loop_position(self.base, self.clock(), self.duration(), self.looping())
     }
 
     /// Total duration, once the container has been opened.
@@ -386,6 +384,26 @@ impl Drop for VideoSession {
     }
 }
 
+/// The in-file position to show. While looping, the clock keeps climbing past
+/// the end, so wrap it back into `[0, duration)` for a slider that sweeps once
+/// per loop. Otherwise clamp to the end (an unknown duration stays unclamped).
+fn loop_position(
+    base: Duration,
+    clock: Duration,
+    duration: Option<Duration>,
+    looping: bool,
+) -> Duration {
+    let position = base + clock;
+    let Some(duration) = duration else {
+        return position;
+    };
+    if looping && !duration.is_zero() {
+        Duration::from_nanos((position.as_nanos() % duration.as_nanos()) as u64)
+    } else {
+        position.min(duration)
+    }
+}
+
 /// The playback clock from its inputs: the audio sink position once audio
 /// is flowing, zero during decoder warmup before the first frame, otherwise
 /// the accumulated wall-clock time plus the current run.
@@ -443,5 +461,45 @@ mod tests {
             Duration::from_millis(500),
         );
         assert_eq!(clock, Duration::from_millis(2500));
+    }
+
+    #[test]
+    fn position_clamps_to_the_end_when_not_looping() {
+        let p = loop_position(
+            Duration::ZERO,
+            Duration::from_secs(9),
+            Some(Duration::from_secs(5)),
+            false,
+        );
+        assert_eq!(p, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_looping_position_within_the_first_pass_is_unwrapped() {
+        let p = loop_position(
+            Duration::ZERO,
+            Duration::from_secs(3),
+            Some(Duration::from_secs(5)),
+            true,
+        );
+        assert_eq!(p, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn a_looping_position_wraps_past_the_end() {
+        // 2.5 loops of a 5s clip reads as 2.5s into the current pass.
+        let p = loop_position(
+            Duration::ZERO,
+            Duration::from_millis(12_500),
+            Some(Duration::from_secs(5)),
+            true,
+        );
+        assert_eq!(p, Duration::from_millis(2_500));
+    }
+
+    #[test]
+    fn position_is_unclamped_without_a_known_duration() {
+        let p = loop_position(Duration::ZERO, Duration::from_secs(9), None, true);
+        assert_eq!(p, Duration::from_secs(9));
     }
 }
