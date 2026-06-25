@@ -99,6 +99,9 @@ pub struct VideoSession {
     pending: Option<VideoFrame>,
     /// When the decoder first ran dry, for keep-alive stutter detection.
     starved_since: Option<Instant>,
+    /// Clock value to stop at once looping is switched off, so the passes the
+    /// demuxer queued ahead don't keep playing.
+    end_at: Option<Duration>,
     pub playing: bool,
     looping: Arc<AtomicBool>,
     pub volume: f32,
@@ -179,6 +182,7 @@ impl VideoSession {
             first_frame_shown: false,
             pending: None,
             starved_since: None,
+            end_at: None,
             playing: true,
             looping,
             volume,
@@ -226,7 +230,10 @@ impl VideoSession {
 
     /// Absolute playback position in the file.
     pub fn position(&self) -> Duration {
-        loop_position(self.base, self.clock(), self.duration(), self.looping())
+        let clock = self.clock();
+        // Sweep while more will play: looping, or the final pass after looping off.
+        let sweeping = self.looping() || self.end_at.is_some_and(|end| clock < end);
+        loop_position(self.base, clock, self.duration(), sweeping)
     }
 
     /// Total duration, once the container has been opened.
@@ -269,6 +276,10 @@ impl VideoSession {
         self.last_poll = Some(now);
 
         let clock = self.clock();
+        // Looping off: stop at this pass's end despite passes buffered ahead.
+        if self.end_at.is_some_and(|end| clock >= end) {
+            return None;
+        }
         let mut due = None;
 
         if let Some(pending) = &self.pending {
@@ -318,6 +329,9 @@ impl VideoSession {
 
     /// Whether decoding finished and every frame has been shown.
     pub fn finished(&self) -> bool {
+        if self.end_at.is_some_and(|end| self.clock() >= end) {
+            return true;
+        }
         self.video_done.load(Ordering::Relaxed)
             && self.pending.is_none()
             && self
@@ -357,6 +371,13 @@ impl VideoSession {
 
     pub fn set_looping(&mut self, looping: bool) {
         self.looping.store(looping, Ordering::Relaxed);
+        // The demuxer may have queued later passes; cap playback at the current one.
+        self.end_at = if looping {
+            None
+        } else {
+            self.duration()
+                .map(|d| loop_end(self.base, self.clock(), d))
+        };
     }
 
     pub fn set_volume(&mut self, volume: f32) {
@@ -384,24 +405,36 @@ impl Drop for VideoSession {
     }
 }
 
-/// The in-file position to show. While looping, the clock keeps climbing past
+/// The in-file position to show. While sweeping, the clock keeps climbing past
 /// the end, so wrap it back into `[0, duration)` for a slider that sweeps once
 /// per loop. Otherwise clamp to the end (an unknown duration stays unclamped).
 fn loop_position(
     base: Duration,
     clock: Duration,
     duration: Option<Duration>,
-    looping: bool,
+    sweeping: bool,
 ) -> Duration {
     let position = base + clock;
     let Some(duration) = duration else {
         return position;
     };
-    if looping && !duration.is_zero() {
+    if sweeping && !duration.is_zero() {
         Duration::from_nanos((position.as_nanos() % duration.as_nanos()) as u64)
     } else {
         position.min(duration)
     }
+}
+
+/// The clock value at the end of the pass playing now, where a looping video
+/// stops once looping is switched off.
+fn loop_end(base: Duration, clock: Duration, duration: Duration) -> Duration {
+    let d = duration.as_secs_f64();
+    if d <= 0.0 {
+        return clock;
+    }
+    let elapsed = base.as_secs_f64() + clock.as_secs_f64();
+    let next = (elapsed / d).floor() + 1.0;
+    Duration::from_secs_f64((next * d - base.as_secs_f64()).max(0.0))
 }
 
 /// The playback clock from its inputs: the audio sink position once audio
@@ -501,5 +534,27 @@ mod tests {
     fn position_is_unclamped_without_a_known_duration() {
         let p = loop_position(Duration::ZERO, Duration::from_secs(9), None, true);
         assert_eq!(p, Duration::from_secs(9));
+    }
+
+    #[test]
+    fn loop_end_stops_at_the_current_pass_boundary() {
+        // Late in the first pass of a 5s clip ends at 5s.
+        assert_eq!(
+            loop_end(
+                Duration::ZERO,
+                Duration::from_millis(4_900),
+                Duration::from_secs(5)
+            ),
+            Duration::from_secs(5)
+        );
+        // 2.5 passes in finishes the third pass at 15s.
+        assert_eq!(
+            loop_end(
+                Duration::ZERO,
+                Duration::from_millis(12_500),
+                Duration::from_secs(5)
+            ),
+            Duration::from_secs(15)
+        );
     }
 }
