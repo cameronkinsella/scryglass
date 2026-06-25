@@ -90,23 +90,35 @@ jobs:
             ./bootstrap-vcpkg.sh
           fi
           echo "VCPKG_ROOT=$GITHUB_WORKSPACE/vcpkg" >> "$GITHUB_ENV"
-          mkdir -p "$GITHUB_WORKSPACE/vcpkg-bincache"
-          echo "VCPKG_DEFAULT_BINARY_CACHE=$GITHUB_WORKSPACE/vcpkg-bincache" >> "$GITHUB_ENV"
 
-      - name: Cache vcpkg binary packages
-        uses: actions/cache@v5
+      # Cache the built library tree, not vcpkg's ABI-keyed binary cache. The
+      # ABI hash includes the runner toolchain, so the binary cache misses
+      # whenever the image updates. A restored installed/ makes the install a
+      # no-op regardless. Bump the key suffix when VCPKG_PACKAGES changes.
+      - name: Restore prebuilt media libraries
+        id: media-cache
+        uses: actions/cache/restore@v5
         with:
-          path: ${{ github.workspace }}/vcpkg-bincache
-          key: vcpkg-bin-${{ matrix.triplet }}-${{ env.VCPKG_COMMIT }}-v1
-          restore-keys: vcpkg-bin-${{ matrix.triplet }}-
+          path: ${{ github.workspace }}/vcpkg/installed
+          key: vcpkg-installed-${{ matrix.triplet }}-${{ env.VCPKG_COMMIT }}-${{ hashFiles('.github/vcpkg-triplets/**') }}-v1
 
       - name: Build static media libraries
+        if: steps.media-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           pkgs=""
           for p in $VCPKG_PACKAGES; do pkgs="$pkgs $p:${{ matrix.triplet }}"; done
           "$VCPKG_ROOT/vcpkg" install $pkgs \
             --overlay-triplets="$GITHUB_WORKSPACE/.github/vcpkg-triplets"
+
+      # Save only after a clean install: success() drops a partial tree if the
+      # step above failed, which would poison the exact-key cache for every run.
+      - name: Save prebuilt media libraries
+        if: success() && steps.media-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ github.workspace }}/vcpkg/installed
+          key: ${{ steps.media-cache.outputs.cache-primary-key }}
 
       - name: Locate libclang (Windows)
         if: runner.os == 'Windows'
