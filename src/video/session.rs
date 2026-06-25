@@ -100,7 +100,7 @@ pub struct VideoSession {
     /// When the decoder first ran dry, for keep-alive stutter detection.
     starved_since: Option<Instant>,
     pub playing: bool,
-    pub looping: bool,
+    looping: Arc<AtomicBool>,
     pub volume: f32,
     pub muted: bool,
     /// Whether hardware decode was requested when this session opened.
@@ -132,6 +132,7 @@ impl VideoSession {
         // thread and freeze playback instead of letting it drift.
         let clock_origin = Instant::now();
         let ui_tick_ms = Arc::new(AtomicU64::new(0));
+        let looping = Arc::new(AtomicBool::new(looping));
 
         // Audio PCM channel: about half a second of stereo float samples.
         // The decoder blocks when it runs ahead, rodio's thread drains it.
@@ -197,7 +198,7 @@ impl VideoSession {
             start,
             self.volume,
             self.muted,
-            self.looping,
+            self.looping(),
             self.hardware,
         );
         session
@@ -350,6 +351,14 @@ impl VideoSession {
         if let Some(audio) = &self.audio {
             let _ = audio.send(AudioCmd::Play);
         }
+    }
+
+    pub fn looping(&self) -> bool {
+        self.looping.load(Ordering::Relaxed)
+    }
+
+    pub fn set_looping(&mut self, looping: bool) {
+        self.looping.store(looping, Ordering::Relaxed);
     }
 
     pub fn set_volume(&mut self, volume: f32) {

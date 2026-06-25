@@ -112,7 +112,7 @@ pub(crate) fn tick(app: &mut App) -> Task<Message> {
         // Only a session with nothing left to show is finished, since
         // queued frames still drain through poll() above.
         if session.finished() {
-            if session.looping {
+            if session.looping() {
                 viewer.video = Some(session.reopen_at(std::time::Duration::ZERO));
             } else if session.playing {
                 session.pause();
@@ -297,10 +297,10 @@ pub(crate) fn toggle_loop(app: &mut App) -> Task<Message> {
     let Some(session) = viewer.video.as_mut() else {
         return Task::none();
     };
-    session.looping = !session.looping;
+    session.set_looping(!session.looping());
     app.config.video_loop = app
         .viewer()
         .and_then(|v| v.video.as_ref())
-        .is_some_and(|s| s.looping);
+        .is_some_and(|s| s.looping());
     save_config(app)
 }

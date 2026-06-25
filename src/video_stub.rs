@@ -74,7 +74,7 @@ impl TempFileGuard {
 
 pub struct VideoSession {
     pub playing: bool,
-    pub looping: bool,
+    looping: bool,
     pub volume: f32,
     pub muted: bool,
     pub path: PathBuf,
@@ -109,6 +109,14 @@ impl VideoSession {
             path: self.path.clone(),
             temp: None,
         }
+    }
+
+    pub fn looping(&self) -> bool {
+        self.looping
+    }
+
+    pub fn set_looping(&mut self, looping: bool) {
+        self.looping = looping;
     }
 
     pub fn position(&self) -> Duration {

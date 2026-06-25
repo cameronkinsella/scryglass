@@ -38,7 +38,7 @@ pub(crate) fn view<'a>(
             seek_drag: viewer.video_seek_drag,
             volume: session.volume,
             muted: session.muted,
-            looping: session.looping,
+            looping: session.looping(),
         },
         opacity,
     )

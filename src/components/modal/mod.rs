@@ -269,7 +269,7 @@ fn take_open_video(app: &mut App, path: &Path) -> Option<VideoResume> {
         position: session.position(),
         volume: session.volume,
         muted: session.muted,
-        looping: session.looping,
+        looping: session.looping(),
         hardware,
         playing: session.playing,
     };
