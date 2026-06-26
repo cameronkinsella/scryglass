@@ -160,20 +160,16 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
     let image_view: Element<'_, Message> = match &viewer.displayed {
         DisplayedImage::None => ui::image_display::empty_viewport(),
         DisplayedImage::Full {
-            allocation,
+            handle,
             original_size,
-        } => {
-            let texture = allocation.size();
-            ui::image_display::image_display(
-                allocation.handle(),
-                (texture.width, texture.height),
-                *original_size,
-                viewer.zoom,
-                viewer.pan,
-                (win.viewport_size.width, win.viewport_size.height),
-                shared.config.crisp_pixels,
-            )
-        }
+        } => ui::image_surface::view(
+            handle.clone(),
+            *original_size,
+            viewer.zoom,
+            viewer.pan,
+            (win.viewport_size.width, win.viewport_size.height),
+            shared.config.crisp_pixels,
+        ),
         DisplayedImage::Placeholder(thumb) => {
             // Placeholders always smooth: the bilinear upscale IS the blur.
             ui::image_display::image_display(

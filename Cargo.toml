@@ -31,7 +31,7 @@ exclude = ["shaders/yuv", "shaders/image"]
 # iced raw RGBA handles, so iced's own codec features stay off. The
 # runtime crate is a direct dependency because the facade hides the
 # allocate API behind its full image feature.
-iced = { version = "0.14", features = ["image-without-codecs", "tokio", "canvas", "wgpu"] }
+iced = { version = "0.14", features = ["image-without-codecs", "tokio", "canvas", "wgpu", "advanced"] }
 iced_runtime = "0.14"
 anyhow = "1"
 thiserror = "2"
@@ -76,8 +76,9 @@ libheif-rs = { version = "2.7.0", default-features = false, features = ["v1_17"]
 trash = "5.2.6"
 rodio = { version = "0.22", default-features = false, features = ["playback"], optional = true }
 ffmpeg-next = { version = "8", default-features = false, features = ["codec", "format", "software-resampling", "software-scaling"], optional = true }
-# Enable wgpu's SPIR-V frontend.
-wgpu = { version = "27", features = ["spirv"], optional = true }
+# Enable wgpu's SPIR-V frontend (custom shaders).
+# Pinned to match iced's wgpu version.
+wgpu = { version = "27", features = ["spirv"] }
 # Manual update check (the `update-check` feature). rustls only, never
 # native-tls: TLS in this app must be rustls (a hard project rule).
 ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }
@@ -126,7 +127,7 @@ heif = ["dep:libheif-rs"]
 # Video playback via FFmpeg's libraries (in-process decode). Building
 # needs an FFmpeg dev package (FFMPEG_DIR) and libclang. With shared
 # libraries the FFmpeg DLLs must be beside the exe at runtime. Opt-in.
-video = ["dep:ffmpeg-next", "dep:rodio", "dep:wgpu"]
+video = ["dep:ffmpeg-next", "dep:rodio"]
 # Fully self-contained executable: links FFmpeg statically. Point
 # FFMPEG_DIR at a static build (e.g. vcpkg's x64-windows-static-md);
 # build.rs rejects shared builds to prevent silently DLL-dependent

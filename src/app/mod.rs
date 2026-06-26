@@ -3,8 +3,9 @@
 //! iced 0.14 uses free functions: boot() → State, update(&mut State, Message),
 //! view(&State) → Element. The `application()` builder wires them together.
 //!
-//! Images are decoded by the [`crate::media`] pipeline and uploaded as GPU
-//! `Allocation`s, which are guaranteed to render immediately (no flicker).
+//! Images are decoded by the [`crate::media`] pipeline and rendered through the
+//! per-window image-surface shader, which owns the GPU texture (no cross-window
+//! flicker, unlike iced's first-window-only atlas upload).
 //!
 //! Navigation never blocks: every keypress moves the cursor. Cache hits
 //! display instantly, misses keep the previous image visible while a

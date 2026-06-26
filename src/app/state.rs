@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use iced::time::Instant;
 use iced::widget::image::Handle;
 
-use crate::allocation::Allocation;
 use crate::anim::AnimPlayer;
 use crate::media::cache::ImageCache;
 use crate::media::pipeline::Source;
@@ -23,19 +22,23 @@ pub enum Session {
     Viewing(Box<Viewer>),
 }
 
-/// A decoded image resident on the GPU, as stored in the cache.
+/// A decoded image, held as its RGBA source handle. The GPU texture is uploaded
+/// and cached by the image-surface pipeline, keyed by the handle's id.
 #[derive(Debug, Clone)]
 pub struct CachedImage {
-    pub allocation: Allocation,
+    pub handle: Handle,
     /// True dimensions (post-orientation, pre-downscale) for zoom math.
     pub original_size: (u32, u32),
 }
 
 impl CachedImage {
-    /// Approximate GPU memory cost in bytes (RGBA8).
+    /// Approximate GPU memory cost in bytes (RGBA8), from the texture size.
     pub fn byte_cost(&self) -> usize {
-        let size = self.allocation.size();
-        size.width as usize * size.height as usize * 4
+        if let Handle::Rgba { width, height, .. } = &self.handle {
+            *width as usize * *height as usize * 4
+        } else {
+            0
+        }
     }
 }
 
@@ -80,9 +83,9 @@ pub enum DisplayedImage {
     None,
     /// A blurred low-res stand-in while the full image decodes.
     Placeholder(Thumb),
-    /// The fully decoded image.
+    /// The fully decoded image, held as its RGBA source handle.
     Full {
-        allocation: Allocation,
+        handle: Handle,
         original_size: (u32, u32),
     },
     /// Live video, drawn by the GPU YUV surface. Carries dimensions for
@@ -115,9 +118,8 @@ pub struct Viewer {
     /// the old image stays visible until the new one is ready
     /// (flicker prevention).
     pub displayed: DisplayedImage,
-    /// GPU-resident decoded images, keyed by path, with an LRU byte budget.
-    /// Holding an `Allocation` keeps iced's texture alive, so cache hits
-    /// render instantly.
+    /// Decoded images, keyed by path, with an LRU byte budget. Each holds its
+    /// RGBA source handle; the image-surface pipeline owns the GPU texture.
     pub cache: ImageCache<CachedImage>,
     /// Small previews for placeholders and the filmstrip.
     pub thumbs: ImageCache<Thumb>,

@@ -64,8 +64,8 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             // Copy the displayed pixels as a real bitmap (works for any
             // source). Video grabs its current frame off the UI thread.
             let task = match &viewer.displayed {
-                DisplayedImage::Full { allocation, .. } => {
-                    let handle = allocation.handle().clone();
+                DisplayedImage::Full { handle, .. } => {
+                    let handle = handle.clone();
                     Some(tokio::task::spawn_blocking(move || copy_bitmap(&handle)))
                 }
                 DisplayedImage::Video { .. } => viewer.video_frame.clone().map(|frame| {

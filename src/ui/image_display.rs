@@ -98,6 +98,51 @@ pub(crate) fn display_math(
     }
 }
 
+/// Convert the display math for `original`-sized content at the given zoom/pan
+/// into normalized destination and source-UV rects for a GPU shader (the still
+/// and video surfaces), or None when there is nothing to draw. The shader
+/// samples in UV space, so the texture's own pixel size does not enter here.
+pub(crate) fn display_geometry(
+    zoom: f32,
+    pan: (f32, f32),
+    viewport: (f32, f32),
+    original: (u32, u32),
+) -> Option<([f32; 4], [f32; 4])> {
+    let (vw, vh) = viewport;
+    let (tw, th) = (original.0 as f32, original.1 as f32);
+    if vw <= 0.0 || vh <= 0.0 {
+        return None;
+    }
+
+    // Centered destination rect for a shown size in logical pixels.
+    let centered = |shown_w: f32, shown_h: f32| {
+        let x0 = (vw - shown_w) / 2.0 / vw;
+        let y0 = (vh - shown_h) / 2.0 / vh;
+        [x0, y0, x0 + shown_w / vw, y0 + shown_h / vh]
+    };
+
+    match display_math(zoom, pan, viewport, original, original) {
+        DisplayMath::Empty => None,
+        DisplayMath::Fit { scale_factor } => {
+            let contain = (vw / tw).min(vh / th);
+            let dst = centered(tw * contain * scale_factor, th * contain * scale_factor);
+            Some((dst, [0.0, 0.0, 1.0, 1.0]))
+        }
+        DisplayMath::Crop { rect } => {
+            let (rw, rh) = (rect.width as f32, rect.height as f32);
+            let contain = (vw / rw).min(vh / rh);
+            let dst = centered(rw * contain, rh * contain);
+            let src = [
+                rect.x as f32 / tw,
+                rect.y as f32 / th,
+                (rect.x as f32 + rw) / tw,
+                (rect.y as f32 + rh) / th,
+            ];
+            Some((dst, src))
+        }
+    }
+}
+
 /// Render an image texture at the given zoom/pan.
 ///
 /// * `handle`: the GPU texture (possibly a downscaled version).
@@ -317,5 +362,51 @@ mod tests {
         let _ = image_display(&handle, (4, 4), (4, 4), 1.0, (0.0, 0.0), VP, false);
         let _ = image_display(&handle, (4, 4), (4000, 3000), 5.0, (0.0, 0.0), VP, true);
         let _ = image_display(&handle, (4, 4), (4, 4), 0.0, (0.0, 0.0), VP, false);
+    }
+
+    fn assert_rects(got: Option<([f32; 4], [f32; 4])>, dst: [f32; 4], src: [f32; 4]) {
+        let (g_dst, g_src) = got.expect("expected geometry, got None");
+        for (a, b) in g_dst.iter().zip(dst.iter()) {
+            assert!((a - b).abs() < 1e-5, "dst {g_dst:?} != {dst:?}");
+        }
+        for (a, b) in g_src.iter().zip(src.iter()) {
+            assert!((a - b).abs() < 1e-5, "src {g_src:?} != {src:?}");
+        }
+    }
+
+    #[test]
+    fn geometry_zero_viewport_draws_nothing() {
+        assert_eq!(display_geometry(1.0, (0.0, 0.0), (0.0, 600.0), (400, 300)), None);
+        assert_eq!(display_geometry(1.0, (0.0, 0.0), (800.0, 0.0), (400, 300)), None);
+    }
+
+    #[test]
+    fn geometry_degenerate_math_draws_nothing() {
+        assert_eq!(display_geometry(0.0, (0.0, 0.0), VP, (400, 300)), None);
+    }
+
+    #[test]
+    fn geometry_fit_centers_the_whole_texture() {
+        assert_rects(
+            display_geometry(1.0, (0.0, 0.0), VP, (400, 300)),
+            [0.25, 0.25, 0.75, 0.75],
+            [0.0, 0.0, 1.0, 1.0],
+        );
+    }
+
+    #[test]
+    fn geometry_crop_fills_the_viewport_and_maps_uv() {
+        assert_rects(
+            display_geometry(1.0, (0.0, 0.0), VP, (2000, 1000)),
+            [0.0, 0.0, 1.0, 1.0],
+            [0.3, 0.2, 0.7, 0.8],
+        );
+    }
+
+    #[test]
+    fn geometry_pan_shifts_the_sampled_window() {
+        let (_, src) = display_geometry(1.0, (100.0, 0.0), VP, (2000, 1000)).expect("geometry");
+        assert!(src[0] < 0.3, "panned u0 {} should be left of 0.3", src[0]);
+        assert!(src[0] >= 0.0);
     }
 }

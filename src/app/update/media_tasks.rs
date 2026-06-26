@@ -5,7 +5,6 @@ use std::pin::Pin;
 use iced::widget::image::Handle;
 use iced::{Size, Task};
 
-use crate::allocation;
 use crate::app::state::{CachedImage, DisplayedImage, LoadedMedia, Thumb, Viewer};
 use crate::app::viewer_math::compute_zoom;
 use crate::app::{MediaMessage, Message, Shared, Window};
@@ -21,12 +20,12 @@ pub(crate) fn fire_rotate(viewer: &mut Viewer) -> Task<Message> {
     if viewer.rotation == viewer.displayed_rotation {
         return Task::none();
     }
-    let DisplayedImage::Full { allocation, .. } = &viewer.displayed else {
+    let DisplayedImage::Full { handle, .. } = &viewer.displayed else {
         return Task::none();
     };
     let delta = (4 + viewer.rotation - viewer.displayed_rotation) % 4;
     let baked = viewer.rotation;
-    let handle = allocation.handle().clone();
+    let handle = handle.clone();
     let path = viewer.nav.current().to_path_buf();
 
     Task::perform(
@@ -37,21 +36,14 @@ pub(crate) fn fire_rotate(viewer: &mut Viewer) -> Task<Message> {
         let Some((width, height, pixels)) = rotated else {
             return Task::none();
         };
-        let p = path.clone();
-        allocation::allocate_handle(Handle::from_rgba(width, height, pixels)).map(move |upload| {
-            match upload {
-                Ok(allocation) => Message::Media(MediaMessage::ViewRotated {
-                    path: p.clone(),
-                    baked,
-                    image: CachedImage {
-                        allocation,
-                        original_size: (width, height),
-                    },
-                }),
-                // Upload failures leave the previous texture in place.
-                Err(_) => Message::Media(MediaMessage::SpinnerTick),
-            }
-        })
+        Task::done(Message::Media(MediaMessage::ViewRotated {
+            path: path.clone(),
+            baked,
+            image: CachedImage {
+                handle: Handle::from_rgba(width, height, pixels),
+                original_size: (width, height),
+            },
+        }))
     })
 }
 
@@ -136,7 +128,7 @@ pub(crate) fn show_loaded(
     }
     viewer.pan = (0.0, 0.0);
     viewer.displayed = DisplayedImage::Full {
-        allocation: image.allocation,
+        handle: image.handle,
         original_size: image.original_size,
     };
     viewer.displayed_path = Some(path.to_path_buf());
@@ -280,22 +272,16 @@ pub(crate) fn fire_load(
                 original_size: t.original_size,
             });
             let handle = Handle::from_rgba(img.width, img.height, img.pixels);
-            let p = path.clone();
-            allocation::allocate_handle(handle).map(move |upload| {
-                let result = upload
-                    .map(|allocation| LoadedMedia::Static {
-                        image: CachedImage {
-                            allocation,
-                            original_size,
-                        },
-                        thumb: thumb.clone(),
-                    })
-                    .map_err(|e| MediaError::Decode(format!("gpu upload failed: {e:?}")));
-                Message::Media(MediaMessage::Loaded {
-                    path: p.clone(),
-                    result,
-                })
-            })
+            Task::done(Message::Media(MediaMessage::Loaded {
+                path: path.clone(),
+                result: Ok(LoadedMedia::Static {
+                    image: CachedImage {
+                        handle,
+                        original_size,
+                    },
+                    thumb,
+                }),
+            }))
         }
         Ok(DecodedMedia::Animated(anim)) => {
             // Frames allocate at display time, only the thumb needs a

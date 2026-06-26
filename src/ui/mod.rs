@@ -3,6 +3,7 @@
 pub mod checkerboard;
 pub mod icons;
 pub mod image_display;
+pub mod image_surface;
 pub mod spinner;
 pub mod theme;
 #[cfg(feature = "video")]

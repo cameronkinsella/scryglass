@@ -258,7 +258,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
 
             let (w, h) = image.original_size;
             viewer.displayed = DisplayedImage::Full {
-                allocation: image.allocation,
+                handle: image.handle,
                 original_size: image.original_size,
             };
             viewer.displayed_rotation = baked;
@@ -294,17 +294,20 @@ pub(crate) fn update_anim(
     let is_first_frame = matches!(viewer.displayed, DisplayedImage::None)
         || (viewer.pending_since.is_some() && matches!(&anim_msg, AnimMessage::FrameAllocated(..)));
 
-    let (task, allocation) = viewer.anim_player.update(anim_msg, viewer.nav.current());
+    let (task, frame) = viewer.anim_player.update(anim_msg, viewer.nav.current());
 
-    if let Some(alloc) = allocation {
-        let size = alloc.size();
+    if let Some(handle) = frame {
+        let (w, h) = match &handle {
+            iced::widget::image::Handle::Rgba { width, height, .. } => (*width, *height),
+            _ => (0, 0),
+        };
         if is_first_frame && (!viewer.manual_zoom || zoom_mode != ZoomMode::LockZoomRatio) {
-            viewer.zoom = compute_zoom(zoom_mode, size.width, size.height, viewport);
+            viewer.zoom = compute_zoom(zoom_mode, w, h, viewport);
             viewer.pan = (0.0, 0.0);
         }
         viewer.displayed = DisplayedImage::Full {
-            allocation: alloc,
-            original_size: (size.width, size.height),
+            handle,
+            original_size: (w, h),
         };
         viewer.displayed_path = Some(viewer.nav.current().to_path_buf());
         viewer.pending_since = None;

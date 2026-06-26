@@ -60,7 +60,7 @@ impl AnimPlayer {
         &mut self,
         msg: AnimMessage,
         current_path: &Path,
-    ) -> (Task<AnimMessage>, Option<Allocation>) {
+    ) -> (Task<AnimMessage>, Option<Handle>) {
         match msg {
             AnimMessage::FrameAllocated(path, Ok(allocation)) => {
                 if current_path != path {
@@ -69,8 +69,11 @@ impl AnimPlayer {
                 let Some(active) = self.active.as_mut() else {
                     return (Task::none(), None);
                 };
-                active._frame_allocation = Some(allocation.clone());
-                (Task::none(), Some(allocation))
+                // Display the frame's handle; the held allocation keeps the
+                // frame gated on upload (display only once it is resident).
+                let handle = allocation.handle().clone();
+                active._frame_allocation = Some(allocation);
+                (Task::none(), Some(handle))
             }
 
             AnimMessage::FrameAllocated(_path, Err(_err)) => (Task::none(), None),

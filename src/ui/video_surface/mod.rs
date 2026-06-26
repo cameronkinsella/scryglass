@@ -4,7 +4,6 @@
 //! instead of 4. Zoom, pan, and fit reuse the still-image display math, so
 //! video and stills share one geometry and never diverge.
 
-mod geometry;
 mod pipeline;
 mod program;
 

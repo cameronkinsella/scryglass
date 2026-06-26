@@ -1,36 +1,35 @@
-//! The iced shader widget glue: a `Program` that places the current frame
-//! and a `Primitive` that hands the per-frame work to the pipeline. Zoom,
-//! pan, and fit reuse the still-image display math, so video and stills
-//! share one geometry and never diverge.
+//! The iced shader-widget glue for stills: a `Program` that places the current
+//! image and a `Primitive` that hands the per-draw work to the pipeline. Zoom,
+//! pan, and fit reuse the shared display geometry, so stills and video share
+//! one path and never diverge.
 
-use std::sync::Arc;
-
+use iced::widget::image::Handle;
 use iced::widget::shader;
 use iced::{Element, Length, Rectangle, mouse, wgpu};
 
-use super::pipeline::VideoPipeline;
-use crate::ui::image_display::display_geometry;
+use super::pipeline::ImagePipeline;
 use crate::app::Message;
-use crate::video::VideoFrame;
+use crate::ui::image_display::display_geometry;
 
-/// Build the video surface element for the current frame at the given
-/// zoom/pan. Fills the image area like the still-image widget does.
+/// Build the still-image surface element for `handle` at the given zoom/pan.
+/// Fills the image area like the placeholder and video paths do.
 pub fn view(
-    frame: Arc<VideoFrame>,
+    handle: Handle,
+    original: (u32, u32),
     zoom: f32,
     pan: (f32, f32),
     viewport: (f32, f32),
     pixelated: bool,
 ) -> Element<'static, Message> {
-    shader::Shader::new(VideoSurface::new(frame, zoom, pan, viewport, pixelated))
+    shader::Shader::new(ImageSurface::new(handle, original, zoom, pan, viewport, pixelated))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
 }
 
-/// The shader program: holds the frame to show and where to put it.
-struct VideoSurface {
-    frame: Arc<VideoFrame>,
+/// The shader program: the image to show and where to place it.
+struct ImageSurface {
+    handle: Handle,
     valid: bool,
     /// Destination rect in normalized widget space: x0, y0, x1, y1.
     dst: [f32; 4],
@@ -40,26 +39,26 @@ struct VideoSurface {
     nearest: bool,
 }
 
-impl VideoSurface {
+impl ImageSurface {
     fn new(
-        frame: Arc<VideoFrame>,
+        handle: Handle,
+        original: (u32, u32),
         zoom: f32,
         pan: (f32, f32),
         viewport: (f32, f32),
         pixelated: bool,
     ) -> Self {
-        let original = (frame.width, frame.height);
         let nearest = pixelated && zoom > 1.0;
         match display_geometry(zoom, pan, viewport, original) {
             Some((dst, src)) => Self {
-                frame,
+                handle,
                 valid: true,
                 dst,
                 src,
                 nearest,
             },
             None => Self {
-                frame,
+                handle,
                 valid: false,
                 dst: [0.0; 4],
                 src: [0.0; 4],
@@ -69,18 +68,18 @@ impl VideoSurface {
     }
 }
 
-impl<T> shader::Program<T> for VideoSurface {
+impl<T> shader::Program<T> for ImageSurface {
     type State = ();
-    type Primitive = VideoPrimitive;
+    type Primitive = ImagePrimitive;
 
     fn draw(
         &self,
         _state: &Self::State,
         _cursor: mouse::Cursor,
         _bounds: Rectangle,
-    ) -> VideoPrimitive {
-        VideoPrimitive {
-            frame: self.frame.clone(),
+    ) -> ImagePrimitive {
+        ImagePrimitive {
+            handle: self.handle.clone(),
             valid: self.valid,
             dst: self.dst,
             src: self.src,
@@ -89,41 +88,41 @@ impl<T> shader::Program<T> for VideoSurface {
     }
 }
 
-/// A single frame's worth of work handed to the renderer.
-pub struct VideoPrimitive {
-    frame: Arc<VideoFrame>,
+/// One still's worth of work handed to the renderer.
+pub struct ImagePrimitive {
+    handle: Handle,
     valid: bool,
     dst: [f32; 4],
     src: [f32; 4],
     nearest: bool,
 }
 
-impl std::fmt::Debug for VideoPrimitive {
+impl std::fmt::Debug for ImagePrimitive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VideoPrimitive")
-            .field("frame_id", &self.frame.id)
+        f.debug_struct("ImagePrimitive")
+            .field("id", &self.handle.id())
             .field("valid", &self.valid)
             .finish()
     }
 }
 
-impl shader::Primitive for VideoPrimitive {
-    type Pipeline = VideoPipeline;
+impl shader::Primitive for ImagePrimitive {
+    type Pipeline = ImagePipeline;
 
     fn prepare(
         &self,
-        pipeline: &mut VideoPipeline,
+        pipeline: &mut ImagePipeline,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         _bounds: &Rectangle,
         _viewport: &shader::Viewport,
     ) {
         if self.valid {
-            pipeline.prepare(device, queue, &self.frame, self.dst, self.src);
+            pipeline.prepare(device, queue, &self.handle, self.dst, self.src);
         }
     }
 
-    fn draw(&self, pipeline: &VideoPipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
+    fn draw(&self, pipeline: &ImagePipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
         if self.valid {
             pipeline.draw(render_pass, self.nearest);
         }
