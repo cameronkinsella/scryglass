@@ -6,4 +6,5 @@
 mod pipeline;
 mod program;
 
-pub use program::view;
+pub use pipeline::submit_upload;
+pub use program::{view, warmup};

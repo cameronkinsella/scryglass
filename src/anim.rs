@@ -11,15 +11,14 @@ use std::time::Duration;
 use iced::Task;
 use iced::widget::image::Handle;
 
-use crate::allocation;
-use crate::allocation::Allocation;
 use crate::media::animation::{AnimatedImage, FrameCanvas};
 
 /// Messages produced and consumed by `AnimPlayer`.
 #[derive(Debug, Clone)]
 pub enum AnimMessage {
-    /// A composited frame was allocated to GPU memory.
-    FrameAllocated(PathBuf, Result<Allocation, allocation::Error>),
+    /// A composited frame finished uploading: its handle plus the keepalive
+    /// token holding its texture resident, or None if the upload could not run.
+    FrameAllocated(PathBuf, Option<(Handle, Arc<()>)>),
     /// Timer tick, advance to the next frame.
     Tick,
 }
@@ -30,7 +29,7 @@ struct ActiveAnim {
     canvas: FrameCanvas,
     frame_index: usize,
     /// Held to keep the current frame's GPU texture alive.
-    _frame_allocation: Option<Allocation>,
+    _frame_keepalive: Option<Arc<()>>,
 }
 
 /// Manages decoded-animation caching and playback.
@@ -62,21 +61,20 @@ impl AnimPlayer {
         current_path: &Path,
     ) -> (Task<AnimMessage>, Option<Handle>) {
         match msg {
-            AnimMessage::FrameAllocated(path, Ok(allocation)) => {
+            AnimMessage::FrameAllocated(path, Some((handle, keepalive))) => {
                 if current_path != path {
                     return (Task::none(), None);
                 }
                 let Some(active) = self.active.as_mut() else {
                     return (Task::none(), None);
                 };
-                // Display the frame's handle; the held allocation keeps the
-                // frame gated on upload (display only once it is resident).
-                let handle = allocation.handle().clone();
-                active._frame_allocation = Some(allocation);
+                // The keepalive holds the frame's texture resident, already
+                // uploaded off-thread, so it is ready to draw.
+                active._frame_keepalive = Some(keepalive);
                 (Task::none(), Some(handle))
             }
 
-            AnimMessage::FrameAllocated(_path, Err(_err)) => (Task::none(), None),
+            AnimMessage::FrameAllocated(_path, None) => (Task::none(), None),
 
             AnimMessage::Tick => {
                 let Some(active) = self.active.as_mut() else {
@@ -96,9 +94,7 @@ impl AnimPlayer {
 
                 let pixels = active.canvas.pixels().to_vec();
                 let handle = Handle::from_rgba(active.decoded.width, active.decoded.height, pixels);
-                let p = current_path.to_path_buf();
-                let task = allocation::allocate_handle(handle)
-                    .map(move |result| AnimMessage::FrameAllocated(p.clone(), result));
+                let task = upload_frame(handle, current_path.to_path_buf());
                 (task, None)
             }
         }
@@ -124,12 +120,10 @@ impl AnimPlayer {
             decoded,
             canvas,
             frame_index: 0,
-            _frame_allocation: None,
+            _frame_keepalive: None,
         }));
 
-        let p = path.to_path_buf();
-        allocation::allocate_handle(handle)
-            .map(move |result| AnimMessage::FrameAllocated(p.clone(), result))
+        upload_frame(handle, path.to_path_buf())
     }
 
     /// Whether a decoded copy of `path` is cached, ready to display.
@@ -146,7 +140,7 @@ impl AnimPlayer {
     pub fn is_animating(&self) -> bool {
         self.active
             .as_ref()
-            .is_some_and(|a| a.decoded.frames.len() > 1 && a._frame_allocation.is_some())
+            .is_some_and(|a| a.decoded.frames.len() > 1 && a._frame_keepalive.is_some())
     }
 
     /// The delay for the current frame (for the subscription timer).
@@ -167,4 +161,21 @@ impl AnimPlayer {
     pub fn remove(&mut self, path: &Path) {
         self.cache.remove(path);
     }
+}
+
+/// Upload a composited frame through the still-image worker (off the render
+/// thread) and report its keepalive token. Retries briefly so a frame composited
+/// before the first render still finds the upload worker.
+fn upload_frame(handle: Handle, path: PathBuf) -> Task<AnimMessage> {
+    Task::future(async move {
+        for _ in 0..50 {
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            if crate::ui::image_surface::submit_upload(handle.clone(), ready_tx) {
+                let keepalive = ready_rx.await.ok();
+                return AnimMessage::FrameAllocated(path, keepalive.map(|k| (handle, k)));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        AnimMessage::FrameAllocated(path, None)
+    })
 }

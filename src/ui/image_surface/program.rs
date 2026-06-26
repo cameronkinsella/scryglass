@@ -27,6 +27,15 @@ pub fn view(
         .into()
 }
 
+/// A no-op surface that draws nothing but makes iced build the image pipeline
+/// (and its upload thread) up front, so an early decode never races the worker.
+pub fn warmup() -> Element<'static, Message> {
+    shader::Shader::new(ImageSurface::warmup())
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
 /// The shader program: the image to show and where to place it.
 struct ImageSurface {
     handle: Handle,
@@ -64,6 +73,17 @@ impl ImageSurface {
                 src: [0.0; 4],
                 nearest,
             },
+        }
+    }
+
+    /// A degenerate surface that builds the pipeline but draws nothing.
+    fn warmup() -> Self {
+        Self {
+            handle: Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
+            valid: false,
+            dst: [0.0; 4],
+            src: [0.0; 4],
+            nearest: false,
         }
     }
 }

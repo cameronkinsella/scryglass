@@ -36,14 +36,25 @@ pub(crate) fn fire_rotate(viewer: &mut Viewer) -> Task<Message> {
         let Some((width, height, pixels)) = rotated else {
             return Task::none();
         };
-        Task::done(Message::Media(MediaMessage::ViewRotated {
-            path: path.clone(),
-            baked,
-            image: CachedImage {
-                handle: Handle::from_rgba(width, height, pixels),
-                original_size: (width, height),
-            },
-        }))
+        let handle = Handle::from_rgba(width, height, pixels);
+        let p = path.clone();
+        Task::future(async move {
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let keepalive = if crate::ui::image_surface::submit_upload(handle.clone(), ready_tx) {
+                ready_rx.await.ok()
+            } else {
+                None
+            };
+            Message::Media(MediaMessage::ViewRotated {
+                path: p.clone(),
+                baked,
+                image: CachedImage {
+                    handle,
+                    original_size: (width, height),
+                    keepalive,
+                },
+            })
+        })
     })
 }
 
@@ -272,16 +283,30 @@ pub(crate) fn fire_load(
                 original_size: t.original_size,
             });
             let handle = Handle::from_rgba(img.width, img.height, img.pixels);
-            Task::done(Message::Media(MediaMessage::Loaded {
-                path: path.clone(),
-                result: Ok(LoadedMedia::Static {
-                    image: CachedImage {
-                        handle,
-                        original_size,
-                    },
-                    thumb,
-                }),
-            }))
+            let p = path.clone();
+            // Hand the texture to the upload thread, then wait for it to become
+            // resident before displaying, so navigation never stalls the UI
+            // thread on a texture upload.
+            Task::future(async move {
+                let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                let keepalive =
+                    if crate::ui::image_surface::submit_upload(handle.clone(), ready_tx) {
+                        ready_rx.await.ok()
+                    } else {
+                        None
+                    };
+                Message::Media(MediaMessage::Loaded {
+                    path: p.clone(),
+                    result: Ok(LoadedMedia::Static {
+                        image: CachedImage {
+                            handle,
+                            original_size,
+                            keepalive,
+                        },
+                        thumb,
+                    }),
+                })
+            })
         }
         Ok(DecodedMedia::Animated(anim)) => {
             // Frames allocate at display time, only the thumb needs a

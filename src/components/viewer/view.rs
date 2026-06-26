@@ -196,6 +196,15 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
         DisplayedImage::Error { message } => ui::image_display::error_viewport(message),
     };
 
+    // Behind non-full content, a warmup surface builds the image pipeline up
+    // front. A full image already drives it, so it needs none.
+    let image_view: Element<'_, Message> =
+        if matches!(viewer.displayed, DisplayedImage::Full { .. }) {
+            image_view
+        } else {
+            Stack::with_children(vec![ui::image_surface::warmup(), image_view]).into()
+        };
+
     // Optional checkerboard behind the image reveals transparency.
     let image_view: Element<'_, Message> = if shared.config.show_checkerboard
         && !matches!(

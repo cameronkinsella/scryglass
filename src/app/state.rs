@@ -29,6 +29,12 @@ pub struct CachedImage {
     pub handle: Handle,
     /// True dimensions (post-orientation, pre-downscale) for zoom math.
     pub original_size: (u32, u32),
+    /// Keepalive tying the GPU texture's lifetime to this cache entry, like
+    /// iced's Allocation: the texture stays resident while this lives, and the
+    /// pipeline frees it when this drops. None for the first image, before the
+    /// upload thread's GPU context exists. Held for its refcount, never read.
+    #[allow(dead_code)]
+    pub keepalive: Option<std::sync::Arc<()>>,
 }
 
 impl CachedImage {
