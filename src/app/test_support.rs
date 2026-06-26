@@ -61,6 +61,7 @@ pub(crate) fn empty_app() -> TestApp {
             context_menu_pos: None,
             zoom_slider_open: false,
             fullscreen: false,
+            focused: true,
             help_open: false,
             modal: None,
             opening_since: None,

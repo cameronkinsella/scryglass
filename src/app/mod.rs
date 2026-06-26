@@ -146,6 +146,9 @@ pub struct Window {
     pub(crate) zoom_slider_open: bool,
     /// Whether the window is borderless fullscreen (chrome hidden).
     pub(crate) fullscreen: bool,
+    /// Whether this window currently has native focus. The resource tiers key
+    /// VRAM retention on it.
+    pub(crate) focused: bool,
     /// Whether the shortcut help overlay is open.
     pub(crate) help_open: bool,
     /// A blocking dialog over the viewer, if one is open. Keyboard-driven

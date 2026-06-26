@@ -11,6 +11,8 @@ pub enum Message {
         minimized: bool,
         mode: iced::window::Mode,
     },
+    /// Native focus gained or lost, tracked per window for the resource tiers.
+    Focused(bool),
     CloseRequested(iced::window::Id),
 }
 use iced::Task;
@@ -79,6 +81,15 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             Task::none()
         }
 
+        Message::Focused(focused) => {
+            win.focused = focused;
+            // Losing focus dismisses the zoom pop-up, which has no owner to track.
+            if !focused {
+                win.zoom_slider_open = false;
+            }
+            Task::none()
+        }
+
         Message::CloseRequested(id) => {
             // Persist this window's full restore stack as the next window's
             // geometry: the restored windowed bounds, plus the maximized and
@@ -131,6 +142,17 @@ mod tests {
             Message::Resized(Size::new(1024.0, 768.0)),
         );
         assert_eq!(app.window.window_size, Size::new(1024.0, 768.0));
+    }
+
+    #[test]
+    fn focus_change_is_tracked_and_dismisses_the_zoom_popup() {
+        let mut app = empty_app();
+        app.window.zoom_slider_open = true;
+        let _ = update(&mut app.window, &mut app.shared, Message::Focused(false));
+        assert!(!app.window.focused);
+        assert!(!app.window.zoom_slider_open);
+        let _ = update(&mut app.window, &mut app.shared, Message::Focused(true));
+        assert!(app.window.focused);
     }
 
     #[test]

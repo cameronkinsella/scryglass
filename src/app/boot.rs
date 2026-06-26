@@ -96,6 +96,7 @@ pub(crate) fn new_window(id: window::Id, config: &AppConfig) -> Window {
         context_menu_pos: None,
         zoom_slider_open: false,
         fullscreen: config.window_fullscreen,
+        focused: true,
         help_open: false,
         modal: None,
         opening_since: None,

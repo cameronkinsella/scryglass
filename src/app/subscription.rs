@@ -268,9 +268,12 @@ fn handle_event(event: Event, status: event::Status, _id: window::Id) -> Option<
             Some(Message::Window(WindowMessage::Moved(*point)))
         }
 
-        // --- Window lost focus: close the zoom pop-up ---
+        // --- Window focus changed ---
+        Event::Window(window::Event::Focused) => {
+            Some(Message::Window(WindowMessage::Focused(true)))
+        }
         Event::Window(window::Event::Unfocused) => {
-            Some(Message::Viewer(ViewerMessage::CloseZoomSlider))
+            Some(Message::Window(WindowMessage::Focused(false)))
         }
 
         _ => None,
