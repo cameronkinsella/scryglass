@@ -52,7 +52,14 @@ pub fn update(app: &mut App, envelope: Envelope) -> Task<Envelope> {
             };
             Envelope::wrap(id, dispatch(win, &mut app.shared, message))
         }
-        Envelope::Opened(_id) => Task::none(),
+        // Replay maximize/fullscreen now the window exists, not at open where it
+        // races creation. Use the config: the window's own flag was reset by the
+        // placement query that runs first.
+        Envelope::Opened(id) => super::boot::replay_window_state(
+            id,
+            app.shared.config.window_maximized,
+            app.shared.config.window_fullscreen,
+        ),
         Envelope::Closed(id) => {
             app.windows.remove(&id);
             // A daemon keeps running with no windows, so exit once the last one
@@ -71,12 +78,8 @@ pub fn update(app: &mut App, envelope: Envelope) -> Task<Envelope> {
 /// Open a new window for a forwarded launch at the last-saved size (the OS
 /// places it). A forward with no path opens an empty window.
 fn open_new_window(app: &mut App, path: Option<PathBuf>) -> Task<Envelope> {
-    let size = iced::Size::new(
-        app.shared.config.window_width,
-        app.shared.config.window_height,
-    );
-    let (id, opened) = iced::window::open(super::boot::window_settings(size));
-    let mut win = super::boot::new_window(id, size);
+    let (id, opened) = iced::window::open(super::boot::window_settings(&app.shared.config));
+    let mut win = super::boot::new_window(id, &app.shared.config);
     super::recalc_viewport(&mut win, &app.shared);
     let open = match path {
         Some(path) => {

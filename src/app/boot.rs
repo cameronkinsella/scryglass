@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use iced::{Size, Task, window};
+use iced::{Point, Size, Task, window};
 
 use crate::config::AppConfig;
 use crate::media::disk_thumbs::DiskThumbs;
@@ -46,9 +46,8 @@ pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Envelope>) {
         update_status: None,
     };
 
-    let size = Size::new(shared.config.window_width, shared.config.window_height);
-    let (id, opened) = window::open(window_settings(size));
-    let mut win = new_window(id, size);
+    let (id, opened) = window::open(window_settings(&shared.config));
+    let mut win = new_window(id, &shared.config);
     recalc_viewport(&mut win, &shared);
 
     let open = match initial_open_path(initial_path) {
@@ -76,18 +75,27 @@ pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Envelope>) {
     )
 }
 
-/// A fresh empty window state for window `id`, sized `size`.
-pub(crate) fn new_window(id: window::Id, size: Size) -> Window {
+/// A fresh empty window state for window `id`, seeded from the saved geometry.
+pub(crate) fn new_window(id: window::Id, config: &AppConfig) -> Window {
+    let size = Size::new(config.window_width, config.window_height);
+    let window_pos = match (config.window_x, config.window_y) {
+        (Some(x), Some(y)) => Point::new(x, y),
+        _ => Point::ORIGIN,
+    };
     Window {
         id,
         session: Session::Empty,
         open_menu: None,
         viewport_size: size,
-        last_cursor_pos: iced::Point::ORIGIN,
+        last_cursor_pos: Point::ORIGIN,
         window_size: size,
+        window_pos,
+        maximized: config.window_maximized,
+        restored_size: size,
+        restored_pos: window_pos,
         context_menu_pos: None,
         zoom_slider_open: false,
-        fullscreen: false,
+        fullscreen: config.window_fullscreen,
         help_open: false,
         modal: None,
         opening_since: None,
@@ -96,16 +104,40 @@ pub(crate) fn new_window(id: window::Id, size: Size) -> Window {
     }
 }
 
-/// Settings for a newly opened viewer window.
-pub(crate) fn window_settings(size: Size) -> window::Settings {
+/// Settings for a newly opened viewer window: the saved size and position (the
+/// OS places it when there is no saved position yet).
+pub(crate) fn window_settings(config: &AppConfig) -> window::Settings {
+    let position = match (config.window_x, config.window_y) {
+        (Some(x), Some(y)) => window::Position::Specific(Point::new(x, y)),
+        _ => window::Position::Default,
+    };
     window::Settings {
-        size,
+        size: Size::new(config.window_width, config.window_height),
+        position,
         min_size: Some(Size::new(480.0, 420.0)),
         icon: window_icon(),
         // Close requests route through update() so config saves first.
         exit_on_close_request: false,
         ..Default::default()
     }
+}
+
+/// Replay a saved maximized/fullscreen state onto a freshly opened window, in
+/// order, so the OS rebuilds the same restore stack: exit fullscreen to
+/// maximized, then to the restored windowed geometry.
+pub(crate) fn replay_window_state(
+    id: window::Id,
+    maximized: bool,
+    fullscreen: bool,
+) -> Task<Envelope> {
+    let mut task = Task::none();
+    if maximized {
+        task = task.chain(window::maximize(id, true));
+    }
+    if fullscreen {
+        task = task.chain(window::set_mode(id, window::Mode::Fullscreen));
+    }
+    task
 }
 
 /// Decode the embedded window icon with the image crate. (iced's

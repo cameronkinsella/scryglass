@@ -3,10 +3,12 @@ use iced::Size;
 #[derive(Debug, Clone)]
 pub enum Message {
     Resized(Size),
-    /// Window state fetched after a resize, to persist only a windowed size.
+    Moved(iced::Point),
+    /// Maximized/minimized/mode fetched after a resize or move, the gate for
+    /// persisting the live geometry only while plainly windowed.
     WindowState {
-        size: Size,
         maximized: bool,
+        minimized: bool,
         mode: iced::window::Mode,
     },
     CloseRequested(iced::window::Id),
@@ -41,47 +43,78 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             if win.fullscreen {
                 Task::none()
             } else {
-                check_window_state(win.id, size)
+                check_window_state(win.id)
+            }
+        }
+
+        Message::Moved(pos) => {
+            win.window_pos = pos;
+            // Persist through the same state query as a resize, never directly:
+            // a maximize repositions the window and fires Moved before its
+            // maximized state is known, which would save those bounds as the
+            // restored position.
+            if win.fullscreen {
+                Task::none()
+            } else {
+                check_window_state(win.id)
             }
         }
 
         Message::WindowState {
-            size,
             maximized,
+            minimized,
             mode,
         } => {
-            if should_persist(maximized, mode) {
-                shared.config.window_width = size.width;
-                shared.config.window_height = size.height;
+            // A minimized window reports it is neither maximized nor at its real
+            // bounds. Leave both untouched so the restore stack ignores minimize
+            // and the next window reopens in the pre-minimize state. The config
+            // is written only on close, so it tracks the last closed window.
+            if !minimized {
+                win.maximized = maximized;
+                if should_persist(maximized, minimized, mode) {
+                    win.restored_size = win.window_size;
+                    win.restored_pos = win.window_pos;
+                }
             }
             Task::none()
         }
 
         Message::CloseRequested(id) => {
+            // Persist this window's full restore stack as the next window's
+            // geometry: the restored windowed bounds, plus the maximized and
+            // fullscreen flags to replay on top.
+            shared.config.window_width = win.restored_size.width;
+            shared.config.window_height = win.restored_size.height;
+            shared.config.window_x = Some(win.restored_pos.x);
+            shared.config.window_y = Some(win.restored_pos.y);
+            shared.config.window_maximized = win.maximized;
+            shared.config.window_fullscreen = win.fullscreen;
             let config = shared.config.clone();
             Task::future(config.save()).then(move |_| iced::window::close(id))
         }
     }
 }
 
-/// Ask the windowing system whether the window is maximized or fullscreen, so
-/// the size is persisted only when it is the plain windowed size.
-fn check_window_state(id: iced::window::Id, size: Size) -> Task<AppMessage> {
+/// Ask the windowing system for the window's maximized, minimized, and mode
+/// state, so the size is persisted only when it is the plain windowed size.
+fn check_window_state(id: iced::window::Id) -> Task<AppMessage> {
     iced::window::is_maximized(id).then(move |maximized| {
-        iced::window::mode(id).map(move |mode| {
-            AppMessage::Window(Message::WindowState {
-                size,
-                maximized,
-                mode,
+        iced::window::mode(id).then(move |mode| {
+            iced::window::is_minimized(id).map(move |minimized| {
+                AppMessage::Window(Message::WindowState {
+                    maximized,
+                    minimized: minimized.unwrap_or(false),
+                    mode,
+                })
             })
         })
     })
 }
 
-/// A size worth remembering only when the window is neither maximized nor
-/// fullscreen.
-fn should_persist(maximized: bool, mode: iced::window::Mode) -> bool {
-    !maximized && mode == iced::window::Mode::Windowed
+/// A size worth remembering only when the window is plainly windowed: neither
+/// maximized, minimized, nor fullscreen.
+fn should_persist(maximized: bool, minimized: bool, mode: iced::window::Mode) -> bool {
+    !maximized && !minimized && mode == iced::window::Mode::Windowed
 }
 
 #[cfg(test)]
@@ -101,34 +134,42 @@ mod tests {
     }
 
     #[test]
-    fn a_normal_window_state_persists_its_size() {
+    fn the_windowed_gate_saves_the_live_geometry() {
         let mut app = empty_app();
+        app.window.window_size = Size::new(1024.0, 768.0);
+        app.window.window_pos = iced::Point::new(120.0, 80.0);
         let _ = update(
             &mut app.window,
             &mut app.shared,
             Message::WindowState {
-                size: Size::new(1024.0, 768.0),
                 maximized: false,
+                minimized: false,
                 mode: iced::window::Mode::Windowed,
             },
         );
-        assert_eq!(app.shared.config.window_width, 1024.0);
-        assert_eq!(app.shared.config.window_height, 768.0);
+        assert_eq!(app.window.restored_size, Size::new(1024.0, 768.0));
+        assert_eq!(app.window.restored_pos, iced::Point::new(120.0, 80.0));
     }
 
     #[test]
-    fn a_maximized_or_fullscreen_state_keeps_the_windowed_size() {
+    fn a_maximized_gate_keeps_the_windowed_geometry() {
         let mut app = empty_app();
+        // Establish the restored geometry while windowed.
+        app.window.window_size = Size::new(1024.0, 768.0);
+        app.window.window_pos = iced::Point::new(120.0, 80.0);
         let _ = update(
             &mut app.window,
             &mut app.shared,
             Message::WindowState {
-                size: Size::new(1024.0, 768.0),
                 maximized: false,
+                minimized: false,
                 mode: iced::window::Mode::Windowed,
             },
         );
-        // Later maximized or fullscreen reports must not overwrite it.
+        // Maximizing moves and resizes the window to its bounds, but the gate
+        // must not overwrite the restored geometry (the position-loss bug fix).
+        app.window.window_size = Size::new(2560.0, 1440.0);
+        app.window.window_pos = iced::Point::new(0.0, 0.0);
         for state in [
             (true, iced::window::Mode::Windowed),
             (false, iced::window::Mode::Fullscreen),
@@ -137,22 +178,144 @@ mod tests {
                 &mut app.window,
                 &mut app.shared,
                 Message::WindowState {
-                    size: Size::new(2560.0, 1440.0),
                     maximized: state.0,
+                    minimized: false,
                     mode: state.1,
                 },
             );
         }
-        assert_eq!(app.shared.config.window_width, 1024.0);
-        assert_eq!(app.shared.config.window_height, 768.0);
+        assert_eq!(app.window.restored_size, Size::new(1024.0, 768.0));
+        assert_eq!(app.window.restored_pos, iced::Point::new(120.0, 80.0));
     }
 
     #[test]
     fn only_a_normal_window_persists_its_size() {
         use iced::window::Mode;
-        assert!(should_persist(false, Mode::Windowed));
-        assert!(!should_persist(true, Mode::Windowed));
-        assert!(!should_persist(false, Mode::Fullscreen));
+        assert!(should_persist(false, false, Mode::Windowed));
+        assert!(!should_persist(true, false, Mode::Windowed));
+        assert!(!should_persist(false, true, Mode::Windowed));
+        assert!(!should_persist(false, false, Mode::Fullscreen));
+    }
+
+    #[test]
+    fn a_minimized_window_keeps_its_restored_geometry() {
+        let mut app = empty_app();
+        app.window.window_size = Size::new(1024.0, 768.0);
+        app.window.window_pos = iced::Point::new(120.0, 80.0);
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::WindowState {
+                maximized: false,
+                minimized: false,
+                mode: iced::window::Mode::Windowed,
+            },
+        );
+        // Minimizing reports bogus off-screen bounds, which must not be saved.
+        app.window.window_size = Size::new(0.0, 0.0);
+        app.window.window_pos = iced::Point::new(-32000.0, -32000.0);
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::WindowState {
+                maximized: false,
+                minimized: true,
+                mode: iced::window::Mode::Windowed,
+            },
+        );
+        assert_eq!(app.window.restored_size, Size::new(1024.0, 768.0));
+        assert_eq!(app.window.restored_pos, iced::Point::new(120.0, 80.0));
+    }
+
+    #[test]
+    fn a_minimized_window_keeps_its_maximized_flag() {
+        let mut app = empty_app();
+        // Maximize, then minimize (which reports not-maximized): the flag holds,
+        // so the restore stack reopens maximized.
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::WindowState {
+                maximized: true,
+                minimized: false,
+                mode: iced::window::Mode::Windowed,
+            },
+        );
+        assert!(app.window.maximized);
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::WindowState {
+                maximized: false,
+                minimized: true,
+                mode: iced::window::Mode::Windowed,
+            },
+        );
+        assert!(app.window.maximized);
+    }
+
+    #[test]
+    fn a_move_updates_the_tracked_position() {
+        let mut app = empty_app();
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::Moved(iced::Point::new(300.0, 200.0)),
+        );
+        assert_eq!(app.window.window_pos, iced::Point::new(300.0, 200.0));
+    }
+
+    #[test]
+    fn window_state_records_the_maximized_flag() {
+        let mut app = empty_app();
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::WindowState {
+                maximized: true,
+                minimized: false,
+                mode: iced::window::Mode::Windowed,
+            },
+        );
+        assert!(app.window.maximized);
+    }
+
+    #[test]
+    fn close_persists_this_windows_restore_stack() {
+        let mut app = empty_app();
+        // The window's restored bounds and flags are what a close persists.
+        app.window.restored_size = Size::new(1024.0, 768.0);
+        app.window.restored_pos = iced::Point::new(120.0, 80.0);
+        app.window.maximized = true;
+        app.window.fullscreen = true;
+        let id = app.window.id;
+        let _ = update(&mut app.window, &mut app.shared, Message::CloseRequested(id));
+        assert_eq!(app.shared.config.window_width, 1024.0);
+        assert_eq!(app.shared.config.window_height, 768.0);
+        assert_eq!(app.shared.config.window_x, Some(120.0));
+        assert_eq!(app.shared.config.window_y, Some(80.0));
+        assert!(app.shared.config.window_maximized);
+        assert!(app.shared.config.window_fullscreen);
+    }
+
+    #[test]
+    fn an_open_windows_move_does_not_change_the_saved_geometry() {
+        let mut app = empty_app();
+        app.shared.config.window_x = Some(10.0);
+        // An open window moving while another window's geometry is saved must
+        // not overwrite it; only a close persists.
+        app.window.window_size = Size::new(1024.0, 768.0);
+        app.window.window_pos = iced::Point::new(500.0, 400.0);
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::WindowState {
+                maximized: false,
+                minimized: false,
+                mode: iced::window::Mode::Windowed,
+            },
+        );
+        assert_eq!(app.shared.config.window_x, Some(10.0));
     }
 
     #[test]

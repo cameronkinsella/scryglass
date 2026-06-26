@@ -129,6 +129,16 @@ pub struct Window {
     pub(crate) last_cursor_pos: iced::Point,
     /// Last known window size (for recalculating viewport on layout toggles).
     pub(crate) window_size: Size,
+    /// Last known window position (top-left, logical px), updated on move.
+    pub(crate) window_pos: iced::Point,
+    /// Whether the window is natively maximized, tracked so only the restored
+    /// geometry is persisted.
+    pub(crate) maximized: bool,
+    /// The restored (plain windowed) size and position, tracked apart from the
+    /// live size so a maximized or fullscreen window still remembers where it
+    /// was. Persisted on close as the next window's geometry.
+    pub(crate) restored_size: Size,
+    pub(crate) restored_pos: iced::Point,
     /// Context menu position (window coords). `Some` when visible.
     pub(crate) context_menu_pos: Option<iced::Point>,
     /// Whether the footer zoom slider pop-up is open.

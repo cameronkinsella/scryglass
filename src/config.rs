@@ -131,6 +131,12 @@ pub struct AppConfig {
     /// Last window size, restored at startup.
     pub window_width: f32,
     pub window_height: f32,
+    /// Last window position. None lets the OS place it (first run).
+    pub window_x: Option<f32>,
+    pub window_y: Option<f32>,
+    /// Whether the last window was maximized or fullscreen, replayed on open.
+    pub window_maximized: bool,
+    pub window_fullscreen: bool,
     /// Video playback volume (0-1) and mute, persisted across sessions.
     pub video_volume: f32,
     pub video_muted: bool,
@@ -169,6 +175,10 @@ impl Default for AppConfig {
             mouse_nav: true,
             window_width: 1024.0,
             window_height: 768.0,
+            window_x: None,
+            window_y: None,
+            window_maximized: false,
+            window_fullscreen: false,
             video_volume: 1.0,
             video_muted: false,
             video_loop: false,
@@ -267,6 +277,10 @@ mod tests {
             mouse_nav: false,
             window_width: 640.0,
             window_height: 480.0,
+            window_x: Some(100.0),
+            window_y: Some(50.0),
+            window_maximized: true,
+            window_fullscreen: true,
             video_volume: 0.5,
             video_muted: true,
             video_loop: true,

@@ -112,12 +112,18 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
         Message::ToggleFullscreen => {
             win.fullscreen = !win.fullscreen;
             recalc_viewport(win, shared);
-            let mode = if win.fullscreen {
-                iced::window::Mode::Fullscreen
+            if win.fullscreen {
+                iced::window::set_mode(win.id, iced::window::Mode::Fullscreen)
             } else {
-                iced::window::Mode::Windowed
-            };
-            iced::window::set_mode(win.id, mode)
+                // Fullscreen is independent of maximize: exiting returns to the
+                // windowed mode, then re-maximizes if it was maximized beneath.
+                let exit = iced::window::set_mode(win.id, iced::window::Mode::Windowed);
+                if win.maximized {
+                    exit.chain(iced::window::maximize(win.id, true))
+                } else {
+                    exit
+                }
+            }
         }
         Message::Escape => {
             if win.modal.is_some() {

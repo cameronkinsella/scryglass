@@ -264,6 +264,9 @@ fn handle_event(event: Event, status: event::Status, _id: window::Id) -> Option<
         Event::Window(window::Event::Resized(size)) => {
             Some(Message::Window(WindowMessage::Resized(*size)))
         }
+        Event::Window(window::Event::Moved(point)) => {
+            Some(Message::Window(WindowMessage::Moved(*point)))
+        }
 
         // --- Window lost focus: close the zoom pop-up ---
         Event::Window(window::Event::Unfocused) => {
