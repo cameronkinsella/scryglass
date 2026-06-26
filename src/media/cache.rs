@@ -41,6 +41,12 @@ impl<T> ImageCache<T> {
         self.used_bytes
     }
 
+    /// The current byte budget, so a rebalance can skip eviction when a
+    /// window's share is unchanged.
+    pub fn budget(&self) -> usize {
+        self.budget
+    }
+
     pub fn contains(&self, path: &Path) -> bool {
         self.entries.contains_key(path)
     }

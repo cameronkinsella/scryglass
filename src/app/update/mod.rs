@@ -44,8 +44,15 @@ pub(crate) enum NavTarget {
 }
 
 /// Daemon update: route a per-window message to its window, or handle a
-/// window-lifecycle event.
+/// window-lifecycle event, then re-split cache budgets if the window count
+/// changed.
 pub fn update(app: &mut App, envelope: Envelope) -> Task<Envelope> {
+    let task = route(app, envelope);
+    rebalance_budgets(app);
+    task
+}
+
+fn route(app: &mut App, envelope: Envelope) -> Task<Envelope> {
     match envelope {
         Envelope::Win(id, message) => {
             let Some(win) = app.windows.get_mut(&id) else {
@@ -73,6 +80,34 @@ pub fn update(app: &mut App, envelope: Envelope) -> Task<Envelope> {
             Task::none()
         }
         Envelope::Forwarded(path) => open_new_window(app, path),
+    }
+}
+
+/// Divide the image and thumbnail budgets evenly across the windows that hold a
+/// viewer, so total cache memory stays bounded however many windows are open.
+/// Cheap per message (a count plus a budget compare); only a viewer whose share
+/// actually changed pays for an eviction pass.
+fn rebalance_budgets(app: &mut App) {
+    let share = app
+        .windows
+        .values()
+        .filter(|w| w.viewer().is_some())
+        .count()
+        .max(1);
+    let cache_each = app.shared.config.cache_budget_mb * 1024 * 1024 / share;
+    let thumb_each = super::state::THUMB_BUDGET_BYTES / share;
+    let depth = app.shared.config.prefetch_depth;
+    for win in app.windows.values_mut() {
+        if let Some(viewer) = win.viewer_mut() {
+            if viewer.cache.budget() == cache_each {
+                continue;
+            }
+            viewer.cache.set_budget(cache_each);
+            viewer.thumbs.set_budget(thumb_each);
+            let pinned = viewer.pinned_paths(depth);
+            viewer.cache.evict_over_budget(&pinned);
+            viewer.thumbs.evict_over_budget(&pinned);
+        }
     }
 }
 
@@ -213,6 +248,28 @@ mod tests {
         assert!(matches!(win.session, crate::app::state::Session::Empty));
         // No path to load, so it shows the drop prompt, not the opening spinner.
         assert!(win.opening_since.is_none());
+    }
+
+    #[test]
+    fn cache_budget_is_split_across_viewer_windows() {
+        let (mut app, id1) = into_app(viewing_app(&["a.png"], 0));
+        let full = app.shared.config.cache_budget_mb * 1024 * 1024;
+        // One viewer holds the whole budget.
+        rebalance_budgets(&mut app);
+        assert_eq!(app.windows[&id1].viewer().unwrap().cache.budget(), full);
+
+        // A second viewer window halves each window's share.
+        let second = viewing_app(&["b.png"], 0).window;
+        let id2 = second.id;
+        app.windows.insert(id2, second);
+        rebalance_budgets(&mut app);
+        assert_eq!(app.windows[&id1].viewer().unwrap().cache.budget(), full / 2);
+        assert_eq!(app.windows[&id2].viewer().unwrap().cache.budget(), full / 2);
+
+        // Closing one restores the survivor to the whole budget.
+        app.windows.remove(&id2);
+        rebalance_budgets(&mut app);
+        assert_eq!(app.windows[&id1].viewer().unwrap().cache.budget(), full);
     }
 
     #[test]

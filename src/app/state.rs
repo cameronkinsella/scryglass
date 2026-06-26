@@ -11,8 +11,8 @@ use crate::media::cache::ImageCache;
 use crate::media::pipeline::Source;
 use crate::nav::Nav;
 
-/// Thumbnail cache budget, about 500 thumbs.
-const THUMB_BUDGET_BYTES: usize = 128 * 1024 * 1024;
+/// Thumbnail cache budget, about 500 thumbs. Split across live windows.
+pub(crate) const THUMB_BUDGET_BYTES: usize = 128 * 1024 * 1024;
 
 /// Whether the app is idle or actively viewing a directory of images.
 pub enum Session {

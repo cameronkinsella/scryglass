@@ -127,14 +127,10 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
         }
 
         Message::SetCacheBudget(megabytes) => {
+            // The new budget is split across all viewer windows by the top-level
+            // rebalance that runs after this message, so no per-window eviction
+            // is needed here.
             shared.config.cache_budget_mb = megabytes.clamp(128, 4096);
-            let budget = shared.config.cache_budget_mb * 1024 * 1024;
-            let depth = shared.config.prefetch_depth;
-            if let Some(viewer) = win.viewer_mut() {
-                viewer.cache.set_budget(budget);
-                let pinned = viewer.pinned_paths(depth);
-                viewer.cache.evict_over_budget(&pinned);
-            }
             save_config(win, shared)
         }
 
