@@ -1,21 +1,23 @@
 //! Boot: build the initial application state and start any startup work.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
-use iced::{Size, Task};
+use iced::{Size, Task, window};
 
 use crate::config::AppConfig;
 use crate::media::disk_thumbs::DiskThumbs;
 use crate::media::pipeline::Pipeline;
 
 use super::state::Session;
-use super::{App, Message, recalc_viewport, update};
+use super::{App, Envelope, Shared, Window, recalc_viewport, update};
 
-/// Boot function: creates the initial state. Called once by iced.
+/// Boot function: builds the shared state and opens the first window. Called
+/// once by the daemon.
 ///
 /// If a file or directory path was passed on the command line (e.g. via
 /// "Open with…" in a file manager), opening it starts immediately.
-pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Message>) {
+pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Envelope>) {
     let config = AppConfig::load();
     let disk_thumbs = DiskThumbs::create(config.disk_thumbs);
 
@@ -35,38 +37,82 @@ pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Message>) {
     })
     .discard();
 
-    let mut app = App {
-        session: Session::Empty,
+    let shared = Shared {
         config,
         pipeline: Pipeline::new(disk_thumbs),
+        disk_cache_size: None,
+        associations_registered: crate::platform::file_associations_registered(),
+        #[cfg(feature = "update-check")]
+        update_status: None,
+    };
+
+    let size = Size::new(shared.config.window_width, shared.config.window_height);
+    let (id, opened) = window::open(window_settings(size));
+    let mut win = new_window(id, size);
+    recalc_viewport(&mut win, &shared);
+
+    let open = match initial_open_path(initial_path) {
+        Some(path) => {
+            win.opening_since = Some(iced::time::Instant::now());
+            Envelope::wrap(id, update::open_path(path))
+        }
+        None => Task::none(),
+    };
+
+    let mut windows = HashMap::new();
+    windows.insert(id, win);
+    let app = App { shared, windows };
+    (
+        app,
+        Task::batch([
+            housekeeping,
+            video_cleanup,
+            opened.map(Envelope::Opened),
+            open,
+        ]),
+    )
+}
+
+/// A fresh empty window state for window `id`, sized `size`.
+pub(crate) fn new_window(id: window::Id, size: Size) -> Window {
+    Window {
+        id,
+        session: Session::Empty,
         open_menu: None,
-        viewport_size: Size::new(800.0, 600.0),
+        viewport_size: size,
         last_cursor_pos: iced::Point::ORIGIN,
-        window_size: Size::new(800.0, 600.0),
+        window_size: size,
         context_menu_pos: None,
         zoom_slider_open: false,
         fullscreen: false,
         help_open: false,
         modal: None,
-        disk_cache_size: None,
-        associations_registered: crate::platform::file_associations_registered(),
         opening_since: None,
         toasts: Vec::new(),
         next_toast_id: 0,
-        #[cfg(feature = "update-check")]
-        update_status: None,
-    };
-    recalc_viewport(&mut app);
+    }
+}
 
-    let open = match initial_open_path(initial_path) {
-        Some(path) => {
-            app.opening_since = Some(iced::time::Instant::now());
-            update::open_path(path)
-        }
-        None => Task::none(),
-    };
+/// Settings for a newly opened viewer window.
+pub(crate) fn window_settings(size: Size) -> window::Settings {
+    window::Settings {
+        size,
+        min_size: Some(Size::new(480.0, 420.0)),
+        icon: window_icon(),
+        // Close requests route through update() so config saves first.
+        exit_on_close_request: false,
+        ..Default::default()
+    }
+}
 
-    (app, Task::batch([housekeeping, video_cleanup, open]))
+/// Decode the embedded window icon with the image crate. (iced's
+/// encoded-bytes icon API needs its codec feature, which is off.)
+fn window_icon() -> Option<window::Icon> {
+    let img = image::load_from_memory(include_bytes!("../../assets/icon.png"))
+        .ok()?
+        .into_rgba8();
+    let (w, h) = img.dimensions();
+    window::icon::from_rgba(img.into_raw(), w, h).ok()
 }
 
 /// The CLI path, if it points to an existing file or directory.

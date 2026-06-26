@@ -6,7 +6,7 @@ use iced::time::Instant;
 
 use crate::anim::AnimPlayer;
 use crate::app::state::{Direction, DisplayedImage, Session, Viewer};
-use crate::app::{App, MediaMessage, Message, OpenMessage};
+use crate::app::{MediaMessage, Message, OpenMessage, Shared, Window};
 use crate::config::{AppConfig, ZoomMode};
 use crate::media::archive::{self, ArchiveIndex};
 use crate::media::pipeline::{Lane, Source, ThumbUrgency};
@@ -22,12 +22,12 @@ use super::video_flow::start_video;
 /// Re-sort the open folder by the configured key off-thread. Metadata
 /// (date/size) is fetched only when the key needs it, archives use their
 /// index and never touch the filesystem.
-pub(crate) fn fire_resort(app: &App) -> Task<Message> {
-    let Some(viewer) = app.viewer() else {
+pub(crate) fn fire_resort(win: &Window, shared: &Shared) -> Task<Message> {
+    let Some(viewer) = win.viewer() else {
         return Task::none();
     };
-    let key = app.config.sort_key;
-    let desc = app.config.sort_desc;
+    let key = shared.config.sort_key;
+    let desc = shared.config.sort_desc;
     let files = viewer.nav.files().to_vec();
     let source = viewer.source.clone();
 
@@ -72,16 +72,18 @@ pub(crate) fn fire_resort(app: &App) -> Task<Message> {
 
 /// Build a fresh viewer over `nav` and fire the initial loads.
 pub(crate) fn open_viewer(
-    app: &mut App,
+    win: &mut Window,
+    shared: &mut Shared,
     nav: Nav,
     source: Source,
     opened_container: bool,
 ) -> Task<Message> {
-    let depth = app.config.prefetch_depth;
-    let budget = app.config.cache_budget_mb * 1024 * 1024;
-    let window_w = app.window_size.width;
-    let show_filmstrip = app.config.show_filmstrip;
-    let pipeline = app.pipeline.clone();
+    let window_id = win.id;
+    let depth = shared.config.prefetch_depth;
+    let budget = shared.config.cache_budget_mb * 1024 * 1024;
+    let window_w = win.window_size.width;
+    let show_filmstrip = shared.config.show_filmstrip;
+    let pipeline = shared.pipeline.clone();
 
     // Privacy hygiene: purge persisted thumbnails of files that were
     // deleted from this folder/archive since the last visit. Uses the
@@ -119,10 +121,10 @@ pub(crate) fn open_viewer(
         tasks.push(start_video(
             &mut viewer,
             current,
-            app.config.video_volume,
-            app.config.video_muted,
-            app.config.video_loop,
-            app.config.hardware_decode,
+            shared.config.video_volume,
+            shared.config.video_muted,
+            shared.config.video_loop,
+            shared.config.hardware_decode,
         ));
     } else {
         tasks.push(fire_thumb(
@@ -137,7 +139,7 @@ pub(crate) fn open_viewer(
 
     // Set the scroll offset before the thumbnailer fires, so it reads the
     // cursor as on screen and fans from there, not from index 0.
-    if app.config.show_filmstrip {
+    if shared.config.show_filmstrip {
         let offset = crate::components::filmstrip::open_offset(
             viewer.nav.cursor(),
             window_w,
@@ -145,7 +147,7 @@ pub(crate) fn open_viewer(
         );
         viewer.filmstrip_scroll_x = offset;
         tasks.push(iced::widget::operation::scroll_to(
-            crate::components::filmstrip::filmstrip_id(),
+            crate::components::filmstrip::filmstrip_id(window_id),
             iced::widget::scrollable::AbsoluteOffset { x: offset, y: 0.0 },
         ));
     }
@@ -159,15 +161,15 @@ pub(crate) fn open_viewer(
     ));
 
     viewer.resort_to_first = opened_container;
-    app.session = Session::Viewing(Box::new(viewer));
+    win.session = Session::Viewing(Box::new(viewer));
 
     // Folders open in name order instantly. A configured custom sort
     // applies as soon as its metadata is gathered.
-    if app.config.sort_key != crate::config::SortKey::Name || app.config.sort_desc {
-        tasks.push(fire_resort(app));
+    if shared.config.sort_key != crate::config::SortKey::Name || shared.config.sort_desc {
+        tasks.push(fire_resort(win, shared));
     }
-    if app.config.show_info {
-        tasks.push(fire_exif(app));
+    if shared.config.show_info {
+        tasks.push(fire_exif(win, shared));
     }
 
     Task::batch(tasks)
@@ -244,9 +246,9 @@ pub(crate) fn open_path(path: PathBuf) -> Task<Message> {
 
 /// Move the cursor (one step or to an absolute index), then update the
 /// display from cache and fire loads. Never waits on anything.
-pub(crate) fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
-    let pipeline = app.pipeline.clone();
-    let Some(viewer) = app.viewer_mut() else {
+pub(crate) fn navigate(win: &mut Window, shared: &mut Shared, target: NavTarget) -> Task<Message> {
+    let pipeline = shared.pipeline.clone();
+    let Some(viewer) = win.viewer_mut() else {
         return Task::none();
     };
 
@@ -277,7 +279,7 @@ pub(crate) fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
     // Something is on hand to show (full image, blur, or cached GIF):
     // move immediately.
     if viewer.displayable(&target_path) {
-        return complete_navigation(app, target_index, true);
+        return complete_navigation(win, shared, target_index, true);
     }
 
     // Nothing displayable yet. Hold position (current image stays on
@@ -297,13 +299,19 @@ pub(crate) fn navigate(app: &mut App, target: NavTarget) -> Task<Message> {
 /// effects (no generation bump, no prefetch, no probes, which run on settle).
 /// The slider centers the cursor in the filmstrip. Key navigation (`center`
 /// false) only scrolls enough to keep it on screen.
-pub(crate) fn scrub_to(app: &mut App, index: usize, center: bool) -> Task<Message> {
-    let zoom_mode = app.config.zoom_mode;
-    let viewport = app.viewport_size;
-    let window_w = app.window_size.width;
-    let show_filmstrip = app.config.show_filmstrip;
-    let pipeline = app.pipeline.clone();
-    let Some(viewer) = app.viewer_mut() else {
+pub(crate) fn scrub_to(
+    win: &mut Window,
+    shared: &mut Shared,
+    index: usize,
+    center: bool,
+) -> Task<Message> {
+    let window_id = win.id;
+    let zoom_mode = shared.config.zoom_mode;
+    let viewport = win.viewport_size;
+    let window_w = win.window_size.width;
+    let show_filmstrip = shared.config.show_filmstrip;
+    let pipeline = shared.pipeline.clone();
+    let Some(viewer) = win.viewer_mut() else {
         return Task::none();
     };
 
@@ -351,7 +359,7 @@ pub(crate) fn scrub_to(app: &mut App, index: usize, center: bool) -> Task<Messag
         if offset != viewer.filmstrip_scroll_x {
             viewer.filmstrip_scroll_x = offset;
             tasks.push(iced::widget::operation::scroll_to(
-                crate::components::filmstrip::filmstrip_id(),
+                crate::components::filmstrip::filmstrip_id(window_id),
                 iced::widget::scrollable::AbsoluteOffset { x: offset, y: 0.0 },
             ));
         }
@@ -368,8 +376,8 @@ pub(crate) fn scrub_to(app: &mut App, index: usize, center: bool) -> Task<Messag
 }
 
 /// A pending navigation's target just became displayable, finish the move.
-pub(crate) fn resolve_pending_nav(app: &mut App) -> Task<Message> {
-    let Some(viewer) = app.viewer_mut() else {
+pub(crate) fn resolve_pending_nav(win: &mut Window, shared: &mut Shared) -> Task<Message> {
+    let Some(viewer) = win.viewer_mut() else {
         return Task::none();
     };
     let Some(target_index) = viewer.pending_nav else {
@@ -379,7 +387,7 @@ pub(crate) fn resolve_pending_nav(app: &mut App) -> Task<Message> {
     if viewer.displayable(&target_path) {
         // No generation bump: the in-flight load for this very image must
         // survive the move (a bump would cancel it and double the decode).
-        complete_navigation(app, target_index, false)
+        complete_navigation(win, shared, target_index, false)
     } else {
         Task::none()
     }
@@ -388,21 +396,23 @@ pub(crate) fn resolve_pending_nav(app: &mut App) -> Task<Message> {
 /// Move the cursor to `target_index`, which must have something
 /// displayable, then update display, prefetch, caches, and filmstrip.
 pub(crate) fn complete_navigation(
-    app: &mut App,
+    win: &mut Window,
+    shared: &mut Shared,
     target_index: usize,
     bump_generation: bool,
 ) -> Task<Message> {
-    let depth = app.config.prefetch_depth;
-    let zoom_mode = app.config.zoom_mode;
-    let viewport = app.viewport_size;
-    let window_w = app.window_size.width;
-    let show_filmstrip = app.config.show_filmstrip;
-    let video_volume = app.config.video_volume;
-    let video_muted = app.config.video_muted;
-    let video_loop = app.config.video_loop;
-    let hardware = app.config.hardware_decode;
-    let pipeline = app.pipeline.clone();
-    let Some(viewer) = app.viewer_mut() else {
+    let window_id = win.id;
+    let depth = shared.config.prefetch_depth;
+    let zoom_mode = shared.config.zoom_mode;
+    let viewport = win.viewport_size;
+    let window_w = win.window_size.width;
+    let show_filmstrip = shared.config.show_filmstrip;
+    let video_volume = shared.config.video_volume;
+    let video_muted = shared.config.video_muted;
+    let video_loop = shared.config.video_loop;
+    let hardware = shared.config.hardware_decode;
+    let pipeline = shared.pipeline.clone();
+    let Some(viewer) = win.viewer_mut() else {
         return Task::none();
     };
 
@@ -494,7 +504,7 @@ pub(crate) fn complete_navigation(
         if offset != viewer.filmstrip_scroll_x {
             viewer.filmstrip_scroll_x = offset;
             tasks.push(iced::widget::operation::scroll_to(
-                crate::components::filmstrip::filmstrip_id(),
+                crate::components::filmstrip::filmstrip_id(window_id),
                 iced::widget::scrollable::AbsoluteOffset { x: offset, y: 0.0 },
             ));
         }
@@ -509,8 +519,8 @@ pub(crate) fn complete_navigation(
         show_filmstrip,
     ));
 
-    if app.config.show_info {
-        tasks.push(fire_exif(app));
+    if shared.config.show_info {
+        tasks.push(fire_exif(win, shared));
     }
 
     Task::batch(tasks)
@@ -547,7 +557,11 @@ mod tests {
     fn a_step_is_dropped_while_a_move_is_pending() {
         let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
         app.viewer_mut().unwrap().pending_nav = Some(1);
-        let _ = navigate(&mut app, NavTarget::Delta(Direction::Forward));
+        let _ = navigate(
+            &mut app.window,
+            &mut app.shared,
+            NavTarget::Delta(Direction::Forward),
+        );
         let v = app.viewer().unwrap();
         assert_eq!(v.nav.cursor(), 0); // never moved
         assert_eq!(v.pending_nav, Some(1)); // pending target untouched
@@ -560,8 +574,14 @@ mod tests {
         let start = files[100].clone();
         let nav = crate::nav::Nav::new(files, &start).unwrap();
         let mut app = crate::app::test_support::empty_app();
-        app.config.show_filmstrip = true;
-        let _ = open_viewer(&mut app, nav, crate::media::pipeline::Source::Fs, false);
+        app.shared.config.show_filmstrip = true;
+        let _ = open_viewer(
+            &mut app.window,
+            &mut app.shared,
+            nav,
+            crate::media::pipeline::Source::Fs,
+            false,
+        );
         let v = app.viewer().unwrap();
         // Queued thumbnails cluster on the cursor (100), never stranded at 0.
         assert!(!v.in_flight_thumbs.is_empty());
@@ -575,7 +595,7 @@ mod tests {
     fn an_absolute_jump_replaces_a_pending_target() {
         let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
         app.viewer_mut().unwrap().pending_nav = Some(1);
-        let _ = navigate(&mut app, NavTarget::Index(2));
+        let _ = navigate(&mut app.window, &mut app.shared, NavTarget::Index(2));
         // c.png isn't cached, so the pending target moves to it (latest wins).
         assert_eq!(app.viewer().unwrap().pending_nav, Some(2));
     }
@@ -584,7 +604,7 @@ mod tests {
     fn jumping_to_the_current_index_clears_the_pending_move() {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
         app.viewer_mut().unwrap().pending_nav = Some(1);
-        let _ = navigate(&mut app, NavTarget::Index(0));
+        let _ = navigate(&mut app.window, &mut app.shared, NavTarget::Index(0));
         let v = app.viewer().unwrap();
         assert_eq!(v.nav.cursor(), 0);
         assert!(v.pending_nav.is_none());
@@ -593,7 +613,11 @@ mod tests {
     #[test]
     fn a_cache_miss_holds_position_and_defers_the_move() {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
-        let _ = navigate(&mut app, NavTarget::Delta(Direction::Forward));
+        let _ = navigate(
+            &mut app.window,
+            &mut app.shared,
+            NavTarget::Delta(Direction::Forward),
+        );
         let v = app.viewer().unwrap();
         assert_eq!(v.nav.cursor(), 0); // stays put, screen never goes empty
         assert_eq!(v.pending_nav, Some(1));
@@ -603,7 +627,7 @@ mod tests {
     fn resolve_pending_waits_until_the_target_is_displayable() {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
         app.viewer_mut().unwrap().pending_nav = Some(1);
-        let _ = resolve_pending_nav(&mut app);
+        let _ = resolve_pending_nav(&mut app.window, &mut app.shared);
         let v = app.viewer().unwrap();
         assert_eq!(v.nav.cursor(), 0);
         assert_eq!(v.pending_nav, Some(1)); // still nothing to show
@@ -613,7 +637,11 @@ mod tests {
     fn a_step_moves_at_once_when_the_target_has_a_blur() {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
         crate::app::test_support::cache_thumb(&mut app, "b.png", 4, 4);
-        let _ = navigate(&mut app, NavTarget::Delta(Direction::Forward));
+        let _ = navigate(
+            &mut app.window,
+            &mut app.shared,
+            NavTarget::Delta(Direction::Forward),
+        );
         let v = app.viewer().unwrap();
         assert_eq!(v.nav.cursor(), 1); // b.png had a thumb, so we moved
         assert!(v.pending_nav.is_none());
@@ -624,7 +652,7 @@ mod tests {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
         app.viewer_mut().unwrap().pending_nav = Some(1);
         crate::app::test_support::cache_thumb(&mut app, "b.png", 4, 4);
-        let _ = resolve_pending_nav(&mut app);
+        let _ = resolve_pending_nav(&mut app.window, &mut app.shared);
         let v = app.viewer().unwrap();
         assert_eq!(v.nav.cursor(), 1);
         assert!(v.pending_nav.is_none());
@@ -635,10 +663,10 @@ mod tests {
         let names: Vec<String> = (0..100).map(|i| format!("{i:03}.png")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut app = viewing_app(&refs, 0);
-        app.config.show_filmstrip = true;
+        app.shared.config.show_filmstrip = true;
         assert_eq!(app.viewer().unwrap().filmstrip_scroll_x, 0.0);
         // Scrubbing the slider (center = true) centers the cursor.
-        let _ = scrub_to(&mut app, 50, true);
+        let _ = scrub_to(&mut app.window, &mut app.shared, 50, true);
         let expected = crate::components::filmstrip::center_offset(50, 800.0, 100);
         assert_eq!(app.viewer().unwrap().filmstrip_scroll_x, expected);
         assert!(expected > 0.0);
@@ -658,7 +686,7 @@ mod tests {
             .unwrap()
             .in_flight_thumbs
             .insert("005.png".into());
-        let _ = complete_navigation(&mut app, 90, true);
+        let _ = complete_navigation(&mut app.window, &mut app.shared, 90, true);
         // The far, stale entry is abandoned. Only the new neighborhood re-fires.
         assert!(
             !app.viewer()
@@ -678,7 +706,7 @@ mod tests {
             .in_flight_thumbs
             .insert("005.png".into());
         // Resolving a pending move (no bump) preserves the in-flight load.
-        let _ = complete_navigation(&mut app, 90, false);
+        let _ = complete_navigation(&mut app.window, &mut app.shared, 90, false);
         assert!(
             app.viewer()
                 .unwrap()

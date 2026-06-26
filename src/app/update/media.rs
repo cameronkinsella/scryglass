@@ -35,19 +35,19 @@ use crate::app::update::{
     show_loaded, show_placeholder,
 };
 use crate::app::viewer_math::compute_zoom;
-use crate::app::{App, Message as AppMessage};
+use crate::app::{Message as AppMessage, Shared, Window};
 use crate::components::filmstrip;
 use crate::config::ZoomMode;
 use crate::media::pipeline::Lane;
 
-pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
+pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) -> Task<AppMessage> {
     match message {
         Message::Loaded { path, result } => {
-            let zoom_mode = app.config.zoom_mode;
-            let viewport = app.viewport_size;
-            let depth = app.config.prefetch_depth;
-            let pipeline = app.pipeline.clone();
-            let Some(viewer) = app.viewer_mut() else {
+            let zoom_mode = shared.config.zoom_mode;
+            let viewport = win.viewport_size;
+            let depth = shared.config.prefetch_depth;
+            let pipeline = shared.pipeline.clone();
+            let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
 
@@ -68,7 +68,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                     let pinned = viewer.pinned_paths(depth);
                     viewer.cache.evict_over_budget(&pinned);
                     viewer.thumbs.evict_over_budget(&pinned);
-                    resolve_pending_nav(app)
+                    resolve_pending_nav(win, shared)
                 }
                 Ok(LoadedMedia::Animated { anim, thumb }) => {
                     if let Some(thumb) = thumb {
@@ -85,7 +85,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                     } else {
                         Task::none()
                     };
-                    Task::batch([play, resolve_pending_nav(app)])
+                    Task::batch([play, resolve_pending_nav(win, shared)])
                 }
                 Err(MediaError::Cancelled) => {
                     let pending_path = viewer
@@ -121,11 +121,11 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                         viewer.failed_thumbs.remove(&path);
                         viewer.failed_loads.remove(&path);
                         if !viewer.nav.remove(&path) {
-                            app.session = Session::Empty;
+                            win.session = Session::Empty;
                             return Task::none();
                         }
                         let cursor = viewer.nav.cursor();
-                        return complete_navigation(app, cursor, true);
+                        return complete_navigation(win, shared, cursor, true);
                     }
                     // The file exists but won't decode (a video renamed to .png,
                     // a truncated image). Remember it and show the error in place.
@@ -137,7 +137,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                     viewer.failed_loads.insert(path.clone(), message.clone());
 
                     if is_pending && let Some(index) = pending_index {
-                        return complete_navigation(app, index, false);
+                        return complete_navigation(win, shared, index, false);
                     }
                     // The current file failed in place: show the error unless a
                     // good image for it is already on screen.
@@ -157,12 +157,12 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             urgency,
             result,
         } => {
-            let zoom_mode = app.config.zoom_mode;
-            let viewport = app.viewport_size;
-            let window_w = app.window_size.width;
-            let show_filmstrip = app.config.show_filmstrip;
-            let pipeline = app.pipeline.clone();
-            let Some(viewer) = app.viewer_mut() else {
+            let zoom_mode = shared.config.zoom_mode;
+            let viewport = win.viewport_size;
+            let window_w = win.window_size.width;
+            let show_filmstrip = shared.config.show_filmstrip;
+            let pipeline = shared.pipeline.clone();
+            let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
 
@@ -190,12 +190,12 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             }
 
             let mut tasks = fire_thumbnailer(&pipeline, viewer, 1, window_w, show_filmstrip);
-            tasks.push(resolve_pending_nav(app));
+            tasks.push(resolve_pending_nav(win, shared));
             Task::batch(tasks)
         }
 
         Message::FileSizeProbed(path, size) => {
-            if let Some(viewer) = app.viewer_mut()
+            if let Some(viewer) = win.viewer_mut()
                 && viewer.nav.current() == path
             {
                 viewer.current_file_size = Some(size);
@@ -206,10 +206,11 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
         Message::SpinnerTick => Task::none(),
 
         Message::Resorted(files) => {
-            let window_w = app.window_size.width;
-            let show_filmstrip = app.config.show_filmstrip;
-            let pipeline = app.pipeline.clone();
-            let Some(viewer) = app.viewer_mut() else {
+            let window_id = win.id;
+            let window_w = win.window_size.width;
+            let show_filmstrip = shared.config.show_filmstrip;
+            let pipeline = shared.pipeline.clone();
+            let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
             viewer.nav.replace_files(files);
@@ -217,7 +218,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             if viewer.resort_to_first {
                 viewer.resort_to_first = false;
                 if viewer.nav.cursor() != 0 {
-                    return complete_navigation(app, 0, true);
+                    return complete_navigation(win, shared, 0, true);
                 }
             }
 
@@ -229,7 +230,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                     filmstrip::open_offset(viewer.nav.cursor(), window_w, viewer.nav.len());
                 viewer.filmstrip_scroll_x = offset;
                 tasks.push(iced::widget::operation::scroll_to(
-                    filmstrip::filmstrip_id(),
+                    filmstrip::filmstrip_id(window_id),
                     iced::widget::scrollable::AbsoluteOffset { x: offset, y: 0.0 },
                 ));
                 tasks.extend(fire_thumbnailer(
@@ -244,9 +245,9 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
         }
 
         Message::ViewRotated { path, baked, image } => {
-            let zoom_mode = app.config.zoom_mode;
-            let viewport = app.viewport_size;
-            let Some(viewer) = app.viewer_mut() else {
+            let zoom_mode = shared.config.zoom_mode;
+            let viewport = win.viewport_size;
+            let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
             if viewer.nav.current() != path
@@ -270,7 +271,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
         }
 
         Message::ExifLoaded(path, fields) => {
-            if let Some(viewer) = app.viewer_mut()
+            if let Some(viewer) = win.viewer_mut()
                 && viewer.nav.current() == path
             {
                 viewer.exif = Some((path, fields));
@@ -279,10 +280,14 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
         }
     }
 }
-pub(crate) fn update_anim(app: &mut App, anim_msg: AnimMessage) -> Task<AppMessage> {
-    let zoom_mode = app.config.zoom_mode;
-    let viewport = app.viewport_size;
-    let Some(viewer) = app.viewer_mut() else {
+pub(crate) fn update_anim(
+    win: &mut Window,
+    shared: &mut Shared,
+    anim_msg: AnimMessage,
+) -> Task<AppMessage> {
+    let zoom_mode = shared.config.zoom_mode;
+    let viewport = win.viewport_size;
+    let Some(viewer) = win.viewer_mut() else {
         return Task::none();
     };
 
@@ -306,7 +311,7 @@ pub(crate) fn update_anim(app: &mut App, anim_msg: AnimMessage) -> Task<AppMessa
     }
 
     // A pending move onto a GIF resolves once its decode lands.
-    Task::batch([task.map(AppMessage::Anim), resolve_pending_nav(app)])
+    Task::batch([task.map(AppMessage::Anim), resolve_pending_nav(win, shared)])
 }
 
 #[cfg(test)]
@@ -324,7 +329,8 @@ mod tests {
             .in_flight_thumbs
             .insert("a.png".into());
         let _ = update(
-            &mut app,
+            &mut app.window,
+            &mut app.shared,
             Message::ThumbLoaded {
                 path: "a.png".into(),
                 urgency: ThumbUrgency::Urgent,
@@ -340,7 +346,8 @@ mod tests {
     fn a_failed_background_thumb_is_remembered() {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
         let _ = update(
-            &mut app,
+            &mut app.window,
+            &mut app.shared,
             Message::ThumbLoaded {
                 path: "b.png".into(),
                 urgency: ThumbUrgency::Background,
@@ -363,7 +370,8 @@ mod tests {
             .in_flight_thumbs
             .insert("b.png".into());
         let _ = update(
-            &mut app,
+            &mut app.window,
+            &mut app.shared,
             Message::ThumbLoaded {
                 path: "b.png".into(),
                 urgency: ThumbUrgency::Background,
@@ -380,14 +388,22 @@ mod tests {
     #[test]
     fn file_size_probe_updates_the_current_file() {
         let mut app = viewing_app(&["a.png"], 0);
-        let _ = update(&mut app, Message::FileSizeProbed("a.png".into(), 4096));
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::FileSizeProbed("a.png".into(), 4096),
+        );
         assert_eq!(app.viewer().unwrap().current_file_size, Some(4096));
     }
 
     #[test]
     fn a_stale_file_size_probe_is_ignored() {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
-        let _ = update(&mut app, Message::FileSizeProbed("b.png".into(), 4096));
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::FileSizeProbed("b.png".into(), 4096),
+        );
         assert_eq!(app.viewer().unwrap().current_file_size, None);
     }
 
@@ -395,7 +411,8 @@ mod tests {
     fn resort_replaces_the_file_order() {
         let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
         let _ = update(
-            &mut app,
+            &mut app.window,
+            &mut app.shared,
             Message::Resorted(vec!["c.png".into(), "b.png".into(), "a.png".into()]),
         );
         assert_eq!(app.viewer().unwrap().nav.files()[0], PathBuf::from("c.png"));
@@ -404,7 +421,7 @@ mod tests {
     #[test]
     fn spinner_tick_changes_nothing() {
         let mut app = viewing_app(&["a.png"], 0);
-        let _ = update(&mut app, Message::SpinnerTick);
+        let _ = update(&mut app.window, &mut app.shared, Message::SpinnerTick);
         assert_eq!(app.viewer().unwrap().nav.cursor(), 0);
     }
 
@@ -435,7 +452,8 @@ mod tests {
         }
 
         let _ = update(
-            &mut app,
+            &mut app.window,
+            &mut app.shared,
             Message::Loaded {
                 path: b.clone(),
                 result: Err(crate::media::MediaError::Decode("bad".into())),

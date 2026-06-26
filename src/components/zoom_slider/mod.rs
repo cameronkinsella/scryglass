@@ -7,7 +7,7 @@
 use iced::widget::{button, column, container, mouse_area, opaque, space, text, vertical_slider};
 use iced::{Alignment, Element, Length, Padding};
 
-use crate::app::{App, Message, ViewerMessage, ZOOM_MAX, ZOOM_MIN};
+use crate::app::{Message, Shared, ViewerMessage, Window, ZOOM_MAX, ZOOM_MIN};
 use crate::components::empty;
 use crate::ui::theme;
 
@@ -18,11 +18,11 @@ const PANEL_WIDTH: f32 = 58.0;
 /// Footer strip left uncovered, so the zoom button stays live while open.
 const FOOTER_RESERVE: f32 = 26.0;
 
-pub(crate) fn view(app: &App) -> Element<'_, Message> {
-    if !app.zoom_slider_open {
+pub(crate) fn view<'a>(win: &'a Window, _shared: &'a Shared) -> Element<'a, Message> {
+    if !win.zoom_slider_open {
         return empty();
     }
-    let Some(zoom) = app
+    let Some(zoom) = win
         .viewer()
         .and_then(|v| v.displayed.original_size().map(|_| v.zoom))
     else {
@@ -115,20 +115,20 @@ mod tests {
     #[test]
     fn shows_the_zoom_percentage_when_open() {
         let mut app = viewing_app(&["a.png"], 0);
-        app.zoom_slider_open = true;
+        app.window.zoom_slider_open = true;
         {
             let v = app.viewer_mut().unwrap();
             v.displayed = DisplayedImage::Placeholder(thumb(800, 600));
             v.zoom = 0.62;
         }
-        let mut ui = simulator(view(&app));
+        let mut ui = simulator(view(&app.window, &app.shared));
         assert!(ui.find("62%").is_ok());
     }
 
     #[test]
     fn renders_nothing_when_closed() {
         let app = viewing_app(&["a.png"], 0);
-        let mut ui = simulator(view(&app));
+        let mut ui = simulator(view(&app.window, &app.shared));
         assert!(ui.find("62%").is_err());
     }
 }

@@ -31,12 +31,12 @@ use crate::app::state::Session;
 use crate::app::update::{
     complete_navigation, file_op_target, fire_delete, purge_disk_thumb, push_toast, validate_rename,
 };
-use crate::app::{App, Message as AppMessage, Modal};
+use crate::app::{Message as AppMessage, Modal, Shared, Window};
 use crate::components::empty;
 use crate::components::toasts::ToastKind;
 
-pub(crate) fn view(app: &App) -> Element<'_, AppMessage> {
-    match &app.modal {
+pub(crate) fn view<'a>(win: &'a Window, _shared: &'a Shared) -> Element<'a, AppMessage> {
+    match &win.modal {
         Some(Modal::ConfirmDelete(path)) => {
             let name = path
                 .file_name()
@@ -46,47 +46,52 @@ pub(crate) fn view(app: &App) -> Element<'_, AppMessage> {
         }
         Some(Modal::Rename { input, format }) => {
             let warning = format.and_then(|f| rename_warning(input, f));
-            widget::rename_dialog(input, warning.as_deref()).map(AppMessage::Modal)
+            widget::rename_dialog(win.id, input, warning.as_deref()).map(AppMessage::Modal)
         }
         _ => empty(),
     }
 }
 
-pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
+pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) -> Task<AppMessage> {
     match message {
         Message::RequestDelete => {
-            let target = match file_op_target(app) {
+            let target = match file_op_target(win, shared) {
                 Ok(target) => target,
                 Err(refusal) => return refusal,
             };
-            if app.config.confirm_delete {
-                app.modal = Some(Modal::ConfirmDelete(target));
+            if shared.config.confirm_delete {
+                win.modal = Some(Modal::ConfirmDelete(target));
                 Task::none()
             } else {
-                let resume = take_open_video(app, &target);
-                fire_delete(app, target, resume)
+                let resume = take_open_video(win, shared, &target);
+                fire_delete(win, shared, target, resume)
             }
         }
 
         Message::ConfirmDeleteNow => {
-            let Some(Modal::ConfirmDelete(path)) = app.modal.take() else {
+            let Some(Modal::ConfirmDelete(path)) = win.modal.take() else {
                 return Task::none();
             };
-            let resume = take_open_video(app, &path);
-            fire_delete(app, path, resume)
+            let resume = take_open_video(win, shared, &path);
+            fire_delete(win, shared, path, resume)
         }
 
         Message::DeleteFinished(path, result, resume) => match result {
             Err(e) => {
                 // Deletion failed, so put the torn-down video back as it was.
                 if let Some(resume) = resume {
-                    resume_video(app, resume, path.clone());
+                    resume_video(win, shared, resume, path.clone());
                 }
-                push_toast(app, ToastKind::Error, format!("Couldn't delete: {e}"))
+                push_toast(
+                    win,
+                    shared,
+                    ToastKind::Error,
+                    format!("Couldn't delete: {e}"),
+                )
             }
             Ok(()) => {
-                let purge = purge_disk_thumb(&app.pipeline, &path);
-                let Some(viewer) = app.viewer_mut() else {
+                let purge = purge_disk_thumb(&shared.pipeline, &path);
+                let Some(viewer) = win.viewer_mut() else {
                     return purge;
                 };
                 viewer.cache.remove(&path);
@@ -96,19 +101,20 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                 viewer.failed_loads.remove(&path);
 
                 if !viewer.nav.remove(&path) {
-                    app.session = Session::Empty;
-                    let toast = push_toast(app, ToastKind::Info, "Moved to Recycle Bin".into());
+                    win.session = Session::Empty;
+                    let toast =
+                        push_toast(win, shared, ToastKind::Info, "Moved to Recycle Bin".into());
                     return Task::batch([purge, toast]);
                 }
                 let cursor = viewer.nav.cursor();
-                let nav = complete_navigation(app, cursor, true);
-                let toast = push_toast(app, ToastKind::Info, "Moved to Recycle Bin".into());
+                let nav = complete_navigation(win, shared, cursor, true);
+                let toast = push_toast(win, shared, ToastKind::Info, "Moved to Recycle Bin".into());
                 Task::batch([purge, nav, toast])
             }
         },
 
         Message::RequestRename => {
-            let target = match file_op_target(app) {
+            let target = match file_op_target(win, shared) {
                 Ok(target) => target,
                 Err(refusal) => return refusal,
             };
@@ -119,49 +125,50 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             let format = sniff_file_format(&target);
             // Preselect the name but not the extension, so a quick retype keeps
             // the extension. Whole-field select when there's nothing to protect.
-            let id = widget::rename_input_id();
+            let id = widget::rename_input_id(win.id);
             let select = match name_stem_len(&input) {
                 Some(len) => iced::widget::operation::select_range(id.clone(), 0, len),
                 None => iced::widget::operation::select_all(id.clone()),
             };
-            app.modal = Some(Modal::Rename { input, format });
+            win.modal = Some(Modal::Rename { input, format });
             Task::batch([iced::widget::operation::focus(id), select])
         }
 
         Message::RenameInput(text) => {
-            if let Some(Modal::Rename { input, .. }) = &mut app.modal {
+            if let Some(Modal::Rename { input, .. }) = &mut win.modal {
                 *input = text;
             }
             Task::none()
         }
 
         Message::CommitRename => {
-            let Some(Modal::Rename { input, .. }) = &app.modal else {
+            let Some(Modal::Rename { input, .. }) = &win.modal else {
                 return Task::none();
             };
             let name = match validate_rename(input) {
                 Ok(name) => name,
-                Err(e) => return push_toast(app, ToastKind::Error, e),
+                Err(e) => return push_toast(win, shared, ToastKind::Error, e),
             };
-            let Some(viewer) = app.viewer() else {
+            let Some(viewer) = win.viewer() else {
                 return Task::none();
             };
             let old = viewer.nav.current().to_path_buf();
             let new = old.parent().unwrap_or(Path::new("")).join(name);
-            app.modal = None;
+            win.modal = None;
             if new == old {
                 return Task::none();
             }
             if new.exists() {
                 return push_toast(
-                    app,
+                    win,
+                    shared,
                     ToastKind::Error,
                     "a file with that name already exists".to_string(),
                 );
             }
             // Renaming the open video means FFmpeg is holding its file handle,
             // so tear the session down (remembering how to resume) first.
-            let resume = take_open_video(app, &old);
+            let resume = take_open_video(win, shared, &old);
             let (from, to) = (old.clone(), new.clone());
             Task::perform(rename_with_retry(from, to), move |result| {
                 AppMessage::Modal(Message::RenameFinished(old, new, result, resume))
@@ -172,13 +179,18 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             Err(e) => {
                 // The rename failed, so put the torn-down video back as it was.
                 if let Some(resume) = resume {
-                    resume_video(app, resume, old.clone());
+                    resume_video(win, shared, resume, old.clone());
                 }
-                push_toast(app, ToastKind::Error, format!("Couldn't rename: {e}"))
+                push_toast(
+                    win,
+                    shared,
+                    ToastKind::Error,
+                    format!("Couldn't rename: {e}"),
+                )
             }
             Ok(()) => {
-                let purge = purge_disk_thumb(&app.pipeline, &old);
-                if let Some(viewer) = app.viewer_mut() {
+                let purge = purge_disk_thumb(&shared.pipeline, &old);
+                if let Some(viewer) = win.viewer_mut() {
                     viewer.nav.rename(&old, new.clone());
                     if let Some(image) = viewer.cache.remove(&old) {
                         let cost = image.byte_cost();
@@ -209,15 +221,15 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                     // Still a video: resume it on the new file at its position.
                     RenameRefresh::Resume => {
                         if let Some(resume) = resume {
-                            resume_video(app, resume, new);
+                            resume_video(win, shared, resume, new);
                         }
                         purge
                     }
                     // The rename crossed the image/video line, so reload the
                     // current file to show or hide the player and its controls.
-                    RenameRefresh::Reload => match app.viewer().map(|v| v.nav.cursor()) {
+                    RenameRefresh::Reload => match win.viewer().map(|v| v.nav.cursor()) {
                         Some(cursor) => {
-                            Task::batch([purge, complete_navigation(app, cursor, true)])
+                            Task::batch([purge, complete_navigation(win, shared, cursor, true)])
                         }
                         None => purge,
                     },
@@ -226,15 +238,15 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             }
         },
 
-        Message::Submit => match &app.modal {
-            Some(Modal::ConfirmDelete(_)) => update(app, Message::ConfirmDeleteNow),
-            Some(Modal::Rename { .. }) => update(app, Message::CommitRename),
-            Some(Modal::Settings) => update(app, Message::Cancel),
+        Message::Submit => match &win.modal {
+            Some(Modal::ConfirmDelete(_)) => update(win, shared, Message::ConfirmDeleteNow),
+            Some(Modal::Rename { .. }) => update(win, shared, Message::CommitRename),
+            Some(Modal::Settings) => update(win, shared, Message::Cancel),
             None => Task::none(),
         },
 
         Message::Cancel => {
-            app.modal = None;
+            win.modal = None;
             Task::none()
         }
     }
@@ -258,9 +270,9 @@ async fn rename_with_retry(old: PathBuf, new: PathBuf) -> Result<(), String> {
 
 /// If `path` is the open video, drop its session (releasing the file handle)
 /// and return how to resume it once the file operation finishes.
-fn take_open_video(app: &mut App, path: &Path) -> Option<VideoResume> {
-    let hardware = app.config.hardware_decode;
-    let viewer = app.viewer_mut()?;
+fn take_open_video(win: &mut Window, shared: &mut Shared, path: &Path) -> Option<VideoResume> {
+    let hardware = shared.config.hardware_decode;
+    let viewer = win.viewer_mut()?;
     let session = viewer.video.as_ref()?;
     if session.path != *path {
         return None;
@@ -278,8 +290,8 @@ fn take_open_video(app: &mut App, path: &Path) -> Option<VideoResume> {
 }
 
 /// Reopen a torn-down video at `path` and its saved position.
-fn resume_video(app: &mut App, resume: VideoResume, path: PathBuf) {
-    let Some(viewer) = app.viewer_mut() else {
+fn resume_video(win: &mut Window, _shared: &mut Shared, resume: VideoResume, path: PathBuf) {
+    let Some(viewer) = win.viewer_mut() else {
         return;
     };
     let mut session = crate::video::VideoSession::open(
@@ -361,29 +373,35 @@ mod tests {
     #[test]
     fn rename_input_updates_the_dialog_text() {
         let mut app = empty_app();
-        app.modal = Some(Modal::Rename {
+        app.window.modal = Some(Modal::Rename {
             input: "old".into(),
             format: None,
         });
-        let _ = update(&mut app, Message::RenameInput("new".into()));
-        assert!(matches!(&app.modal, Some(Modal::Rename { input, .. }) if input.as_str() == "new"));
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::RenameInput("new".into()),
+        );
+        assert!(
+            matches!(&app.window.modal, Some(Modal::Rename { input, .. }) if input.as_str() == "new")
+        );
     }
 
     #[test]
     fn cancel_closes_the_modal() {
         let mut app = empty_app();
-        app.modal = Some(Modal::Settings);
-        let _ = update(&mut app, Message::Cancel);
-        assert!(app.modal.is_none());
+        app.window.modal = Some(Modal::Settings);
+        let _ = update(&mut app.window, &mut app.shared, Message::Cancel);
+        assert!(app.window.modal.is_none());
     }
 
     #[test]
     fn request_rename_opens_the_dialog_with_the_current_name() {
         let mut app = viewing_app(&["photo.png", "b.png"], 0);
-        app.config.read_only = false;
-        let _ = update(&mut app, Message::RequestRename);
+        app.shared.config.read_only = false;
+        let _ = update(&mut app.window, &mut app.shared, Message::RequestRename);
         assert!(
-            matches!(&app.modal, Some(Modal::Rename { input, .. }) if input.as_str() == "photo.png")
+            matches!(&app.window.modal, Some(Modal::Rename { input, .. }) if input.as_str() == "photo.png")
         );
     }
 
@@ -403,30 +421,32 @@ mod tests {
     #[test]
     fn request_delete_opens_confirmation_when_enabled() {
         let mut app = viewing_app(&["photo.png"], 0);
-        app.config.read_only = false;
-        app.config.confirm_delete = true;
-        let _ = update(&mut app, Message::RequestDelete);
-        assert!(matches!(&app.modal, Some(Modal::ConfirmDelete(p)) if p.ends_with("photo.png")));
+        app.shared.config.read_only = false;
+        app.shared.config.confirm_delete = true;
+        let _ = update(&mut app.window, &mut app.shared, Message::RequestDelete);
+        assert!(
+            matches!(&app.window.modal, Some(Modal::ConfirmDelete(p)) if p.ends_with("photo.png"))
+        );
     }
 
     #[test]
     fn submit_on_the_settings_modal_closes_it() {
         let mut app = empty_app();
-        app.modal = Some(Modal::Settings);
-        let _ = update(&mut app, Message::Submit);
-        assert!(app.modal.is_none());
+        app.window.modal = Some(Modal::Settings);
+        let _ = update(&mut app.window, &mut app.shared, Message::Submit);
+        assert!(app.window.modal.is_none());
     }
 
     #[test]
     fn committing_the_same_name_closes_without_renaming() {
         let mut app = viewing_app(&["photo.png", "b.png"], 0);
-        app.modal = Some(Modal::Rename {
+        app.window.modal = Some(Modal::Rename {
             input: "photo.png".into(),
             format: None,
         });
-        let _ = update(&mut app, Message::CommitRename);
+        let _ = update(&mut app.window, &mut app.shared, Message::CommitRename);
         // The dialog closes, and an unchanged name is a no-op (no rename task).
-        assert!(app.modal.is_none());
+        assert!(app.window.modal.is_none());
         assert_eq!(
             app.viewer().unwrap().nav.current().to_string_lossy(),
             "photo.png"
@@ -436,47 +456,49 @@ mod tests {
     #[test]
     fn committing_a_new_name_closes_the_dialog() {
         let mut app = viewing_app(&["photo.png", "b.png"], 0);
-        app.modal = Some(Modal::Rename {
+        app.window.modal = Some(Modal::Rename {
             input: "renamed.png".into(),
             format: None,
         });
-        let _ = update(&mut app, Message::CommitRename);
-        assert!(app.modal.is_none());
+        let _ = update(&mut app.window, &mut app.shared, Message::CommitRename);
+        assert!(app.window.modal.is_none());
     }
 
     #[test]
     fn request_delete_without_confirmation_skips_the_modal() {
         let mut app = viewing_app(&["a.png"], 0);
-        app.config.read_only = false;
-        app.config.confirm_delete = false;
-        let _ = update(&mut app, Message::RequestDelete);
-        assert!(app.modal.is_none());
+        app.shared.config.read_only = false;
+        app.shared.config.confirm_delete = false;
+        let _ = update(&mut app.window, &mut app.shared, Message::RequestDelete);
+        assert!(app.window.modal.is_none());
     }
 
     #[test]
     fn submit_on_confirm_delete_clears_the_modal() {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
-        app.modal = Some(Modal::ConfirmDelete("a.png".into()));
-        let _ = update(&mut app, Message::Submit);
-        assert!(app.modal.is_none());
+        app.window.modal = Some(Modal::ConfirmDelete("a.png".into()));
+        let _ = update(&mut app.window, &mut app.shared, Message::Submit);
+        assert!(app.window.modal.is_none());
     }
 
     #[tokio::test]
     async fn delete_finished_error_raises_a_toast() {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
-        let before = app.toasts.len();
+        let before = app.window.toasts.len();
         let _ = update(
-            &mut app,
+            &mut app.window,
+            &mut app.shared,
             Message::DeleteFinished("a.png".into(), Err("nope".into()), None),
         );
-        assert!(app.toasts.len() > before);
+        assert!(app.window.toasts.len() > before);
     }
 
     #[tokio::test]
     async fn delete_finished_advances_to_the_survivor() {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
         let _ = update(
-            &mut app,
+            &mut app.window,
+            &mut app.shared,
             Message::DeleteFinished("a.png".into(), Ok(()), None),
         );
         assert_eq!(
@@ -489,17 +511,19 @@ mod tests {
     async fn deleting_the_last_file_empties_the_session() {
         let mut app = viewing_app(&["only.png"], 0);
         let _ = update(
-            &mut app,
+            &mut app.window,
+            &mut app.shared,
             Message::DeleteFinished("only.png".into(), Ok(()), None),
         );
-        assert!(matches!(app.session, Session::Empty));
+        assert!(matches!(app.window.session, Session::Empty));
     }
 
     #[test]
     fn rename_finished_updates_the_navigation_entry() {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
         let _ = update(
-            &mut app,
+            &mut app.window,
+            &mut app.shared,
             Message::RenameFinished("a.png".into(), "renamed.png".into(), Ok(()), None),
         );
         assert_eq!(
@@ -517,11 +541,13 @@ mod tests {
         };
         app.viewer_mut().unwrap().video = Some(open());
         // A file op on the open video releases its session so the file unlocks.
-        assert!(take_open_video(&mut app, &path).is_some());
+        assert!(take_open_video(&mut app.window, &mut app.shared, &path).is_some());
         assert!(app.viewer().unwrap().video.is_none());
         // A different file leaves the video alone.
         app.viewer_mut().unwrap().video = Some(open());
-        assert!(take_open_video(&mut app, Path::new("other.mp4")).is_none());
+        assert!(
+            take_open_video(&mut app.window, &mut app.shared, Path::new("other.mp4")).is_none()
+        );
         assert!(app.viewer().unwrap().video.is_some());
     }
 
@@ -538,7 +564,8 @@ mod tests {
             playing: true,
         };
         let _ = update(
-            &mut app,
+            &mut app.window,
+            &mut app.shared,
             Message::DeleteFinished(path, Err("locked".into()), Some(resume)),
         );
         assert!(app.viewer().unwrap().video.is_some());
@@ -547,12 +574,13 @@ mod tests {
     #[tokio::test]
     async fn rename_finished_error_raises_a_toast() {
         let mut app = viewing_app(&["a.png"], 0);
-        let before = app.toasts.len();
+        let before = app.window.toasts.len();
         let _ = update(
-            &mut app,
+            &mut app.window,
+            &mut app.shared,
             Message::RenameFinished("a.png".into(), "b.png".into(), Err("nope".into()), None),
         );
-        assert!(app.toasts.len() > before);
+        assert!(app.window.toasts.len() > before);
     }
 
     #[test]

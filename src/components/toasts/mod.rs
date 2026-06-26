@@ -4,16 +4,16 @@ pub enum Message {
 }
 use iced::{Element, Task};
 
-use crate::app::{App, Message as AppMessage};
+use crate::app::{Message as AppMessage, Shared, Window};
 
-pub(crate) fn view(app: &App) -> Element<'_, AppMessage> {
-    widget::toast_stack(&app.toasts)
+pub(crate) fn view<'a>(win: &'a Window, _shared: &'a Shared) -> Element<'a, AppMessage> {
+    widget::toast_stack(&win.toasts)
 }
 
-pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
+pub(crate) fn update(win: &mut Window, _shared: &mut Shared, message: Message) -> Task<AppMessage> {
     match message {
         Message::Dismiss(id) => {
-            app.toasts.retain(|t| t.id != id);
+            win.toasts.retain(|t| t.id != id);
             Task::none()
         }
     }

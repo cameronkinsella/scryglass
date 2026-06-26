@@ -2,10 +2,11 @@
 //! `Nav`. The update layer holds no GPU state, so these are enough to drive
 //! messages through `update` and assert state transitions.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
-use iced::Size;
 use iced::widget::image::Handle;
+use iced::{Size, window};
 
 use crate::anim::AnimPlayer;
 use crate::app::state::{Session, Thumb, Viewer};
@@ -13,43 +14,83 @@ use crate::config::AppConfig;
 use crate::media::pipeline::{Pipeline, Source};
 use crate::nav::Nav;
 
-use super::App;
+use super::{App, Shared, Window};
 
-/// A headless App with an empty session and default config.
-pub(crate) fn empty_app() -> App {
-    App {
-        session: Session::Empty,
-        config: AppConfig::default(),
-        pipeline: Pipeline::new(None),
-        open_menu: None,
-        viewport_size: Size::new(800.0, 600.0),
-        last_cursor_pos: iced::Point::ORIGIN,
-        window_size: Size::new(800.0, 600.0),
-        context_menu_pos: None,
-        zoom_slider_open: false,
-        fullscreen: false,
-        help_open: false,
-        modal: None,
-        disk_cache_size: None,
-        associations_registered: false,
-        opening_since: None,
-        toasts: Vec::new(),
-        next_toast_id: 0,
-        #[cfg(feature = "update-check")]
-        update_status: None,
+/// A headless single-window app for tests, holding the per-window [`Window`]
+/// and the [`Shared`] state directly so component tests can drive an update
+/// fn with `&mut app.window, &mut app.shared` and assert on either half. Lift
+/// it into a real multi-window [`App`] with [`into_app`] for the few tests
+/// that exercise the top-level update/view.
+pub(crate) struct TestApp {
+    pub(crate) window: Window,
+    pub(crate) shared: Shared,
+}
+
+impl TestApp {
+    pub(crate) fn viewer(&self) -> Option<&Viewer> {
+        self.window.viewer()
+    }
+
+    pub(crate) fn viewer_mut(&mut self) -> Option<&mut Viewer> {
+        self.window.viewer_mut()
     }
 }
 
-/// A headless App viewing the given file names, cursor on `cursor`.
-pub(crate) fn viewing_app(names: &[&str], cursor: usize) -> App {
+/// A headless app with an empty session and default config.
+pub(crate) fn empty_app() -> TestApp {
+    TestApp {
+        shared: Shared {
+            config: AppConfig::default(),
+            pipeline: Pipeline::new(None),
+            disk_cache_size: None,
+            associations_registered: false,
+            #[cfg(feature = "update-check")]
+            update_status: None,
+        },
+        window: Window {
+            id: window::Id::unique(),
+            session: Session::Empty,
+            open_menu: None,
+            viewport_size: Size::new(800.0, 600.0),
+            last_cursor_pos: iced::Point::ORIGIN,
+            window_size: Size::new(800.0, 600.0),
+            context_menu_pos: None,
+            zoom_slider_open: false,
+            fullscreen: false,
+            help_open: false,
+            modal: None,
+            opening_since: None,
+            toasts: Vec::new(),
+            next_toast_id: 0,
+        },
+    }
+}
+
+/// A headless app viewing the given file names, cursor on `cursor`.
+pub(crate) fn viewing_app(names: &[&str], cursor: usize) -> TestApp {
     let files: Vec<PathBuf> = names.iter().map(PathBuf::from).collect();
     let start = files[cursor].clone();
     let nav = Nav::new(files, &start).unwrap();
     let budget = AppConfig::default().cache_budget_mb * 1024 * 1024;
     let viewer = Viewer::new(nav, Source::Fs, AnimPlayer::new(), budget);
     let mut app = empty_app();
-    app.session = Session::Viewing(Box::new(viewer));
+    app.window.session = Session::Viewing(Box::new(viewer));
     app
+}
+
+/// Lift a single-window [`TestApp`] into a real [`App`], returning the id of
+/// its one window. For tests that drive the top-level `update`/`view`.
+pub(crate) fn into_app(app: TestApp) -> (App, window::Id) {
+    let id = app.window.id;
+    let mut windows = HashMap::new();
+    windows.insert(id, app.window);
+    (
+        App {
+            shared: app.shared,
+            windows,
+        },
+        id,
+    )
 }
 
 /// A small RGBA thumbnail built from a CPU `Handle` (no GPU upload).
@@ -64,8 +105,8 @@ pub(crate) fn thumb(w: u32, h: u32) -> Thumb {
 
 /// Give `path` a cached thumbnail, so the viewer treats it as displayable
 /// (a blur is on hand) without any GPU upload.
-pub(crate) fn cache_thumb(app: &mut App, path: &str, w: u32, h: u32) {
-    if let Some(viewer) = app.viewer_mut() {
+pub(crate) fn cache_thumb(app: &mut TestApp, path: &str, w: u32, h: u32) {
+    if let Some(viewer) = app.window.viewer_mut() {
         let thumb = thumb(w, h);
         let cost = thumb.byte_cost();
         viewer.thumbs.insert(PathBuf::from(path), thumb, cost);

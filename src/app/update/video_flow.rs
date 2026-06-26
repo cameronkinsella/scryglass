@@ -14,7 +14,7 @@ use crate::media::pipeline::Source;
 
 use super::push_toast;
 use super::settings::save_config;
-use crate::app::App;
+use crate::app::{Shared, Window};
 
 /// Begin video playback for the current file: open a session directly
 /// for filesystem files, or extract the archive entry to a temp file
@@ -77,10 +77,10 @@ pub(crate) fn fire_video_extract(index: Arc<ArchiveIndex>, entry: PathBuf) -> Ta
     )
 }
 
-pub(crate) fn tick(app: &mut App) -> Task<Message> {
-    let zoom_mode = app.config.zoom_mode;
-    let viewport = app.viewport_size;
-    let Some(viewer) = app.viewer_mut() else {
+pub(crate) fn tick(win: &mut Window, shared: &mut Shared) -> Task<Message> {
+    let zoom_mode = shared.config.zoom_mode;
+    let viewport = win.viewport_size;
+    let Some(viewer) = win.viewer_mut() else {
         return Task::none();
     };
 
@@ -140,15 +140,16 @@ pub(crate) fn tick(app: &mut App) -> Task<Message> {
 }
 
 pub(crate) fn extracted(
-    app: &mut App,
+    win: &mut Window,
+    shared: &mut Shared,
     entry: PathBuf,
     result: Result<PathBuf, String>,
 ) -> Task<Message> {
-    let video_volume = app.config.video_volume;
-    let video_muted = app.config.video_muted;
-    let video_loop = app.config.video_loop;
-    let hardware = app.config.hardware_decode;
-    let Some(viewer) = app.viewer_mut() else {
+    let video_volume = shared.config.video_volume;
+    let video_muted = shared.config.video_muted;
+    let video_loop = shared.config.video_loop;
+    let hardware = shared.config.hardware_decode;
+    let Some(viewer) = win.viewer_mut() else {
         return Task::none();
     };
     if viewer.video_extracting.as_deref() == Some(&*entry) {
@@ -164,7 +165,12 @@ pub(crate) fn extracted(
     match result {
         Err(e) => {
             viewer.pending_since = None;
-            push_toast(app, ToastKind::Error, format!("Couldn't play video: {e}"))
+            push_toast(
+                win,
+                shared,
+                ToastKind::Error,
+                format!("Couldn't play video: {e}"),
+            )
         }
         Ok(temp) => {
             let mut session = crate::video::VideoSession::open(
@@ -182,8 +188,8 @@ pub(crate) fn extracted(
     }
 }
 
-pub(crate) fn play_pause(app: &mut App) -> Task<Message> {
-    if let Some(viewer) = app.viewer_mut()
+pub(crate) fn play_pause(win: &mut Window, _shared: &mut Shared) -> Task<Message> {
+    if let Some(viewer) = win.viewer_mut()
         && let Some(session) = viewer.video.as_mut()
     {
         if session.playing {
@@ -195,8 +201,8 @@ pub(crate) fn play_pause(app: &mut App) -> Task<Message> {
     Task::none()
 }
 
-pub(crate) fn seek_drag(app: &mut App, secs: f64) -> Task<Message> {
-    if let Some(viewer) = app.viewer_mut()
+pub(crate) fn seek_drag(win: &mut Window, _shared: &mut Shared, secs: f64) -> Task<Message> {
+    if let Some(viewer) = win.viewer_mut()
         && viewer.video.is_some()
     {
         viewer.video_seek_drag = Some(secs);
@@ -204,8 +210,8 @@ pub(crate) fn seek_drag(app: &mut App, secs: f64) -> Task<Message> {
     Task::none()
 }
 
-pub(crate) fn seek_release(app: &mut App) -> Task<Message> {
-    let Some(viewer) = app.viewer_mut() else {
+pub(crate) fn seek_release(win: &mut Window, _shared: &mut Shared) -> Task<Message> {
+    let Some(viewer) = win.viewer_mut() else {
         return Task::none();
     };
     let (Some(target), Some(session)) = (viewer.video_seek_drag.take(), viewer.video.as_ref())
@@ -218,8 +224,8 @@ pub(crate) fn seek_release(app: &mut App) -> Task<Message> {
 
 /// Step one frame forward (`dir` +1) or back (-1), pausing. Backward
 /// re-seeks, so it is imprecise on variable frame rates.
-pub(crate) fn step_frame(app: &mut App, dir: i32) -> Task<Message> {
-    let Some(viewer) = app.viewer_mut() else {
+pub(crate) fn step_frame(win: &mut Window, _shared: &mut Shared, dir: i32) -> Task<Message> {
+    let Some(viewer) = win.viewer_mut() else {
         return Task::none();
     };
     let Some(session) = viewer.video.as_ref() else {
@@ -238,8 +244,8 @@ pub(crate) fn step_frame(app: &mut App, dir: i32) -> Task<Message> {
     Task::none()
 }
 
-pub(crate) fn seek_by(app: &mut App, delta: f64) -> Task<Message> {
-    let Some(viewer) = app.viewer_mut() else {
+pub(crate) fn seek_by(win: &mut Window, _shared: &mut Shared, delta: f64) -> Task<Message> {
+    let Some(viewer) = win.viewer_mut() else {
         return Task::none();
     };
     let Some(session) = viewer.video.as_ref() else {
@@ -254,53 +260,53 @@ pub(crate) fn seek_by(app: &mut App, delta: f64) -> Task<Message> {
     Task::none()
 }
 
-pub(crate) fn set_volume(app: &mut App, volume: f32) -> Task<Message> {
-    app.config.video_volume = volume.clamp(0.0, 1.0);
-    app.config.video_muted = false;
-    if let Some(viewer) = app.viewer_mut()
+pub(crate) fn set_volume(win: &mut Window, shared: &mut Shared, volume: f32) -> Task<Message> {
+    shared.config.video_volume = volume.clamp(0.0, 1.0);
+    shared.config.video_muted = false;
+    if let Some(viewer) = win.viewer_mut()
         && let Some(session) = viewer.video.as_mut()
     {
         session.set_volume(volume);
     }
-    save_config(app)
+    save_config(win, shared)
 }
 
-pub(crate) fn nudge_volume(app: &mut App, delta: f32) -> Task<Message> {
-    let volume = (app.config.video_volume + delta).clamp(0.0, 1.0);
-    if let Some(viewer) = app.viewer_mut()
+pub(crate) fn nudge_volume(win: &mut Window, shared: &mut Shared, delta: f32) -> Task<Message> {
+    let volume = (shared.config.video_volume + delta).clamp(0.0, 1.0);
+    if let Some(viewer) = win.viewer_mut()
         && viewer.video.is_some()
     {
         viewer.video_controls_until = Some(Instant::now() + VIDEO_CONTROLS_TIMEOUT);
     }
-    set_volume(app, volume)
+    set_volume(win, shared, volume)
 }
 
-pub(crate) fn toggle_mute(app: &mut App) -> Task<Message> {
-    let Some(viewer) = app.viewer_mut() else {
+pub(crate) fn toggle_mute(win: &mut Window, shared: &mut Shared) -> Task<Message> {
+    let Some(viewer) = win.viewer_mut() else {
         return Task::none();
     };
     let Some(session) = viewer.video.as_mut() else {
         return Task::none();
     };
     session.toggle_mute();
-    app.config.video_muted = app
+    shared.config.video_muted = win
         .viewer()
         .and_then(|v| v.video.as_ref())
         .is_some_and(|s| s.muted);
-    save_config(app)
+    save_config(win, shared)
 }
 
-pub(crate) fn toggle_loop(app: &mut App) -> Task<Message> {
-    let Some(viewer) = app.viewer_mut() else {
+pub(crate) fn toggle_loop(win: &mut Window, shared: &mut Shared) -> Task<Message> {
+    let Some(viewer) = win.viewer_mut() else {
         return Task::none();
     };
     let Some(session) = viewer.video.as_mut() else {
         return Task::none();
     };
     session.set_looping(!session.looping());
-    app.config.video_loop = app
+    shared.config.video_loop = win
         .viewer()
         .and_then(|v| v.video.as_ref())
         .is_some_and(|s| s.looping());
-    save_config(app)
+    save_config(win, shared)
 }

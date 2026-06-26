@@ -22,39 +22,45 @@ use iced::time::Instant;
 
 use crate::app::state::Session;
 use crate::app::update::{open_path, open_viewer, push_toast};
-use crate::app::{App, Message as AppMessage, OpenMessage};
+use crate::app::{Message as AppMessage, OpenMessage, Shared, Window};
 use crate::components::toasts::ToastKind;
 use crate::config::AppConfig;
 use crate::media::pipeline::Source;
 use crate::nav::Nav;
-pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
+pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) -> Task<AppMessage> {
     match message {
         Message::FileDropped(path) => {
-            app.opening_since = Some(Instant::now());
+            win.opening_since = Some(Instant::now());
             open_path(path)
         }
 
         Message::DirectoryScanned(start_file, opened_dir, Ok(files)) => {
-            app.opening_since = None;
+            win.opening_since = None;
             match Nav::new(files, &start_file) {
-                Ok(nav) => open_viewer(app, nav, Source::Fs, opened_dir),
-                Err(e) => push_toast(app, ToastKind::Error, format!("Couldn't open: {e}")),
+                Ok(nav) => open_viewer(win, shared, nav, Source::Fs, opened_dir),
+                Err(e) => push_toast(win, shared, ToastKind::Error, format!("Couldn't open: {e}")),
             }
         }
 
         Message::DirectoryScanned(_start_file, _opened_dir, Err(err)) => {
-            app.opening_since = None;
-            push_toast(app, ToastKind::Error, format!("Couldn't open: {err}"))
+            win.opening_since = None;
+            push_toast(
+                win,
+                shared,
+                ToastKind::Error,
+                format!("Couldn't open: {err}"),
+            )
         }
 
         Message::ArchiveScanned(archive_path, Ok(index)) => {
-            app.opening_since = None;
+            win.opening_since = None;
             let entries = index.image_entries();
             let start = entries.first().cloned();
             match start.and_then(|s| Nav::new(entries, &s).ok()) {
-                Some(nav) => open_viewer(app, nav, Source::Archive(index), true),
+                Some(nav) => open_viewer(win, shared, nav, Source::Archive(index), true),
                 None => push_toast(
-                    app,
+                    win,
+                    shared,
                     ToastKind::Error,
                     format!(
                         "{}: archive contains no supported images",
@@ -68,16 +74,17 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
         }
 
         Message::ArchiveScanned(_archive_path, Err(err)) => {
-            app.opening_since = None;
+            win.opening_since = None;
             push_toast(
-                app,
+                win,
+                shared,
                 ToastKind::Error,
                 format!("Couldn't open archive: {err}"),
             )
         }
 
         Message::OpenFile => {
-            app.open_menu = None;
+            win.open_menu = None;
             let extensions = AppConfig::supported_extensions()
                 .iter()
                 .map(|s| s.to_string())
@@ -102,18 +109,24 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
         }
 
         Message::FileDialogResult(Some(path)) => {
-            app.opening_since = Some(Instant::now());
+            win.opening_since = Some(Instant::now());
             open_path(path)
         }
         Message::FileDialogResult(None) => Task::none(),
 
         Message::CloseFile => {
-            app.open_menu = None;
-            app.session = Session::Empty;
+            win.open_menu = None;
+            win.session = Session::Empty;
             Task::none()
         }
 
-        Message::Quit => iced::exit(),
+        // Close this window, saving its state. The process exits when the
+        // last window closes (see the daemon's Closed handler).
+        Message::Quit => {
+            let id = win.id;
+            let config = shared.config.clone();
+            Task::future(config.save()).then(move |_| iced::window::close(id))
+        }
 
         Message::DirectoryChanged(dir) => Task::perform(
             async move {
@@ -127,7 +140,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             let Some(files) = files else {
                 return Task::none();
             };
-            let Some(viewer) = app.viewer_mut() else {
+            let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
             // Ignore a scan that arrives after navigating to another folder.
@@ -153,42 +166,54 @@ mod tests {
     #[test]
     fn close_file_empties_the_session() {
         let mut app = viewing_app(&["a.png"], 0);
-        let _ = update(&mut app, Message::CloseFile);
-        assert!(matches!(app.session, Session::Empty));
+        let _ = update(&mut app.window, &mut app.shared, Message::CloseFile);
+        assert!(matches!(app.window.session, Session::Empty));
     }
 
     #[test]
     fn cancelled_file_dialog_is_a_noop() {
         let mut app = empty_app();
-        let _ = update(&mut app, Message::FileDialogResult(None));
-        assert!(app.opening_since.is_none());
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::FileDialogResult(None),
+        );
+        assert!(app.window.opening_since.is_none());
     }
 
     #[test]
     fn open_file_closes_the_menu_and_builds_a_dialog() {
         let mut app = empty_app();
-        let _ = update(&mut app, Message::OpenFile);
-        assert!(app.open_menu.is_none());
+        let _ = update(&mut app.window, &mut app.shared, Message::OpenFile);
+        assert!(app.window.open_menu.is_none());
     }
 
     #[test]
     fn quit_builds_an_exit_task() {
         let mut app = empty_app();
-        let _ = update(&mut app, Message::Quit);
+        let _ = update(&mut app.window, &mut app.shared, Message::Quit);
     }
 
     #[tokio::test]
     async fn file_dropped_marks_the_open_as_in_flight() {
         let mut app = empty_app();
-        let _ = update(&mut app, Message::FileDropped("x.png".into()));
-        assert!(app.opening_since.is_some());
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::FileDropped("x.png".into()),
+        );
+        assert!(app.window.opening_since.is_some());
     }
 
     #[tokio::test]
     async fn picked_file_marks_the_open_as_in_flight() {
         let mut app = empty_app();
-        let _ = update(&mut app, Message::FileDialogResult(Some("x.png".into())));
-        assert!(app.opening_since.is_some());
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::FileDialogResult(Some("x.png".into())),
+        );
+        assert!(app.window.opening_since.is_some());
     }
 
     #[test]
@@ -201,13 +226,15 @@ mod tests {
             PathBuf::from("c.png"),
         ];
         let _ = update(
-            &mut app,
+            &mut app.window,
+            &mut app.shared,
             Message::DirectoryRescanned(PathBuf::from(""), Some(files)),
         );
         assert_eq!(app.viewer().unwrap().nav.files().len(), 3);
         // A scan for a different directory is ignored.
         let _ = update(
-            &mut app,
+            &mut app.window,
+            &mut app.shared,
             Message::DirectoryRescanned(PathBuf::from("elsewhere"), Some(vec![PathBuf::from("z")])),
         );
         assert_eq!(app.viewer().unwrap().nav.files().len(), 3);
@@ -216,39 +243,42 @@ mod tests {
     #[tokio::test]
     async fn directory_scanned_opens_a_viewer() {
         let mut app = empty_app();
-        app.opening_since = Some(iced::time::Instant::now());
+        app.window.opening_since = Some(iced::time::Instant::now());
         let files = vec![PathBuf::from("a.png"), PathBuf::from("b.png")];
         let _ = update(
-            &mut app,
+            &mut app.window,
+            &mut app.shared,
             Message::DirectoryScanned("a.png".into(), true, Ok(files)),
         );
-        assert!(app.opening_since.is_none());
+        assert!(app.window.opening_since.is_none());
         assert!(app.viewer().is_some());
     }
 
     #[tokio::test]
     async fn directory_scan_error_clears_progress_and_toasts() {
         let mut app = empty_app();
-        app.opening_since = Some(iced::time::Instant::now());
-        let before = app.toasts.len();
+        app.window.opening_since = Some(iced::time::Instant::now());
+        let before = app.window.toasts.len();
         let _ = update(
-            &mut app,
+            &mut app.window,
+            &mut app.shared,
             Message::DirectoryScanned("a.png".into(), true, Err("nope".into())),
         );
-        assert!(app.opening_since.is_none());
-        assert!(app.toasts.len() > before);
+        assert!(app.window.opening_since.is_none());
+        assert!(app.window.toasts.len() > before);
     }
 
     #[tokio::test]
     async fn archive_scan_error_clears_progress_and_toasts() {
         let mut app = empty_app();
-        app.opening_since = Some(iced::time::Instant::now());
-        let before = app.toasts.len();
+        app.window.opening_since = Some(iced::time::Instant::now());
+        let before = app.window.toasts.len();
         let _ = update(
-            &mut app,
+            &mut app.window,
+            &mut app.shared,
             Message::ArchiveScanned("a.zip".into(), Err("bad".into())),
         );
-        assert!(app.opening_since.is_none());
-        assert!(app.toasts.len() > before);
+        assert!(app.window.opening_since.is_none());
+        assert!(app.window.toasts.len() > before);
     }
 }

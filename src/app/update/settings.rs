@@ -1,12 +1,12 @@
 use iced::Task;
 
-use crate::app::{App, Message, SettingsMessage};
+use crate::app::{Message, SettingsMessage, Shared, Window};
 use crate::media::pipeline::Pipeline;
 
 /// Persist the current config in the background. Saving is fire-and-forget:
 /// the viewer must never wait on it.
-pub(crate) fn save_config(app: &App) -> Task<Message> {
-    Task::future(app.config.clone().save()).discard()
+pub(crate) fn save_config(_win: &Window, shared: &Shared) -> Task<Message> {
+    Task::future(shared.config.clone().save()).discard()
 }
 
 /// Measure the disk thumbnail store, off-thread.
@@ -33,7 +33,7 @@ mod tests {
     #[test]
     fn save_and_probe_build_background_tasks() {
         let app = empty_app();
-        let _ = save_config(&app);
-        let _ = probe_disk_cache_size(&app.pipeline);
+        let _ = save_config(&app.window, &app.shared);
+        let _ = probe_disk_cache_size(&app.shared.pipeline);
     }
 }

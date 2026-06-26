@@ -117,6 +117,7 @@ pub fn keep_visible_offset(scroll_x: f32, cursor: usize, viewport_w: f32, len: u
 
 /// Render the filmstrip: a virtualized, horizontally scrollable thumbnail row.
 pub fn filmstrip<'a>(
+    window: iced::window::Id,
     files: &'a [PathBuf],
     cursor: usize,
     thumbs: &'a ImageCache<Thumb>,
@@ -209,7 +210,7 @@ pub fn filmstrip<'a>(
         .direction(scrollable::Direction::Horizontal(
             scrollable::Scrollbar::new().width(4).scroller_width(4),
         ))
-        .id(filmstrip_id())
+        .id(filmstrip_id(window))
         .on_scroll(|viewport| FilmstripMessage::Scrolled(viewport.absolute_offset().x))
         .width(Length::Fill);
 
@@ -233,9 +234,10 @@ pub fn filmstrip<'a>(
         .into()
 }
 
-/// Stable widget ID for the filmstrip scrollable (for programmatic scrolling).
-pub fn filmstrip_id() -> iced::widget::Id {
-    iced::widget::Id::new("filmstrip_scroll")
+/// Per-window widget ID for the filmstrip scrollable (for programmatic
+/// scrolling). Keyed by the window so an operation only scrolls its own strip.
+pub fn filmstrip_id(window: iced::window::Id) -> iced::widget::Id {
+    iced::widget::Id::from(format!("filmstrip_scroll-{window:?}"))
 }
 
 #[cfg(test)]

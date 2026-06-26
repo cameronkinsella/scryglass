@@ -11,13 +11,13 @@ use iced::Task;
 
 use crate::app::state::SliderDrag;
 use crate::app::update::{NavTarget, complete_navigation, navigate, scrub_to};
-use crate::app::{App, Message as AppMessage};
+use crate::app::{Message as AppMessage, Shared, Window};
 
 /// How long the slider must rest on an off-screen image before it loads.
 const DWELL: Duration = Duration::from_millis(200);
 
-pub(crate) fn view(app: &App) -> Element<'_, AppMessage> {
-    let Some(viewer) = app.viewer() else {
+pub(crate) fn view<'a>(win: &'a Window, _shared: &'a Shared) -> Element<'a, AppMessage> {
+    let Some(viewer) = win.viewer() else {
         return iced::widget::row![].into();
     };
 
@@ -29,10 +29,10 @@ pub(crate) fn view(app: &App) -> Element<'_, AppMessage> {
     widget::nav_slider(value, viewer.nav.len()).map(AppMessage::NavSlider)
 }
 
-pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
+pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) -> Task<AppMessage> {
     match message {
         Message::Changed(index) => {
-            let Some(viewer) = app.viewer_mut() else {
+            let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
             let index = index.min(viewer.nav.len().saturating_sub(1));
@@ -58,7 +58,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             // sharp image loads on the dwell or on release. The slider centers
             // the cursor in the filmstrip.
             let scrub = if index != cursor {
-                scrub_to(app, index, true)
+                scrub_to(win, shared, index, true)
             } else {
                 Task::none()
             };
@@ -72,7 +72,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
         // A dwell check came due: load the rested image, or reschedule if the
         // slider has moved since the timer was armed.
         Message::DwellCheck => {
-            let Some(viewer) = app.viewer_mut() else {
+            let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
             viewer.dwell_pending = false;
@@ -90,14 +90,14 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             }
             // Load it: in place if the scrub already moved here, else navigate.
             if viewer.nav.cursor() == target {
-                complete_navigation(app, target, true)
+                complete_navigation(win, shared, target, true)
             } else {
-                navigate(app, NavTarget::Index(target))
+                navigate(win, shared, NavTarget::Index(target))
             }
         }
 
         Message::Released => {
-            let Some(viewer) = app.viewer_mut() else {
+            let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
             viewer.dwell_pending = false;
@@ -105,9 +105,9 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                 return Task::none();
             };
             if drag.target == viewer.nav.cursor() {
-                complete_navigation(app, drag.target, true)
+                complete_navigation(win, shared, drag.target, true)
             } else {
-                navigate(app, NavTarget::Index(drag.target))
+                navigate(win, shared, NavTarget::Index(drag.target))
             }
         }
     }
@@ -134,7 +134,7 @@ mod tests {
     #[test]
     fn changed_sets_a_clamped_drag_target() {
         let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
-        let _ = update(&mut app, Message::Changed(99));
+        let _ = update(&mut app.window, &mut app.shared, Message::Changed(99));
         let drag = app
             .viewer()
             .unwrap()
@@ -146,10 +146,10 @@ mod tests {
     #[test]
     fn releasing_consumes_the_drag_and_keeps_the_cursor() {
         let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
-        let _ = update(&mut app, Message::Changed(2));
+        let _ = update(&mut app.window, &mut app.shared, Message::Changed(2));
         // The scrub moves the cursor immediately, even with no thumbnail.
         assert_eq!(app.viewer().unwrap().nav.cursor(), 2);
-        let _ = update(&mut app, Message::Released);
+        let _ = update(&mut app.window, &mut app.shared, Message::Released);
         let viewer = app.viewer().unwrap();
         assert!(viewer.slider_drag.is_none());
         assert_eq!(viewer.nav.cursor(), 2);
@@ -159,7 +159,7 @@ mod tests {
     async fn changed_to_a_displayable_target_scrubs_live() {
         let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
         cache_thumb(&mut app, "b.png", 8, 8);
-        let _ = update(&mut app, Message::Changed(1));
+        let _ = update(&mut app.window, &mut app.shared, Message::Changed(1));
         // The cursor follows the slider immediately, showing the cached blur.
         assert_eq!(app.viewer().unwrap().nav.cursor(), 1);
     }
@@ -170,7 +170,7 @@ mod tests {
         // A thumbnail makes it displayable (a blur shows), but the sharp image
         // still isn't loaded, so the dwell must arm to fetch it.
         cache_thumb(&mut app, "b.png", 8, 8);
-        let _ = update(&mut app, Message::Changed(1));
+        let _ = update(&mut app.window, &mut app.shared, Message::Changed(1));
         assert!(app.viewer().unwrap().dwell_pending);
     }
 
@@ -187,7 +187,7 @@ mod tests {
     fn a_rested_target_loads_on_the_dwell_check() {
         let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
         app.viewer_mut().unwrap().slider_drag = Some(drag_at(2, true));
-        let _ = update(&mut app, Message::DwellCheck);
+        let _ = update(&mut app.window, &mut app.shared, Message::DwellCheck);
         assert_eq!(app.viewer().unwrap().pending_nav, Some(2));
     }
 
@@ -195,7 +195,7 @@ mod tests {
     fn a_brief_rest_reschedules_instead_of_loading() {
         let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
         app.viewer_mut().unwrap().slider_drag = Some(drag_at(2, false));
-        let _ = update(&mut app, Message::DwellCheck);
+        let _ = update(&mut app.window, &mut app.shared, Message::DwellCheck);
         let viewer = app.viewer().unwrap();
         assert_eq!(viewer.pending_nav, None);
         assert!(viewer.dwell_pending); // re-armed for the remaining time
@@ -211,7 +211,7 @@ mod tests {
             .unwrap()
             .failed_loads
             .insert("c.png".into(), "x".into());
-        let _ = update(&mut app, Message::DwellCheck);
+        let _ = update(&mut app.window, &mut app.shared, Message::DwellCheck);
         let viewer = app.viewer().unwrap();
         assert_eq!(viewer.pending_nav, None);
         assert!(!viewer.dwell_pending);
@@ -220,8 +220,8 @@ mod tests {
     #[tokio::test]
     async fn released_on_the_current_index_completes_in_place() {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
-        let _ = update(&mut app, Message::Changed(0));
-        let _ = update(&mut app, Message::Released);
+        let _ = update(&mut app.window, &mut app.shared, Message::Changed(0));
+        let _ = update(&mut app.window, &mut app.shared, Message::Released);
         assert!(app.viewer().unwrap().slider_drag.is_none());
     }
 
@@ -233,6 +233,6 @@ mod tests {
             target: 1,
             since: iced::time::Instant::now(),
         });
-        let _ = simulator(view(&app));
+        let _ = simulator(view(&app.window, &app.shared));
     }
 }

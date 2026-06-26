@@ -45,29 +45,31 @@ use crate::app::update::{
 use crate::app::viewer_math::{
     clamp_pan, compute_zoom, nudge_zoom_percent, pan_for_zoom_toward_cursor,
 };
-use crate::app::{App, Message as AppMessage, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, recalc_viewport};
+use crate::app::{
+    Message as AppMessage, Shared, Window, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, recalc_viewport,
+};
 
-pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
+pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) -> Task<AppMessage> {
     match message {
         Message::Next => {
-            let Some(viewer) = app.viewer_mut() else {
+            let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
             viewer.held_direction = Some((Direction::Forward, Instant::now()));
-            navigate(app, NavTarget::Delta(Direction::Forward))
+            navigate(win, shared, NavTarget::Delta(Direction::Forward))
         }
         Message::Prev => {
-            let Some(viewer) = app.viewer_mut() else {
+            let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
             viewer.held_direction = Some((Direction::Backward, Instant::now()));
-            navigate(app, NavTarget::Delta(Direction::Backward))
+            navigate(win, shared, NavTarget::Delta(Direction::Backward))
         }
         // A held key scrubs at the repeat rate: the cursor advances no matter
         // what's loaded, showing each frame's blur or a spinner. The sharp
         // image loads once the key is released.
         Message::NextRepeat => {
-            let Some(viewer) = app.viewer_mut() else {
+            let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
             let past = viewer
@@ -79,10 +81,10 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                 return Task::none();
             }
             let next = (viewer.nav.cursor() + 1) % len;
-            scrub_to(app, next, false)
+            scrub_to(win, shared, next, false)
         }
         Message::PrevRepeat => {
-            let Some(viewer) = app.viewer_mut() else {
+            let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
             let past = viewer
@@ -94,56 +96,60 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                 return Task::none();
             }
             let prev = (viewer.nav.cursor() + len - 1) % len;
-            scrub_to(app, prev, false)
+            scrub_to(win, shared, prev, false)
         }
-        Message::First => navigate(app, NavTarget::Index(0)),
+        Message::First => navigate(win, shared, NavTarget::Index(0)),
         Message::Last => {
-            let Some(viewer) = app.viewer() else {
+            let Some(viewer) = win.viewer() else {
                 return Task::none();
             };
-            navigate(app, NavTarget::Index(viewer.nav.len().saturating_sub(1)))
+            navigate(
+                win,
+                shared,
+                NavTarget::Index(viewer.nav.len().saturating_sub(1)),
+            )
         }
         Message::ToggleFullscreen => {
-            app.fullscreen = !app.fullscreen;
-            recalc_viewport(app);
-            let mode = if app.fullscreen {
+            win.fullscreen = !win.fullscreen;
+            recalc_viewport(win, shared);
+            let mode = if win.fullscreen {
                 iced::window::Mode::Fullscreen
             } else {
                 iced::window::Mode::Windowed
             };
-            iced::window::latest().and_then(move |id| iced::window::set_mode(id, mode))
+            iced::window::set_mode(win.id, mode)
         }
         Message::Escape => {
-            if app.modal.is_some() {
-                app.modal = None;
+            if win.modal.is_some() {
+                win.modal = None;
                 return Task::none();
             }
-            if app.zoom_slider_open {
-                app.zoom_slider_open = false;
+            if win.zoom_slider_open {
+                win.zoom_slider_open = false;
                 return Task::none();
             }
-            if app.help_open {
-                app.help_open = false;
+            if win.help_open {
+                win.help_open = false;
                 return Task::none();
             }
-            if app.fullscreen {
-                return update(app, Message::ToggleFullscreen);
+            if win.fullscreen {
+                return update(win, shared, Message::ToggleFullscreen);
             }
-            app.open_menu = None;
-            app.context_menu_pos = None;
+            win.open_menu = None;
+            win.context_menu_pos = None;
             Task::none()
         }
-        Message::NextReleased => release_hold(app, Direction::Forward),
-        Message::PrevReleased => release_hold(app, Direction::Backward),
+        Message::NextReleased => release_hold(win, shared, Direction::Forward),
+        Message::PrevReleased => release_hold(win, shared, Direction::Backward),
         Message::ScrollZoom(delta_y) => {
-            let viewport = app.viewport_size;
-            let cursor = app.last_cursor_pos;
-            let toolbar_offset = if app.config.show_toolbar {
+            let viewport = win.viewport_size;
+            let cursor = win.last_cursor_pos;
+            let toolbar_offset = if shared.config.show_toolbar {
                 crate::app::TOOLBAR_HEIGHT
             } else {
                 0.0
             };
-            let Some(viewer) = app.viewer_mut() else {
+            let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
             let old = viewer.zoom;
@@ -171,8 +177,8 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             Task::none()
         }
         Message::ZoomStep(direction) => {
-            let viewport = app.viewport_size;
-            let Some(viewer) = app.viewer_mut() else {
+            let viewport = win.viewport_size;
+            let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
             let old = viewer.zoom;
@@ -196,8 +202,8 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             Task::none()
         }
         Message::ZoomActual => {
-            let viewport = app.viewport_size;
-            let Some(viewer) = app.viewer_mut() else {
+            let viewport = win.viewport_size;
+            let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
             viewer.zoom = 1.0;
@@ -210,9 +216,9 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             Task::none()
         }
         Message::ResetZoom => {
-            let zoom_mode = app.config.zoom_mode;
-            let viewport = app.viewport_size;
-            let Some(viewer) = app.viewer_mut() else {
+            let zoom_mode = shared.config.zoom_mode;
+            let viewport = win.viewport_size;
+            let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
             viewer.manual_zoom = false;
@@ -223,34 +229,38 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             Task::none()
         }
         Message::SetZoom(zoom) => {
-            apply_zoom(app, zoom);
+            apply_zoom(win, shared, zoom);
             Task::none()
         }
         Message::ToggleZoomSlider => {
-            if app.zoom_slider_open {
-                app.zoom_slider_open = false;
-            } else if app
+            if win.zoom_slider_open {
+                win.zoom_slider_open = false;
+            } else if win
                 .viewer()
                 .and_then(|v| v.displayed.original_size())
                 .is_some()
             {
-                app.zoom_slider_open = true;
+                win.zoom_slider_open = true;
             }
             Task::none()
         }
         Message::CloseZoomSlider => {
-            app.zoom_slider_open = false;
+            win.zoom_slider_open = false;
             Task::none()
         }
         Message::NudgeZoom(dir) => {
-            if let Some(zoom) = app.viewer().map(|v| v.zoom) {
-                apply_zoom(app, nudge_zoom_percent(zoom, dir, ZOOM_MIN, ZOOM_MAX));
+            if let Some(zoom) = win.viewer().map(|v| v.zoom) {
+                apply_zoom(
+                    win,
+                    shared,
+                    nudge_zoom_percent(zoom, dir, ZOOM_MIN, ZOOM_MAX),
+                );
             }
             Task::none()
         }
         Message::DragStart => {
-            let cursor = app.last_cursor_pos;
-            let Some(viewer) = app.viewer_mut() else {
+            let cursor = win.last_cursor_pos;
+            let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
             viewer.drag = Some(DragState {
@@ -260,9 +270,9 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             Task::none()
         }
         Message::DragMove(pos) => {
-            app.last_cursor_pos = pos;
-            let viewport = app.viewport_size;
-            if let Some(viewer) = app.viewer_mut() {
+            win.last_cursor_pos = pos;
+            let viewport = win.viewport_size;
+            if let Some(viewer) = win.viewer_mut() {
                 if viewer.video.is_some() {
                     viewer.video_controls_until =
                         Some(Instant::now() + crate::app::VIDEO_CONTROLS_TIMEOUT);
@@ -281,19 +291,19 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             Task::none()
         }
         Message::CursorLeft => {
-            if let Some(viewer) = app.viewer_mut() {
+            if let Some(viewer) = win.viewer_mut() {
                 viewer.video_controls_until = None;
             }
             Task::none()
         }
         Message::DragEnd => {
-            if let Some(viewer) = app.viewer_mut() {
+            if let Some(viewer) = win.viewer_mut() {
                 viewer.drag = None;
             }
-            end_edge_hold(app)
+            end_edge_hold(win, shared)
         }
         Message::EdgeEnter(dir) => {
-            if let Some(viewer) = app.viewer_mut() {
+            if let Some(viewer) = win.viewer_mut() {
                 viewer.edge_hover = Some(dir);
             }
             Task::none()
@@ -301,14 +311,14 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
         // Leaving the strip ends the hold like a release, so it can't resume
         // when the cursor wanders back in. A fresh press is needed.
         Message::EdgeExit => {
-            if let Some(viewer) = app.viewer_mut() {
+            if let Some(viewer) = win.viewer_mut() {
                 viewer.edge_hover = None;
             }
-            end_edge_hold(app)
+            end_edge_hold(win, shared)
         }
         // Reuse the keyboard step, with edge_held arming the repeat timer.
         Message::EdgePress(dir) => {
-            let Some(viewer) = app.viewer_mut() else {
+            let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
             viewer.edge_held = Some(dir);
@@ -316,20 +326,20 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
                 Direction::Forward => Message::Next,
                 Direction::Backward => Message::Prev,
             };
-            update(app, step)
+            update(win, shared, step)
         }
         Message::EdgeRepeat => {
-            let Some(dir) = app.viewer().and_then(|v| v.edge_held) else {
+            let Some(dir) = win.viewer().and_then(|v| v.edge_held) else {
                 return Task::none();
             };
             let repeat = match dir {
                 Direction::Forward => Message::NextRepeat,
                 Direction::Backward => Message::PrevRepeat,
             };
-            update(app, repeat)
+            update(win, shared, repeat)
         }
         Message::Rotate(turns) => {
-            let Some(viewer) = app.viewer_mut() else {
+            let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
             if !matches!(viewer.displayed, DisplayedImage::Full { .. }) {
@@ -339,30 +349,30 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             fire_rotate(viewer)
         }
         Message::ToggleCheckerboard => {
-            app.config.show_checkerboard = !app.config.show_checkerboard;
-            save_config(app)
+            shared.config.show_checkerboard = !shared.config.show_checkerboard;
+            save_config(win, shared)
         }
         Message::ToggleHelp => {
-            app.help_open = !app.help_open;
+            win.help_open = !win.help_open;
             Task::none()
         }
         Message::ToggleInfo => {
-            app.config.show_info = !app.config.show_info;
-            recalc_viewport(app);
-            let probe = if app.config.show_info {
-                fire_exif(app)
+            shared.config.show_info = !shared.config.show_info;
+            recalc_viewport(win, shared);
+            let probe = if shared.config.show_info {
+                fire_exif(win, shared)
             } else {
                 Task::none()
             };
-            Task::batch([save_config(app), probe])
+            Task::batch([save_config(win, shared), probe])
         }
     }
 }
 
 /// Set an absolute zoom factor, zooming toward the viewport center.
-fn apply_zoom(app: &mut App, zoom: f32) {
-    let viewport = app.viewport_size;
-    let Some(viewer) = app.viewer_mut() else {
+fn apply_zoom(win: &mut Window, _shared: &mut Shared, zoom: f32) {
+    let viewport = win.viewport_size;
+    let Some(viewer) = win.viewer_mut() else {
         return;
     };
     let old = viewer.zoom;
@@ -382,9 +392,9 @@ fn apply_zoom(app: &mut App, zoom: f32) {
 
 /// On releasing a held navigation key, load the frame the scrub landed on. A
 /// quick tap (under the hold threshold) never scrubbed, so leave it be.
-fn release_hold(app: &mut App, dir: Direction) -> Task<AppMessage> {
+fn release_hold(win: &mut Window, shared: &mut Shared, dir: Direction) -> Task<AppMessage> {
     let mut was_hold = false;
-    if let Some(viewer) = app.viewer_mut()
+    if let Some(viewer) = win.viewer_mut()
         && viewer.held_direction.is_some_and(|(d, _)| d == dir)
     {
         was_hold = viewer
@@ -395,22 +405,22 @@ fn release_hold(app: &mut App, dir: Direction) -> Task<AppMessage> {
     if !was_hold {
         return Task::none();
     }
-    match app.viewer().map(|v| v.nav.cursor()) {
-        Some(cursor) => complete_navigation(app, cursor, true),
+    match win.viewer().map(|v| v.nav.cursor()) {
+        Some(cursor) => complete_navigation(win, shared, cursor, true),
         None => Task::none(),
     }
 }
 
 /// End an active mouse edge-hold (the button came up or the cursor left the
 /// strip), committing the frame it scrubbed to.
-fn end_edge_hold(app: &mut App) -> Task<AppMessage> {
-    let Some(dir) = app.viewer().and_then(|v| v.edge_held) else {
+fn end_edge_hold(win: &mut Window, shared: &mut Shared) -> Task<AppMessage> {
+    let Some(dir) = win.viewer().and_then(|v| v.edge_held) else {
         return Task::none();
     };
-    if let Some(viewer) = app.viewer_mut() {
+    if let Some(viewer) = win.viewer_mut() {
         viewer.edge_held = None;
     }
-    release_hold(app, dir)
+    release_hold(win, shared, dir)
 }
 
 #[cfg(test)]
@@ -418,9 +428,9 @@ mod tests {
     use super::*;
     use crate::app::Modal;
     use crate::app::state::Viewer;
-    use crate::app::test_support::{empty_app, viewing_app};
+    use crate::app::test_support::{TestApp, empty_app, viewing_app};
 
-    fn viewer(app: &App) -> &Viewer {
+    fn viewer(app: &TestApp) -> &Viewer {
         app.viewer().unwrap()
     }
 
@@ -428,7 +438,7 @@ mod tests {
     fn zoom_actual_sets_full_size_and_marks_manual() {
         let mut app = viewing_app(&["a.png"], 0);
         app.viewer_mut().unwrap().zoom = 0.5;
-        let _ = update(&mut app, Message::ZoomActual);
+        let _ = update(&mut app.window, &mut app.shared, Message::ZoomActual);
         assert_eq!(viewer(&app).zoom, 1.0);
         assert!(viewer(&app).manual_zoom);
     }
@@ -437,9 +447,9 @@ mod tests {
     fn zoom_step_scales_in_then_back_out() {
         let mut app = viewing_app(&["a.png"], 0);
         app.viewer_mut().unwrap().zoom = 1.0;
-        let _ = update(&mut app, Message::ZoomStep(1));
+        let _ = update(&mut app.window, &mut app.shared, Message::ZoomStep(1));
         assert!((viewer(&app).zoom - ZOOM_STEP).abs() < 1e-5);
-        let _ = update(&mut app, Message::ZoomStep(-1));
+        let _ = update(&mut app.window, &mut app.shared, Message::ZoomStep(-1));
         assert!((viewer(&app).zoom - 1.0).abs() < 1e-5);
         assert!(viewer(&app).manual_zoom);
     }
@@ -448,7 +458,7 @@ mod tests {
     fn zoom_step_clamps_at_the_maximum() {
         let mut app = viewing_app(&["a.png"], 0);
         app.viewer_mut().unwrap().zoom = ZOOM_MAX;
-        let _ = update(&mut app, Message::ZoomStep(1));
+        let _ = update(&mut app.window, &mut app.shared, Message::ZoomStep(1));
         assert_eq!(viewer(&app).zoom, ZOOM_MAX);
     }
 
@@ -460,7 +470,7 @@ mod tests {
             v.manual_zoom = true;
             v.pan = (40.0, -20.0);
         }
-        let _ = update(&mut app, Message::ResetZoom);
+        let _ = update(&mut app.window, &mut app.shared, Message::ResetZoom);
         assert!(!viewer(&app).manual_zoom);
         assert_eq!(viewer(&app).pan, (0.0, 0.0));
     }
@@ -470,14 +480,14 @@ mod tests {
         let mut app = viewing_app(&["a.png"], 0);
         app.viewer_mut().unwrap().video_controls_until =
             Some(Instant::now() + std::time::Duration::from_secs(5));
-        let _ = update(&mut app, Message::CursorLeft);
+        let _ = update(&mut app.window, &mut app.shared, Message::CursorLeft);
         assert!(viewer(&app).video_controls_until.is_none());
     }
 
     #[test]
     fn set_zoom_clamps_and_marks_manual() {
         let mut app = viewing_app(&["a.png"], 0);
-        let _ = update(&mut app, Message::SetZoom(999.0));
+        let _ = update(&mut app.window, &mut app.shared, Message::SetZoom(999.0));
         assert_eq!(viewer(&app).zoom, ZOOM_MAX);
         assert!(viewer(&app).manual_zoom);
     }
@@ -486,7 +496,7 @@ mod tests {
     fn nudge_zoom_steps_a_single_percent() {
         let mut app = viewing_app(&["a.png"], 0);
         app.viewer_mut().unwrap().zoom = 0.62;
-        let _ = update(&mut app, Message::NudgeZoom(1));
+        let _ = update(&mut app.window, &mut app.shared, Message::NudgeZoom(1));
         assert!((viewer(&app).zoom - 0.63).abs() < 1e-5);
         assert!(viewer(&app).manual_zoom);
     }
@@ -495,116 +505,120 @@ mod tests {
     fn zoom_slider_opens_only_with_a_displayed_image() {
         let mut app = viewing_app(&["a.png"], 0);
         // Nothing displayed yet: toggling is a no-op.
-        let _ = update(&mut app, Message::ToggleZoomSlider);
-        assert!(!app.zoom_slider_open);
+        let _ = update(&mut app.window, &mut app.shared, Message::ToggleZoomSlider);
+        assert!(!app.window.zoom_slider_open);
 
         app.viewer_mut().unwrap().displayed = DisplayedImage::Video {
             original_size: (100, 100),
         };
-        let _ = update(&mut app, Message::ToggleZoomSlider);
-        assert!(app.zoom_slider_open);
-        let _ = update(&mut app, Message::ToggleZoomSlider);
-        assert!(!app.zoom_slider_open);
+        let _ = update(&mut app.window, &mut app.shared, Message::ToggleZoomSlider);
+        assert!(app.window.zoom_slider_open);
+        let _ = update(&mut app.window, &mut app.shared, Message::ToggleZoomSlider);
+        assert!(!app.window.zoom_slider_open);
     }
 
     #[test]
     fn escape_closes_the_zoom_slider() {
         let mut app = viewing_app(&["a.png"], 0);
-        app.zoom_slider_open = true;
-        let _ = update(&mut app, Message::Escape);
-        assert!(!app.zoom_slider_open);
+        app.window.zoom_slider_open = true;
+        let _ = update(&mut app.window, &mut app.shared, Message::Escape);
+        assert!(!app.window.zoom_slider_open);
     }
 
     #[test]
     fn close_zoom_slider_closes_it() {
         let mut app = viewing_app(&["a.png"], 0);
-        app.zoom_slider_open = true;
-        let _ = update(&mut app, Message::CloseZoomSlider);
-        assert!(!app.zoom_slider_open);
+        app.window.zoom_slider_open = true;
+        let _ = update(&mut app.window, &mut app.shared, Message::CloseZoomSlider);
+        assert!(!app.window.zoom_slider_open);
     }
 
     #[test]
     fn toggle_checkerboard_flips_config() {
         let mut app = empty_app();
-        let before = app.config.show_checkerboard;
-        let _ = update(&mut app, Message::ToggleCheckerboard);
-        assert_eq!(app.config.show_checkerboard, !before);
+        let before = app.shared.config.show_checkerboard;
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::ToggleCheckerboard,
+        );
+        assert_eq!(app.shared.config.show_checkerboard, !before);
     }
 
     #[test]
     fn toggle_help_opens_the_overlay() {
         let mut app = empty_app();
-        assert!(!app.help_open);
-        let _ = update(&mut app, Message::ToggleHelp);
-        assert!(app.help_open);
+        assert!(!app.window.help_open);
+        let _ = update(&mut app.window, &mut app.shared, Message::ToggleHelp);
+        assert!(app.window.help_open);
     }
 
     #[test]
     fn toggle_info_flips_config() {
         let mut app = viewing_app(&["a.png"], 0);
-        let before = app.config.show_info;
-        let _ = update(&mut app, Message::ToggleInfo);
-        assert_eq!(app.config.show_info, !before);
+        let before = app.shared.config.show_info;
+        let _ = update(&mut app.window, &mut app.shared, Message::ToggleInfo);
+        assert_eq!(app.shared.config.show_info, !before);
     }
 
     #[test]
     fn toggle_fullscreen_fills_the_window() {
         let mut app = empty_app();
-        app.window_size = iced::Size::new(1000.0, 800.0);
-        let _ = update(&mut app, Message::ToggleFullscreen);
-        assert!(app.fullscreen);
-        assert_eq!(app.viewport_size, app.window_size);
+        app.window.window_size = iced::Size::new(1000.0, 800.0);
+        let _ = update(&mut app.window, &mut app.shared, Message::ToggleFullscreen);
+        assert!(app.window.fullscreen);
+        assert_eq!(app.window.viewport_size, app.window.window_size);
     }
 
     #[test]
     fn escape_closes_the_modal_before_anything_else() {
         let mut app = empty_app();
-        app.modal = Some(Modal::Settings);
-        app.help_open = true;
-        let _ = update(&mut app, Message::Escape);
-        assert!(app.modal.is_none());
+        app.window.modal = Some(Modal::Settings);
+        app.window.help_open = true;
+        let _ = update(&mut app.window, &mut app.shared, Message::Escape);
+        assert!(app.window.modal.is_none());
         // Help is left for the next Escape.
-        assert!(app.help_open);
+        assert!(app.window.help_open);
     }
 
     #[test]
     fn escape_closes_help_when_no_modal_is_open() {
         let mut app = empty_app();
-        app.help_open = true;
-        let _ = update(&mut app, Message::Escape);
-        assert!(!app.help_open);
+        app.window.help_open = true;
+        let _ = update(&mut app.window, &mut app.shared, Message::Escape);
+        assert!(!app.window.help_open);
     }
 
     #[test]
     fn escape_exits_fullscreen_after_modal_and_help() {
         let mut app = empty_app();
-        app.fullscreen = true;
-        let _ = update(&mut app, Message::Escape);
-        assert!(!app.fullscreen);
+        app.window.fullscreen = true;
+        let _ = update(&mut app.window, &mut app.shared, Message::Escape);
+        assert!(!app.window.fullscreen);
     }
 
     #[test]
     fn escape_clears_menus_when_nothing_else_is_open() {
         let mut app = empty_app();
-        app.context_menu_pos = Some(iced::Point::ORIGIN);
-        let _ = update(&mut app, Message::Escape);
-        assert!(app.context_menu_pos.is_none());
+        app.window.context_menu_pos = Some(iced::Point::ORIGIN);
+        let _ = update(&mut app.window, &mut app.shared, Message::Escape);
+        assert!(app.window.context_menu_pos.is_none());
     }
 
     #[test]
     fn drag_start_then_end_tracks_drag_state() {
         let mut app = viewing_app(&["a.png"], 0);
-        app.last_cursor_pos = iced::Point::new(10.0, 20.0);
-        let _ = update(&mut app, Message::DragStart);
+        app.window.last_cursor_pos = iced::Point::new(10.0, 20.0);
+        let _ = update(&mut app.window, &mut app.shared, Message::DragStart);
         assert!(viewer(&app).drag.is_some());
-        let _ = update(&mut app, Message::DragEnd);
+        let _ = update(&mut app.window, &mut app.shared, Message::DragEnd);
         assert!(viewer(&app).drag.is_none());
     }
 
     #[test]
     fn next_holds_the_direction_and_defers_on_a_cache_miss() {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
-        let _ = update(&mut app, Message::Next);
+        let _ = update(&mut app.window, &mut app.shared, Message::Next);
         let v = viewer(&app);
         assert_eq!(v.held_direction.map(|(d, _)| d), Some(Direction::Forward));
         assert!(v.pending_nav.is_some());
@@ -613,24 +627,32 @@ mod tests {
     #[test]
     fn next_released_clears_a_matching_hold() {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
-        let _ = update(&mut app, Message::Next);
-        let _ = update(&mut app, Message::NextReleased);
+        let _ = update(&mut app.window, &mut app.shared, Message::Next);
+        let _ = update(&mut app.window, &mut app.shared, Message::NextReleased);
         assert!(viewer(&app).held_direction.is_none());
     }
 
     #[test]
     fn edge_enter_and_exit_track_the_hovered_side() {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
-        let _ = update(&mut app, Message::EdgeEnter(Direction::Backward));
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::EdgeEnter(Direction::Backward),
+        );
         assert_eq!(viewer(&app).edge_hover, Some(Direction::Backward));
-        let _ = update(&mut app, Message::EdgeExit);
+        let _ = update(&mut app.window, &mut app.shared, Message::EdgeExit);
         assert!(viewer(&app).edge_hover.is_none());
     }
 
     #[test]
     fn edge_press_steps_once_and_arms_the_hold() {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
-        let _ = update(&mut app, Message::EdgePress(Direction::Forward));
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::EdgePress(Direction::Forward),
+        );
         let v = viewer(&app);
         assert_eq!(v.edge_held, Some(Direction::Forward));
         assert_eq!(v.held_direction.map(|(d, _)| d), Some(Direction::Forward));
@@ -646,7 +668,7 @@ mod tests {
             v.edge_held = Some(Direction::Forward);
             v.held_direction = Some((Direction::Forward, held));
         }
-        let _ = update(&mut app, Message::EdgeRepeat);
+        let _ = update(&mut app.window, &mut app.shared, Message::EdgeRepeat);
         assert_eq!(viewer(&app).nav.cursor(), 1);
     }
 
@@ -661,11 +683,11 @@ mod tests {
             v.edge_hover = Some(Direction::Forward);
             v.held_direction = Some((Direction::Forward, held));
         }
-        let _ = update(&mut app, Message::EdgeExit);
+        let _ = update(&mut app.window, &mut app.shared, Message::EdgeExit);
         assert!(viewer(&app).edge_held.is_none());
         // A later repeat tick can't resume it without a fresh press.
         let cursor = viewer(&app).nav.cursor();
-        let _ = update(&mut app, Message::EdgeRepeat);
+        let _ = update(&mut app.window, &mut app.shared, Message::EdgeRepeat);
         assert_eq!(viewer(&app).nav.cursor(), cursor);
     }
 
@@ -673,14 +695,14 @@ mod tests {
     fn drag_end_clears_an_active_edge_hold() {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
         app.viewer_mut().unwrap().edge_held = Some(Direction::Forward);
-        let _ = update(&mut app, Message::DragEnd);
+        let _ = update(&mut app.window, &mut app.shared, Message::DragEnd);
         assert!(viewer(&app).edge_held.is_none());
     }
 
     #[test]
     fn rotate_is_a_no_op_without_a_decoded_image() {
         let mut app = viewing_app(&["a.png"], 0);
-        let _ = update(&mut app, Message::Rotate(1));
+        let _ = update(&mut app.window, &mut app.shared, Message::Rotate(1));
         assert_eq!(viewer(&app).rotation, 0);
     }
 
@@ -691,7 +713,7 @@ mod tests {
         let held =
             Instant::now() - crate::app::HOLD_THRESHOLD - std::time::Duration::from_millis(10);
         app.viewer_mut().unwrap().held_direction = Some((Direction::Forward, held));
-        let _ = update(&mut app, Message::NextRepeat);
+        let _ = update(&mut app.window, &mut app.shared, Message::NextRepeat);
         // The cursor advances without waiting on b.png's blur.
         assert_eq!(viewer(&app).nav.cursor(), 1);
     }
@@ -700,7 +722,7 @@ mod tests {
     fn a_repeat_before_the_hold_threshold_does_not_move() {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
         app.viewer_mut().unwrap().held_direction = Some((Direction::Forward, Instant::now()));
-        let _ = update(&mut app, Message::NextRepeat);
+        let _ = update(&mut app.window, &mut app.shared, Message::NextRepeat);
         assert_eq!(viewer(&app).nav.cursor(), 0);
     }
 }

@@ -15,28 +15,50 @@ use crate::media::pipeline::Source;
 
 use super::shortcuts;
 use super::{
-    App, MediaMessage, Message, OpenMessage, VideoControlsMessage, ViewerMessage, WindowMessage,
+    App, Envelope, MediaMessage, Message, OpenMessage, VideoControlsMessage, ViewerMessage, Window,
+    WindowMessage,
 };
 
-/// Subscription: keyboard/mouse/file-drop events, GIF animation ticks,
-/// and a redraw driver while the loading spinner is visible.
-pub fn subscription(app: &App) -> Subscription<Message> {
+/// Daemon subscription: per-window input events and timers, plus window
+/// open/close. Each window's events and ticks are tagged with its id.
+pub fn subscription(app: &App) -> Subscription<Envelope> {
     let mut subs = vec![
-        event::listen_with(handle_event),
+        event::listen_with(|event, status, id| {
+            handle_event(event, status, id).map(move |message| Envelope::Win(id, message))
+        }),
         // Close requests route through update() so config saves first.
-        iced::window::close_requests().map(|id| Message::Window(WindowMessage::CloseRequested(id))),
+        iced::window::close_requests()
+            .map(|id| Envelope::Win(id, Message::Window(WindowMessage::CloseRequested(id)))),
+        // A closed window's state is dropped; the app exits with the last one.
+        iced::window::close_events().map(Envelope::Closed),
     ];
 
+    for (&id, win) in &app.windows {
+        for sub in window_subscriptions(id, win) {
+            // Subscription::map requires a non-capturing closure, so carry the
+            // window id through `with` instead of capturing it.
+            subs.push(sub.with(id).map(|(id, message)| Envelope::Win(id, message)));
+        }
+    }
+
+    Subscription::batch(subs)
+}
+
+/// The timer and watch subscriptions for one window. Untagged; the caller
+/// wraps each with the window's id.
+fn window_subscriptions(id: window::Id, win: &Window) -> Vec<Subscription<Message>> {
+    let mut subs = Vec::new();
+
     // The opening spinner runs before any viewer exists.
-    if app.opening_since.is_some() {
+    if win.opening_since.is_some() {
         subs.push(
             iced::time::every(Duration::from_millis(33))
                 .map(|_| Message::Media(MediaMessage::SpinnerTick)),
         );
     }
 
-    if let Some(viewer) = app.viewer() {
-        if viewer.pending_since.is_some() && app.opening_since.is_none() {
+    if let Some(viewer) = win.viewer() {
+        if viewer.pending_since.is_some() && win.opening_since.is_none() {
             subs.push(
                 iced::time::every(Duration::from_millis(33))
                     .map(|_| Message::Media(MediaMessage::SpinnerTick)),
@@ -72,27 +94,26 @@ pub fn subscription(app: &App) -> Subscription<Message> {
         if matches!(viewer.source, Source::Fs)
             && let Some(dir) = viewer.nav.current().parent()
         {
-            subs.push(watch_dir(dir.to_path_buf()));
+            subs.push(watch_dir(id, dir.to_path_buf()));
         }
     }
 
-    Subscription::batch(subs)
+    subs
 }
 
-/// Subscribe to filesystem changes in `dir`, keyed by the directory so opening
-/// a different folder restarts the watch.
-fn watch_dir(dir: PathBuf) -> Subscription<Message> {
-    Subscription::run_with(dir, watch_stream)
+/// Subscribe to filesystem changes in `dir`, keyed by the window and the
+/// directory so each window watches independently and reopening a different
+/// folder restarts its watch.
+fn watch_dir(id: window::Id, dir: PathBuf) -> Subscription<Message> {
+    Subscription::run_with((id, dir), watch_stream)
 }
 
 /// The watcher runs on its own thread. Events coalesce over a quiet window so a
 /// bulk change triggers a single refresh.
-// `run_with` hands the builder `&D`, so the parameter has to be `&PathBuf`.
-#[allow(clippy::ptr_arg)]
-fn watch_stream(dir: &PathBuf) -> impl Stream<Item = Message> + use<> {
+fn watch_stream(key: &(window::Id, PathBuf)) -> impl Stream<Item = Message> + use<> {
     use notify::{RecursiveMode, Watcher};
 
-    let dir = dir.clone();
+    let dir = key.1.clone();
     iced::stream::channel(
         4,
         move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {

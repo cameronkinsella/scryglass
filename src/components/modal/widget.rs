@@ -8,9 +8,10 @@ use iced::{Element, Length};
 use crate::app::ModalMessage;
 use crate::ui::theme;
 
-/// Stable ID so the rename input can be focused when the dialog opens.
-pub fn rename_input_id() -> iced::widget::Id {
-    iced::widget::Id::new("rename-input")
+/// Per-window ID so the rename input can be focused when the dialog opens,
+/// without focusing other windows' rename fields.
+pub fn rename_input_id(window: iced::window::Id) -> iced::widget::Id {
+    iced::widget::Id::from(format!("rename-input-{window:?}"))
 }
 
 /// "Move to Recycle Bin?" confirmation.
@@ -40,9 +41,13 @@ pub fn confirm_delete<'a>(file_name: &str) -> Element<'a, ModalMessage> {
 
 /// Inline rename dialog with a focused text input. `warning`, when present, is
 /// shown under the field to flag an extension that misrepresents the file.
-pub fn rename_dialog<'a>(input: &str, warning: Option<&str>) -> Element<'a, ModalMessage> {
+pub fn rename_dialog<'a>(
+    window: iced::window::Id,
+    input: &str,
+    warning: Option<&str>,
+) -> Element<'a, ModalMessage> {
     let field = text_input("File name", input)
-        .id(rename_input_id())
+        .id(rename_input_id(window))
         .on_input(ModalMessage::RenameInput)
         .on_submit(ModalMessage::CommitRename)
         .size(13)
@@ -100,14 +105,20 @@ mod tests {
 
     #[test]
     fn rename_dialog_builds_with_a_stable_input_id() {
-        let _ = rename_input_id();
-        let mut ui = simulator(rename_dialog("photo.jpg", None));
+        let window = iced::window::Id::unique();
+        let _ = rename_input_id(window);
+        let mut ui = simulator(rename_dialog(window, "photo.jpg", None));
         assert!(ui.find("Cancel").is_ok());
     }
 
     #[test]
     fn rename_dialog_shows_a_mismatch_warning() {
-        let mut ui = simulator(rename_dialog("photo.jpg", Some("Saving as .jpg, but PNG")));
+        let window = iced::window::Id::unique();
+        let mut ui = simulator(rename_dialog(
+            window,
+            "photo.jpg",
+            Some("Saving as .jpg, but PNG"),
+        ));
         assert!(ui.find("Saving as .jpg, but PNG").is_ok());
     }
 }

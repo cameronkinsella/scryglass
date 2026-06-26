@@ -8,7 +8,7 @@ use iced::{Size, Task};
 use crate::allocation;
 use crate::app::state::{CachedImage, DisplayedImage, LoadedMedia, Thumb, Viewer};
 use crate::app::viewer_math::compute_zoom;
-use crate::app::{App, MediaMessage, Message};
+use crate::app::{MediaMessage, Message, Shared, Window};
 use crate::config::ZoomMode;
 use crate::media::pipeline::{Lane, Pipeline, Source, ThumbUrgency};
 use crate::media::registry::DecodeOpts;
@@ -80,8 +80,8 @@ fn rotate_pixels(handle: &Handle, turns: u8) -> Option<(u32, u32, Vec<u8>)> {
 }
 
 /// Fetch EXIF fields for the current image (info panel).
-pub(crate) fn fire_exif(app: &mut App) -> Task<Message> {
-    let Some(viewer) = app.viewer_mut() else {
+pub(crate) fn fire_exif(win: &mut Window, _shared: &mut Shared) -> Task<Message> {
+    let Some(viewer) = win.viewer_mut() else {
         return Task::none();
     };
     let path = viewer.nav.current().to_path_buf();
@@ -367,7 +367,7 @@ mod tests {
         (0..n).map(|i| format!("{i:04}.png")).collect()
     }
 
-    fn at_scroll(cursor: usize, scroll_x: f32) -> crate::app::App {
+    fn at_scroll(cursor: usize, scroll_x: f32) -> crate::app::test_support::TestApp {
         let ns = names(50);
         let refs: Vec<&str> = ns.iter().map(String::as_str).collect();
         let mut app = viewing_app(&refs, cursor);

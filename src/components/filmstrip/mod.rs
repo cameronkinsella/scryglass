@@ -11,42 +11,43 @@ use iced::Element;
 use iced::Task;
 
 use crate::app::update::{complete_navigation, fire_thumbnailer};
-use crate::app::{App, Message as AppMessage};
+use crate::app::{Message as AppMessage, Shared, Window};
 
 /// How long the filmstrip must stop scrolling before the visible row claims
 /// the thumbnail lane.
 const SETTLE: Duration = Duration::from_millis(100);
 
-pub(crate) fn view(app: &App) -> Element<'_, AppMessage> {
-    let Some(viewer) = app.viewer() else {
+pub(crate) fn view<'a>(win: &'a Window, _shared: &'a Shared) -> Element<'a, AppMessage> {
+    let Some(viewer) = win.viewer() else {
         return iced::widget::row![].into();
     };
 
     widget::filmstrip(
+        win.id,
         viewer.nav.files(),
         viewer.nav.cursor(),
         &viewer.thumbs,
         viewer.filmstrip_scroll_x,
-        app.window_size.width,
+        win.window_size.width,
     )
     .map(AppMessage::Filmstrip)
 }
 
-pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
+pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) -> Task<AppMessage> {
     match message {
         Message::Scroll(delta_y) => {
             let offset = iced::widget::scrollable::AbsoluteOffset {
                 x: -delta_y * 60.0,
                 y: 0.0,
             };
-            iced::widget::operation::scroll_by(widget::filmstrip_id(), offset)
+            iced::widget::operation::scroll_by(widget::filmstrip_id(win.id), offset)
         }
 
         Message::Scrolled(x) => {
-            let window_w = app.window_size.width;
-            let show = app.config.show_filmstrip;
-            let pipeline = app.pipeline.clone();
-            let Some(viewer) = app.viewer_mut() else {
+            let window_w = win.window_size.width;
+            let show = shared.config.show_filmstrip;
+            let pipeline = shared.pipeline.clone();
+            let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
             viewer.filmstrip_scroll_x = x;
@@ -71,10 +72,10 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
         }
 
         Message::SettleCheck => {
-            let window_w = app.window_size.width;
-            let show = app.config.show_filmstrip;
-            let pipeline = app.pipeline.clone();
-            let Some(viewer) = app.viewer_mut() else {
+            let window_w = win.window_size.width;
+            let show = shared.config.show_filmstrip;
+            let pipeline = shared.pipeline.clone();
+            let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
             viewer.visible_settle_pending = false;
@@ -91,7 +92,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             Task::batch(fire_thumbnailer(&pipeline, viewer, 3, window_w, show))
         }
 
-        Message::Clicked(index) => complete_navigation(app, index, true),
+        Message::Clicked(index) => complete_navigation(win, shared, index, true),
     }
 }
 
@@ -119,19 +120,19 @@ mod tests {
     #[test]
     fn scrolled_records_the_offset() {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
-        let _ = update(&mut app, Message::Scrolled(120.0));
+        let _ = update(&mut app.window, &mut app.shared, Message::Scrolled(120.0));
         assert_eq!(app.viewer().unwrap().filmstrip_scroll_x, 120.0);
     }
 
     #[test]
     fn clicking_opens_the_target_instantly() {
         let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
-        let _ = update(&mut app, Message::Clicked(2));
+        let _ = update(&mut app.window, &mut app.shared, Message::Clicked(2));
         // The cursor jumps straight to the clicked frame (no deferred wait).
         assert_eq!(app.viewer().unwrap().nav.cursor(), 2);
     }
 
-    fn big_app() -> crate::app::App {
+    fn big_app() -> crate::app::test_support::TestApp {
         let ns: Vec<String> = (0..50).map(|i| format!("{i:04}.png")).collect();
         let refs: Vec<&str> = ns.iter().map(String::as_str).collect();
         viewing_app(&refs, 0)
@@ -140,7 +141,7 @@ mod tests {
     #[test]
     fn scrolling_the_cursor_off_screen_arms_the_settle() {
         let mut app = big_app();
-        let _ = update(&mut app, Message::Scrolled(3000.0));
+        let _ = update(&mut app.window, &mut app.shared, Message::Scrolled(3000.0));
         assert!(app.viewer().unwrap().visible_settle_pending);
     }
 
@@ -148,7 +149,7 @@ mod tests {
     fn scrolling_with_the_cursor_on_screen_does_not_arm_the_settle() {
         let mut app = big_app();
         // A nudge that leaves cursor 0 still in view.
-        let _ = update(&mut app, Message::Scrolled(10.0));
+        let _ = update(&mut app.window, &mut app.shared, Message::Scrolled(10.0));
         assert!(!app.viewer().unwrap().visible_settle_pending);
     }
 
@@ -162,10 +163,10 @@ mod tests {
             v.filmstrip_scrolled_at = iced::time::Instant::now() - SETTLE * 2;
             v.visible_settle_pending = true;
         }
-        let gen_before = app.pipeline.thumb_generation();
-        let _ = update(&mut app, Message::SettleCheck);
+        let gen_before = app.shared.pipeline.thumb_generation();
+        let _ = update(&mut app.window, &mut app.shared, Message::SettleCheck);
         // The stale neighborhood is dropped and a new generation begins.
-        assert_eq!(app.pipeline.thumb_generation(), gen_before + 1);
+        assert_eq!(app.shared.pipeline.thumb_generation(), gen_before + 1);
         let v = app.viewer().unwrap();
         assert!(
             !v.in_flight_thumbs
@@ -183,10 +184,10 @@ mod tests {
             v.filmstrip_scrolled_at = iced::time::Instant::now();
             v.visible_settle_pending = true;
         }
-        let gen_before = app.pipeline.thumb_generation();
-        let _ = update(&mut app, Message::SettleCheck);
+        let gen_before = app.shared.pipeline.thumb_generation();
+        let _ = update(&mut app.window, &mut app.shared, Message::SettleCheck);
         // Still inside the settle window: re-armed, nothing handed over yet.
         assert!(app.viewer().unwrap().visible_settle_pending);
-        assert_eq!(app.pipeline.thumb_generation(), gen_before);
+        assert_eq!(app.shared.pipeline.thumb_generation(), gen_before);
     }
 }

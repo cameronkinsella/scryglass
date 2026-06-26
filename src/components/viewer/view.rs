@@ -2,7 +2,7 @@ use iced::widget::{Space, Stack, center, column, container, mouse_area};
 use iced::{Element, Length, mouse};
 
 use crate::app::state::{Direction, DisplayedImage, Session, Viewer};
-use crate::app::{App, Message, SPINNER_DELAY};
+use crate::app::{Message, SPINNER_DELAY, Shared, Window};
 use crate::components::{
     context_menu, empty, filmstrip, footer, info_panel, nav_slider, video_controls,
 };
@@ -10,10 +10,10 @@ use crate::ui;
 
 use super as viewer;
 
-pub(crate) fn view(app: &App) -> Element<'_, Message> {
-    match &app.session {
+pub(crate) fn view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
+    match &win.session {
         // Keep the drop prompt out of the way while an open is scanning.
-        Session::Empty if app.opening_since.is_some() => ui::image_display::empty_viewport(),
+        Session::Empty if win.opening_since.is_some() => ui::image_display::empty_viewport(),
         Session::Empty => ui::image_display::drop_prompt(),
         Session::Viewing(viewer) => {
             // Invariant: the image area shows only the title-bar file, or nothing.
@@ -23,7 +23,7 @@ pub(crate) fn view(app: &App) -> Element<'_, Message> {
                 "image area diverged from the navigation cursor"
             );
 
-            let image_view = image_view(app);
+            let image_view = image_view(win, shared);
 
             let hide_cursor = crate::app::viewer_math::hide_idle_cursor(
                 viewer.video.as_ref().is_some_and(|s| s.playing),
@@ -56,7 +56,7 @@ pub(crate) fn view(app: &App) -> Element<'_, Message> {
                 interactive
             };
 
-            let media: Element<'_, Message> = if edge_nav_active(app, viewer, hide_cursor) {
+            let media: Element<'_, Message> = if edge_nav_active(win, shared, viewer, hide_cursor) {
                 // Keep the strips clear of the video transport bar at the bottom.
                 let reserve = if viewer.controls_opacity > 0.0 {
                     VIDEO_CONTROLS_RESERVE
@@ -73,7 +73,7 @@ pub(crate) fn view(app: &App) -> Element<'_, Message> {
             };
 
             // Info panel sits beside the image (not over it).
-            let image_cell: Element<'_, Message> = if !app.fullscreen && app.config.show_info {
+            let image_cell: Element<'_, Message> = if !win.fullscreen && shared.config.show_info {
                 let file_name = viewer
                     .nav
                     .current()
@@ -109,14 +109,14 @@ pub(crate) fn view(app: &App) -> Element<'_, Message> {
             // never flash away while an image loads.
             let mut col = column![image_cell];
 
-            if !app.fullscreen {
-                if app.config.show_filmstrip {
-                    col = col.push(filmstrip::view(app));
+            if !win.fullscreen {
+                if shared.config.show_filmstrip {
+                    col = col.push(filmstrip::view(win, shared));
                 }
-                if app.config.show_slider {
-                    col = col.push(nav_slider::view(app));
+                if shared.config.show_slider {
+                    col = col.push(nav_slider::view(win, shared));
                 }
-                if app.config.show_footer {
+                if shared.config.show_footer {
                     let dims = viewer
                         .displayed
                         .original_size()
@@ -150,8 +150,8 @@ pub(crate) fn view(app: &App) -> Element<'_, Message> {
     }
 }
 
-fn image_view(app: &App) -> Element<'_, Message> {
-    let Some(viewer) = app.viewer() else {
+fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
+    let Some(viewer) = win.viewer() else {
         return ui::image_display::empty_viewport();
     };
 
@@ -170,8 +170,8 @@ fn image_view(app: &App) -> Element<'_, Message> {
                 *original_size,
                 viewer.zoom,
                 viewer.pan,
-                (app.viewport_size.width, app.viewport_size.height),
-                app.config.crisp_pixels,
+                (win.viewport_size.width, win.viewport_size.height),
+                shared.config.crisp_pixels,
             )
         }
         DisplayedImage::Placeholder(thumb) => {
@@ -182,7 +182,7 @@ fn image_view(app: &App) -> Element<'_, Message> {
                 thumb.original_size,
                 viewer.zoom,
                 viewer.pan,
-                (app.viewport_size.width, app.viewport_size.height),
+                (win.viewport_size.width, win.viewport_size.height),
                 false,
             )
         }
@@ -192,8 +192,8 @@ fn image_view(app: &App) -> Element<'_, Message> {
                 frame,
                 viewer.zoom,
                 viewer.pan,
-                (app.viewport_size.width, app.viewport_size.height),
-                app.config.crisp_pixels,
+                (win.viewport_size.width, win.viewport_size.height),
+                shared.config.crisp_pixels,
             ),
             _ => ui::image_display::empty_viewport(),
         },
@@ -201,7 +201,7 @@ fn image_view(app: &App) -> Element<'_, Message> {
     };
 
     // Optional checkerboard behind the image reveals transparency.
-    let image_view: Element<'_, Message> = if app.config.show_checkerboard
+    let image_view: Element<'_, Message> = if shared.config.show_checkerboard
         && !matches!(
             viewer.displayed,
             DisplayedImage::None | DisplayedImage::Error { .. }
@@ -226,15 +226,15 @@ fn image_view(app: &App) -> Element<'_, Message> {
 const VIDEO_CONTROLS_RESERVE: f32 = 44.0;
 
 // Yield to any open overlay: a strip would steal its hover and dismiss it.
-fn edge_nav_active(app: &App, viewer: &Viewer, hide_cursor: bool) -> bool {
-    app.config.mouse_nav
+fn edge_nav_active(win: &Window, shared: &Shared, viewer: &Viewer, hide_cursor: bool) -> bool {
+    shared.config.mouse_nav
         && viewer.nav.len() > 1
         && !hide_cursor
-        && app.open_menu.is_none()
-        && app.context_menu_pos.is_none()
-        && app.modal.is_none()
-        && !app.help_open
-        && !app.zoom_slider_open
+        && win.open_menu.is_none()
+        && win.context_menu_pos.is_none()
+        && win.modal.is_none()
+        && !win.help_open
+        && !win.zoom_slider_open
 }
 
 /// Left and right edge-navigation strips over the image. `bottom_reserve`
@@ -289,12 +289,12 @@ fn edge_overlay<'a>(hovered: Option<Direction>, bottom_reserve: f32) -> Element<
         .into()
 }
 
-pub(crate) fn spinner(app: &App) -> Element<'_, Message> {
-    let footer_visible = app.config.show_footer && !app.fullscreen;
-    let opening = app
+pub(crate) fn spinner<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
+    let footer_visible = shared.config.show_footer && !win.fullscreen;
+    let opening = win
         .opening_since
         .filter(|since| since.elapsed() >= SPINNER_DELAY);
-    match app.viewer() {
+    match win.viewer() {
         _ if opening.is_some() => {
             let elapsed = opening.map(|since| since.elapsed()).unwrap_or_default();
             center(ui::spinner::spinner(elapsed)).into()
@@ -343,46 +343,81 @@ mod tests {
     #[test]
     fn edge_nav_is_on_by_default_with_several_files() {
         let app = viewing_app(&["a.png", "b.png"], 0);
-        assert!(edge_nav_active(&app, app.viewer().unwrap(), false));
+        assert!(edge_nav_active(
+            &app.window,
+            &app.shared,
+            app.viewer().unwrap(),
+            false
+        ));
     }
 
     #[test]
     fn edge_nav_is_off_for_a_single_file() {
         let app = viewing_app(&["only.png"], 0);
-        assert!(!edge_nav_active(&app, app.viewer().unwrap(), false));
+        assert!(!edge_nav_active(
+            &app.window,
+            &app.shared,
+            app.viewer().unwrap(),
+            false
+        ));
     }
 
     #[test]
     fn edge_nav_is_off_when_the_setting_is_disabled() {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
-        app.config.mouse_nav = false;
-        assert!(!edge_nav_active(&app, app.viewer().unwrap(), false));
+        app.shared.config.mouse_nav = false;
+        assert!(!edge_nav_active(
+            &app.window,
+            &app.shared,
+            app.viewer().unwrap(),
+            false
+        ));
     }
 
     #[test]
     fn an_open_dropdown_stands_the_strips_down() {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
-        app.open_menu = Some(OpenMenu::File);
-        assert!(!edge_nav_active(&app, app.viewer().unwrap(), false));
+        app.window.open_menu = Some(OpenMenu::File);
+        assert!(!edge_nav_active(
+            &app.window,
+            &app.shared,
+            app.viewer().unwrap(),
+            false
+        ));
     }
 
     #[test]
     fn an_open_context_menu_stands_the_strips_down() {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
-        app.context_menu_pos = Some(iced::Point::ORIGIN);
-        assert!(!edge_nav_active(&app, app.viewer().unwrap(), false));
+        app.window.context_menu_pos = Some(iced::Point::ORIGIN);
+        assert!(!edge_nav_active(
+            &app.window,
+            &app.shared,
+            app.viewer().unwrap(),
+            false
+        ));
     }
 
     #[test]
     fn an_open_modal_stands_the_strips_down() {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
-        app.modal = Some(Modal::Settings);
-        assert!(!edge_nav_active(&app, app.viewer().unwrap(), false));
+        app.window.modal = Some(Modal::Settings);
+        assert!(!edge_nav_active(
+            &app.window,
+            &app.shared,
+            app.viewer().unwrap(),
+            false
+        ));
     }
 
     #[test]
     fn an_idle_hidden_cursor_stands_the_strips_down() {
         let app = viewing_app(&["a.png", "b.png"], 0);
-        assert!(!edge_nav_active(&app, app.viewer().unwrap(), true));
+        assert!(!edge_nav_active(
+            &app.window,
+            &app.shared,
+            app.viewer().unwrap(),
+            true
+        ));
     }
 }

@@ -1,3 +1,5 @@
+use iced::Task;
+
 use super::update::{media, open, window};
 use crate::anim::AnimMessage;
 use crate::components::{
@@ -19,6 +21,28 @@ pub enum Message {
     Window(window::Message),
     Toast(toasts::Message),
     Anim(AnimMessage),
+}
+
+/// The daemon-level message. Every per-window [`Message`] is tagged with the
+/// window it targets; the rest are window-lifecycle events the runtime feeds
+/// back. Component code only ever deals in [`Message`]; the top-level update
+/// and view wrap and unwrap the envelope at the boundary.
+#[derive(Debug, Clone)]
+pub enum Envelope {
+    /// A message for the window with this id.
+    Win(iced::window::Id, Message),
+    /// A window the app requested has finished opening.
+    Opened(iced::window::Id),
+    /// A window closed; its state is dropped, and the process exits once the
+    /// last one is gone.
+    Closed(iced::window::Id),
+}
+
+impl Envelope {
+    /// Tag a per-window task with the window it belongs to.
+    pub(crate) fn wrap(id: iced::window::Id, task: Task<Message>) -> Task<Envelope> {
+        task.map(move |message| Envelope::Win(id, message))
+    }
 }
 
 macro_rules! impl_message_from {

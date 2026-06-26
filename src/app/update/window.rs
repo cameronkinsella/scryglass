@@ -14,17 +14,17 @@ pub enum Message {
 use iced::Task;
 
 use crate::app::viewer_math::{clamp_pan, compute_zoom};
-use crate::app::{App, Message as AppMessage, recalc_viewport};
+use crate::app::{Message as AppMessage, Shared, Window, recalc_viewport};
 
-pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
+pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) -> Task<AppMessage> {
     match message {
         Message::Resized(size) => {
-            app.window_size = size;
-            recalc_viewport(app);
-            let zoom_mode = app.config.zoom_mode;
-            let viewport = app.viewport_size;
+            win.window_size = size;
+            recalc_viewport(win, shared);
+            let zoom_mode = shared.config.zoom_mode;
+            let viewport = win.viewport_size;
 
-            if let Some(viewer) = app.viewer_mut()
+            if let Some(viewer) = win.viewer_mut()
                 && let Some((w, h)) = viewer.displayed.original_size()
             {
                 if !viewer.manual_zoom {
@@ -38,10 +38,10 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             // The app's own fullscreen never persists. A natively maximized or
             // fullscreened window looks like any other resize here, so confirm
             // the state before persisting and let the windowed size stand.
-            if app.fullscreen {
+            if win.fullscreen {
                 Task::none()
             } else {
-                check_window_state(size)
+                check_window_state(win.id, size)
             }
         }
 
@@ -51,14 +51,14 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
             mode,
         } => {
             if should_persist(maximized, mode) {
-                app.config.window_width = size.width;
-                app.config.window_height = size.height;
+                shared.config.window_width = size.width;
+                shared.config.window_height = size.height;
             }
             Task::none()
         }
 
         Message::CloseRequested(id) => {
-            let config = app.config.clone();
+            let config = shared.config.clone();
             Task::future(config.save()).then(move |_| iced::window::close(id))
         }
     }
@@ -66,15 +66,13 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
 
 /// Ask the windowing system whether the window is maximized or fullscreen, so
 /// the size is persisted only when it is the plain windowed size.
-fn check_window_state(size: Size) -> Task<AppMessage> {
-    iced::window::latest().and_then(move |id| {
-        iced::window::is_maximized(id).then(move |maximized| {
-            iced::window::mode(id).map(move |mode| {
-                AppMessage::Window(Message::WindowState {
-                    size,
-                    maximized,
-                    mode,
-                })
+fn check_window_state(id: iced::window::Id, size: Size) -> Task<AppMessage> {
+    iced::window::is_maximized(id).then(move |maximized| {
+        iced::window::mode(id).map(move |mode| {
+            AppMessage::Window(Message::WindowState {
+                size,
+                maximized,
+                mode,
             })
         })
     })
@@ -94,30 +92,36 @@ mod tests {
     #[test]
     fn resize_updates_the_window_size() {
         let mut app = empty_app();
-        let _ = update(&mut app, Message::Resized(Size::new(1024.0, 768.0)));
-        assert_eq!(app.window_size, Size::new(1024.0, 768.0));
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::Resized(Size::new(1024.0, 768.0)),
+        );
+        assert_eq!(app.window.window_size, Size::new(1024.0, 768.0));
     }
 
     #[test]
     fn a_normal_window_state_persists_its_size() {
         let mut app = empty_app();
         let _ = update(
-            &mut app,
+            &mut app.window,
+            &mut app.shared,
             Message::WindowState {
                 size: Size::new(1024.0, 768.0),
                 maximized: false,
                 mode: iced::window::Mode::Windowed,
             },
         );
-        assert_eq!(app.config.window_width, 1024.0);
-        assert_eq!(app.config.window_height, 768.0);
+        assert_eq!(app.shared.config.window_width, 1024.0);
+        assert_eq!(app.shared.config.window_height, 768.0);
     }
 
     #[test]
     fn a_maximized_or_fullscreen_state_keeps_the_windowed_size() {
         let mut app = empty_app();
         let _ = update(
-            &mut app,
+            &mut app.window,
+            &mut app.shared,
             Message::WindowState {
                 size: Size::new(1024.0, 768.0),
                 maximized: false,
@@ -130,7 +134,8 @@ mod tests {
             (false, iced::window::Mode::Fullscreen),
         ] {
             let _ = update(
-                &mut app,
+                &mut app.window,
+                &mut app.shared,
                 Message::WindowState {
                     size: Size::new(2560.0, 1440.0),
                     maximized: state.0,
@@ -138,8 +143,8 @@ mod tests {
                 },
             );
         }
-        assert_eq!(app.config.window_width, 1024.0);
-        assert_eq!(app.config.window_height, 768.0);
+        assert_eq!(app.shared.config.window_width, 1024.0);
+        assert_eq!(app.shared.config.window_height, 768.0);
     }
 
     #[test]
@@ -153,11 +158,15 @@ mod tests {
     #[test]
     fn resize_keeps_the_viewport_within_the_window() {
         let mut app = empty_app();
-        let _ = update(&mut app, Message::Resized(Size::new(1000.0, 800.0)));
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::Resized(Size::new(1000.0, 800.0)),
+        );
         // Chrome (toolbar, footer, etc.) is subtracted, so the viewport
         // never exceeds the window and never collapses to zero.
-        assert!(app.viewport_size.width > 0.0 && app.viewport_size.width <= 1000.0);
-        assert!(app.viewport_size.height > 0.0 && app.viewport_size.height <= 800.0);
+        assert!(app.window.viewport_size.width > 0.0 && app.window.viewport_size.width <= 1000.0);
+        assert!(app.window.viewport_size.height > 0.0 && app.window.viewport_size.height <= 800.0);
     }
 
     #[test]
@@ -170,7 +179,11 @@ mod tests {
             v.displayed = DisplayedImage::Placeholder(thumb(2000, 1000));
             v.manual_zoom = false;
         }
-        let _ = update(&mut app, Message::Resized(Size::new(800.0, 600.0)));
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::Resized(Size::new(800.0, 600.0)),
+        );
         // The 2000-wide image is shrunk to fit the smaller viewport.
         assert!(app.viewer().unwrap().zoom < 1.0);
     }
@@ -179,7 +192,8 @@ mod tests {
     fn close_requested_builds_a_save_then_close_task() {
         let mut app = empty_app();
         let _ = update(
-            &mut app,
+            &mut app.window,
+            &mut app.shared,
             Message::CloseRequested(iced::window::Id::unique()),
         );
     }

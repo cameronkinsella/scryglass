@@ -9,30 +9,35 @@ use crate::components::toasts::ToastKind;
 use crate::media::pipeline::Pipeline;
 
 use super::push_toast;
-use crate::app::{App, Message, ModalMessage};
+use crate::app::{Message, ModalMessage, Shared, Window};
 
 /// The current file, if file operations are allowed on it: requires a
 /// filesystem source and read-only mode off. Refusals return the toast
 /// task explaining why.
-pub(crate) fn file_op_target(app: &mut App) -> Result<PathBuf, Task<Message>> {
-    let Some(viewer) = app.viewer() else {
+pub(crate) fn file_op_target(
+    win: &mut Window,
+    shared: &mut Shared,
+) -> Result<PathBuf, Task<Message>> {
+    let Some(viewer) = win.viewer() else {
         return Err(Task::none());
     };
     if !viewer.is_fs() {
         return Err(push_toast(
-            app,
+            win,
+            shared,
             ToastKind::Info,
             "Archive entries can't be modified".into(),
         ));
     }
-    if app.config.read_only {
+    if shared.config.read_only {
         return Err(push_toast(
-            app,
+            win,
+            shared,
             ToastKind::Info,
             "Read-only mode is on".into(),
         ));
     }
-    Ok(app
+    Ok(win
         .viewer()
         .map(|v| v.nav.current().to_path_buf())
         .unwrap_or_default())
@@ -41,11 +46,12 @@ pub(crate) fn file_op_target(app: &mut App) -> Result<PathBuf, Task<Message>> {
 /// Move a file to the recycle bin, off-thread. `resume` restores a video that
 /// was torn down to free its handle, should the delete fail.
 pub(crate) fn fire_delete(
-    app: &mut App,
+    win: &mut Window,
+    _shared: &mut Shared,
     path: PathBuf,
     resume: Option<VideoResume>,
 ) -> Task<Message> {
-    app.modal = None;
+    win.modal = None;
     let target = path.clone();
     Task::perform(trash_with_retry(target), move |result| {
         Message::Modal(ModalMessage::DeleteFinished(path, result, resume))

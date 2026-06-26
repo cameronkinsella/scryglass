@@ -22,7 +22,7 @@ use iced::{Element, Task};
 
 use crate::app::state::Viewer;
 use crate::app::update::video_flow;
-use crate::app::{App, Message as AppMessage};
+use crate::app::{Message as AppMessage, Shared, Window};
 use crate::video::VideoSession;
 
 pub(crate) fn view<'a>(
@@ -45,19 +45,19 @@ pub(crate) fn view<'a>(
     .map(AppMessage::VideoControls)
 }
 
-pub(crate) fn update(app: &mut App, message: Message) -> Task<AppMessage> {
+pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) -> Task<AppMessage> {
     match message {
-        Message::Tick => video_flow::tick(app),
-        Message::Extracted { entry, result } => video_flow::extracted(app, entry, result),
-        Message::PlayPause => video_flow::play_pause(app),
-        Message::SeekDrag(secs) => video_flow::seek_drag(app, secs),
-        Message::SeekRelease => video_flow::seek_release(app),
-        Message::SeekBy(delta) => video_flow::seek_by(app, delta),
-        Message::SetVolume(volume) => video_flow::set_volume(app, volume),
-        Message::NudgeVolume(delta) => video_flow::nudge_volume(app, delta),
-        Message::ToggleMute => video_flow::toggle_mute(app),
-        Message::ToggleLoop => video_flow::toggle_loop(app),
-        Message::StepFrame(dir) => video_flow::step_frame(app, dir),
+        Message::Tick => video_flow::tick(win, shared),
+        Message::Extracted { entry, result } => video_flow::extracted(win, shared, entry, result),
+        Message::PlayPause => video_flow::play_pause(win, shared),
+        Message::SeekDrag(secs) => video_flow::seek_drag(win, shared, secs),
+        Message::SeekRelease => video_flow::seek_release(win, shared),
+        Message::SeekBy(delta) => video_flow::seek_by(win, shared, delta),
+        Message::SetVolume(volume) => video_flow::set_volume(win, shared, volume),
+        Message::NudgeVolume(delta) => video_flow::nudge_volume(win, shared, delta),
+        Message::ToggleMute => video_flow::toggle_mute(win, shared),
+        Message::ToggleLoop => video_flow::toggle_loop(win, shared),
+        Message::StepFrame(dir) => video_flow::step_frame(win, shared, dir),
     }
 }
 mod widget;
