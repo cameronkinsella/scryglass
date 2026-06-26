@@ -58,6 +58,16 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                     viewer
                         .cache
                         .insert(path.clone(), image.clone(), image.byte_cost());
+                    // Register for cross-window reuse while its texture stays
+                    // resident, so another window opening this file shares it.
+                    if let Some(keepalive) = &image.keepalive {
+                        pipeline.dedup_insert(
+                            path.clone(),
+                            image.handle.clone(),
+                            image.original_size,
+                            keepalive,
+                        );
+                    }
                     if let Some(thumb) = thumb {
                         let cost = thumb.byte_cost();
                         viewer.thumbs.insert(path.clone(), thumb, cost);

@@ -265,6 +265,24 @@ pub(crate) fn fire_load(
     }
     viewer.in_flight.insert(path.clone());
 
+    // Reuse another window's resident decode of this file, sharing its one GPU
+    // texture instead of decoding and uploading again.
+    if matches!(viewer.source, Source::Fs)
+        && let Some((handle, original_size, keepalive)) = pipeline.dedup_get(&path)
+    {
+        return Task::done(Message::Media(MediaMessage::Loaded {
+            path: path.clone(),
+            result: Ok(LoadedMedia::Static {
+                image: CachedImage {
+                    handle,
+                    original_size,
+                    keepalive: Some(keepalive),
+                },
+                thumb: None,
+            }),
+        }));
+    }
+
     let generation = pipeline.generation();
     let load = pipeline.load(
         viewer.source.clone(),

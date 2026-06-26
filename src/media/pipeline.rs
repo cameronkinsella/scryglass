@@ -10,10 +10,12 @@
 //! Two semaphore lanes keep the image being viewed ahead of prefetch:
 //! a stampede of prefetch requests can never starve the current image.
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 
+use iced::widget::image::Handle;
 use tokio::io::AsyncReadExt;
 use tokio::sync::Semaphore;
 
@@ -75,6 +77,10 @@ impl Source {
     }
 }
 
+/// A resident decode keyed for cross-window reuse: the shared handle, its
+/// pixel size, and a weak ref to the keepalive holding its texture alive.
+type DedupEntry = (Handle, (u32, u32), Weak<()>);
+
 /// Shared load orchestrator. Cheap to clone.
 #[derive(Clone)]
 pub struct Pipeline {
@@ -89,6 +95,10 @@ pub struct Pipeline {
     /// Persistent thumbnail store, `None` when disabled by build or
     /// config. Swappable at runtime (settings toggle).
     disk: Arc<std::sync::RwLock<Option<DiskThumbs>>>,
+    /// Cross-window dedup of resident decodes: path to the shared handle, its
+    /// size, and a weak ref to its keepalive, so a second window on the same
+    /// file reuses the texture instead of decoding it again.
+    image_dedup: Arc<Mutex<HashMap<PathBuf, DedupEntry>>>,
 }
 
 impl Pipeline {
@@ -105,6 +115,7 @@ impl Pipeline {
             // Bounded so a long key-hold can't flood the I/O pool.
             urgent_thumb_lane: Arc::new(Semaphore::new(8)),
             disk: Arc::new(std::sync::RwLock::new(disk)),
+            image_dedup: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -118,6 +129,34 @@ impl Pipeline {
     pub fn set_disk(&self, disk: Option<DiskThumbs>) {
         if let Ok(mut slot) = self.disk.write() {
             *slot = disk;
+        }
+    }
+
+    /// Look up a decode of `path` already resident in another window: the
+    /// shared handle, its size, and a strong keepalive clone, or None if no
+    /// window holds it. Drops the entry when its texture has been evicted.
+    pub fn dedup_get(&self, path: &Path) -> Option<(Handle, (u32, u32), Arc<()>)> {
+        let mut map = self.image_dedup.lock().ok()?;
+        let (handle, size, weak) = map.get(path)?;
+        if let Some(strong) = weak.upgrade() {
+            return Some((handle.clone(), *size, strong));
+        }
+        map.remove(path);
+        None
+    }
+
+    /// Record a freshly uploaded decode so other windows can reuse its texture,
+    /// pruning entries whose texture has since been evicted.
+    pub fn dedup_insert(
+        &self,
+        path: PathBuf,
+        handle: Handle,
+        size: (u32, u32),
+        keepalive: &Arc<()>,
+    ) {
+        if let Ok(mut map) = self.image_dedup.lock() {
+            map.retain(|_, (_, _, weak)| weak.strong_count() > 0);
+            map.insert(path, (handle, size, Arc::downgrade(keepalive)));
         }
     }
 
@@ -466,6 +505,23 @@ mod tests {
         let path = dir.path().join(name);
         std::fs::write(&path, out.into_inner()).unwrap();
         path
+    }
+
+    #[test]
+    fn dedup_reuses_resident_then_drops_when_evicted() {
+        let pipeline = Pipeline::new(None);
+        let path = PathBuf::from("/img/a.png");
+        let handle = Handle::from_rgba(2, 2, vec![0u8; 16]);
+        let keepalive = Arc::new(());
+
+        pipeline.dedup_insert(path.clone(), handle, (2, 2), &keepalive);
+        let hit = pipeline.dedup_get(&path).expect("a resident entry is reused");
+        assert_eq!(hit.1, (2, 2));
+
+        // Once every window has dropped the keepalive, the entry is gone.
+        drop(keepalive);
+        drop(hit);
+        assert!(pipeline.dedup_get(&path).is_none());
     }
 
     #[tokio::test]
