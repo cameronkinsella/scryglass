@@ -121,7 +121,7 @@ pub fn is_menu_message(msg: &Message) -> bool {
                     | viewer::Message::ToggleInfo
                     | viewer::Message::ToggleCheckerboard
             )
-            | Message::Window(window::Message::Resized(_))
+            | Message::Window(window::Message::Resized(_) | window::Message::WindowState { .. })
             | Message::Modal(modal::Message::RequestDelete | modal::Message::RequestRename)
     )
 }
@@ -160,7 +160,7 @@ pub fn is_context_menu_message(msg: &Message) -> bool {
                     | viewer::Message::NextReleased
                     | viewer::Message::PrevReleased
             )
-            | Message::Window(window::Message::Resized(_))
+            | Message::Window(window::Message::Resized(_) | window::Message::WindowState { .. })
     )
 }
 
