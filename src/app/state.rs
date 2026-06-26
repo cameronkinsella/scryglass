@@ -29,12 +29,12 @@ pub struct CachedImage {
     pub handle: Handle,
     /// True dimensions (post-orientation, pre-downscale) for zoom math.
     pub original_size: (u32, u32),
-    /// Keepalive tying the GPU texture's lifetime to this cache entry, like
-    /// iced's Allocation: the texture stays resident while this lives, and the
-    /// pipeline frees it when this drops. None for the first image, before the
-    /// upload thread's GPU context exists. Held for its refcount, never read.
+    /// Keepalive owning the GPU texture: it stays resident while this lives, and
+    /// frees the instant this drops (so a minimized or closed window reclaims its
+    /// VRAM at once). None for the first image, before the upload thread's GPU
+    /// context exists. Held for its refcount, never read.
     #[allow(dead_code)]
-    pub keepalive: Option<std::sync::Arc<()>>,
+    pub keepalive: Option<crate::ui::image_surface::Keepalive>,
 }
 
 impl CachedImage {
@@ -264,6 +264,30 @@ impl Viewer {
         }
     }
 
+    /// Release the GPU textures this viewer holds, keeping the RAM sources.
+    /// Dropping each cache entry's keepalive lets the image pipeline reclaim the
+    /// texture on its next sweep; the surviving `Handle` re-uploads on restore
+    /// without a disk read. Called when the window minimizes.
+    pub fn release_textures(&mut self) {
+        for image in self.cache.values_mut() {
+            image.keepalive = None;
+        }
+    }
+
+    /// The resident images to re-upload after a minimize freed their textures,
+    /// each as `(path, handle, original_size)`, with the displayed image first
+    /// so it reappears before its neighbors.
+    pub fn restore_list(&self) -> Vec<(PathBuf, Handle, (u32, u32))> {
+        let current = self.displayed_path.clone();
+        let mut list: Vec<(PathBuf, Handle, (u32, u32))> = self
+            .cache
+            .iter()
+            .map(|(path, image)| (path.to_path_buf(), image.handle.clone(), image.original_size))
+            .collect();
+        list.sort_by_key(|(path, _, _)| Some(path.clone()) != current);
+        list
+    }
+
     /// The paths that must stay cached: the current image plus the
     /// prefetch window around it.
     pub fn pinned_paths(&self, depth: usize) -> HashSet<PathBuf> {
@@ -456,5 +480,44 @@ mod tests {
             .failed_loads
             .insert("b.png".into(), "could not decode".into());
         assert!(viewer.displayable(Path::new("b.png")));
+    }
+
+    fn cache_image(viewer: &mut Viewer, path: &str) {
+        let handle = Handle::from_rgba(2, 2, vec![0u8; 16]);
+        let image = CachedImage {
+            handle,
+            original_size: (2, 2),
+            keepalive: Some(crate::ui::image_surface::test_keepalive()),
+        };
+        let cost = image.byte_cost();
+        viewer.cache.insert(PathBuf::from(path), image, cost);
+    }
+
+    #[test]
+    fn release_textures_drops_keepalives_but_keeps_the_ram_source() {
+        let mut viewer = test_viewer(&["a.png", "b.png"], 0);
+        cache_image(&mut viewer, "a.png");
+        cache_image(&mut viewer, "b.png");
+
+        viewer.release_textures();
+
+        // The RAM sources stay cached, only the GPU keepalives are gone.
+        assert!(viewer.cache.contains(Path::new("a.png")));
+        assert!(viewer.cache.contains(Path::new("b.png")));
+        assert!(viewer.cache.peek(Path::new("a.png")).unwrap().keepalive.is_none());
+        assert!(viewer.cache.peek(Path::new("b.png")).unwrap().keepalive.is_none());
+    }
+
+    #[test]
+    fn restore_list_puts_the_displayed_image_first() {
+        let mut viewer = test_viewer(&["a.png", "b.png", "c.png"], 0);
+        cache_image(&mut viewer, "a.png");
+        cache_image(&mut viewer, "b.png");
+        cache_image(&mut viewer, "c.png");
+        viewer.displayed_path = Some(PathBuf::from("b.png"));
+
+        let list = viewer.restore_list();
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0].0, PathBuf::from("b.png"));
     }
 }

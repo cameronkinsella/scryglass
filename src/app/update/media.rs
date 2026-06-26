@@ -23,6 +23,13 @@ pub enum Message {
         baked: u8,
         image: CachedImage,
     },
+    /// A minimized window's image came back from its RAM source after restore.
+    /// Only re-seats the texture (cache keepalive + cross-window dedup); the
+    /// displayed image is untouched so pan and zoom survive the round trip.
+    Reuploaded {
+        path: PathBuf,
+        image: CachedImage,
+    },
     Resorted(Vec<PathBuf>),
     SpinnerTick,
 }
@@ -280,6 +287,29 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             fire_rotate(viewer)
         }
 
+        Message::Reuploaded { path, image } => {
+            let pipeline = shared.pipeline.clone();
+            let Some(viewer) = win.viewer_mut() else {
+                return Task::none();
+            };
+            // Only re-seat the texture if the file is still cached (navigation
+            // during restore may have evicted it). Refresh dedup so another
+            // window reopening it shares this texture again.
+            if viewer.cache.contains(&path) {
+                if let Some(keepalive) = &image.keepalive {
+                    pipeline.dedup_insert(
+                        path.clone(),
+                        image.handle.clone(),
+                        image.original_size,
+                        keepalive,
+                    );
+                }
+                let cost = image.byte_cost();
+                viewer.cache.insert(path, image, cost);
+            }
+            Task::none()
+        }
+
         Message::ExifLoaded(path, fields) => {
             if let Some(viewer) = win.viewer_mut()
                 && viewer.nav.current() == path
@@ -436,6 +466,59 @@ mod tests {
         let mut app = viewing_app(&["a.png"], 0);
         let _ = update(&mut app.window, &mut app.shared, Message::SpinnerTick);
         assert_eq!(app.viewer().unwrap().nav.cursor(), 0);
+    }
+
+    #[test]
+    fn reupload_reseats_the_texture_for_a_cached_file() {
+        let mut app = viewing_app(&["a.png"], 0);
+        let handle = iced::widget::image::Handle::from_rgba(2, 2, vec![0u8; 16]);
+        // Simulate a minimized window: the file is cached but its keepalive was
+        // released, so the texture is gone while the RAM source survives.
+        let released = CachedImage {
+            handle: handle.clone(),
+            original_size: (2, 2),
+            keepalive: None,
+        };
+        let cost = released.byte_cost();
+        app.viewer_mut()
+            .unwrap()
+            .cache
+            .insert("a.png".into(), released, cost);
+
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::Reuploaded {
+                path: "a.png".into(),
+                image: CachedImage {
+                    handle,
+                    original_size: (2, 2),
+                    keepalive: Some(crate::ui::image_surface::test_keepalive()),
+                },
+            },
+        );
+
+        let v = app.viewer().unwrap();
+        assert!(v.cache.peek(Path::new("a.png")).unwrap().keepalive.is_some());
+    }
+
+    #[test]
+    fn reupload_ignores_a_file_evicted_during_restore() {
+        let mut app = viewing_app(&["a.png"], 0);
+        // Nothing cached for the path: a navigation during restore evicted it.
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::Reuploaded {
+                path: "gone.png".into(),
+                image: CachedImage {
+                    handle: iced::widget::image::Handle::from_rgba(2, 2, vec![0u8; 16]),
+                    original_size: (2, 2),
+                    keepalive: Some(crate::ui::image_surface::test_keepalive()),
+                },
+            },
+        );
+        assert!(!app.viewer().unwrap().cache.contains(Path::new("gone.png")));
     }
 
     #[test]

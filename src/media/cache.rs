@@ -59,6 +59,18 @@ impl<T> ImageCache<T> {
         self.entries.get(path).map(|e| &e.value)
     }
 
+    /// Iterate entries as `(path, value)` without touching recency. Used to
+    /// re-upload a minimized window's images from their RAM sources on restore.
+    pub fn iter(&self) -> impl Iterator<Item = (&Path, &T)> {
+        self.entries.iter().map(|(p, e)| (p.as_path(), &e.value))
+    }
+
+    /// Mutable access to every cached value, for releasing GPU keepalives when
+    /// a window minimizes (the RAM source stays, the texture is reclaimed).
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.entries.values_mut().map(|e| &mut e.value)
+    }
+
     /// Change the byte budget (settings). Eviction applies on the next
     /// `evict_over_budget` call.
     pub fn set_budget(&mut self, budget_bytes: usize) {

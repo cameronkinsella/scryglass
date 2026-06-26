@@ -17,8 +17,8 @@ use crate::media::animation::{AnimatedImage, FrameCanvas};
 #[derive(Debug, Clone)]
 pub enum AnimMessage {
     /// A composited frame finished uploading: its handle plus the keepalive
-    /// token holding its texture resident, or None if the upload could not run.
-    FrameAllocated(PathBuf, Option<(Handle, Arc<()>)>),
+    /// holding its texture resident, or None if the upload could not run.
+    FrameAllocated(PathBuf, Option<(Handle, crate::ui::image_surface::Keepalive)>),
     /// Timer tick, advance to the next frame.
     Tick,
 }
@@ -29,7 +29,7 @@ struct ActiveAnim {
     canvas: FrameCanvas,
     frame_index: usize,
     /// Held to keep the current frame's GPU texture alive.
-    _frame_keepalive: Option<Arc<()>>,
+    _frame_keepalive: Option<crate::ui::image_surface::Keepalive>,
 }
 
 /// Manages decoded-animation caching and playback.

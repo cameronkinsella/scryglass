@@ -74,15 +74,14 @@ fn forward_stream() -> impl Stream<Item = Envelope> {
 fn window_subscriptions(id: window::Id, win: &Window) -> Vec<Subscription<Message>> {
     let mut subs = Vec::new();
 
-    // Poll OS-minimize state (iced has no minimize event) only while there is
-    // playback, so a minimize pauses the video promptly without waking idle
-    // windows.
-    if win
-        .viewer()
-        .is_some_and(|v| v.video.is_some() || v.anim_player.is_animating())
-    {
+    // Poll OS-minimize state (iced has no minimize event) for any window with a
+    // viewer, so a minimize both reclaims its textures and pauses its video. The
+    // poll is brisk while there is playback (a snappy pause) and lazy otherwise.
+    if let Some(viewer) = win.viewer() {
+        let playing = viewer.video.is_some() || viewer.anim_player.is_animating();
+        let period = if playing { 200 } else { 500 };
         subs.push(
-            iced::time::every(Duration::from_millis(200))
+            iced::time::every(Duration::from_millis(period))
                 .map(|_| Message::Window(WindowMessage::CheckMinimize)),
         );
     }

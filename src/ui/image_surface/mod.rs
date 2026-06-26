@@ -6,5 +6,7 @@
 mod pipeline;
 mod program;
 
-pub use pipeline::submit_upload;
+pub use pipeline::{Keepalive, ResidentImage, submit_upload};
+#[cfg(test)]
+pub use pipeline::test_keepalive;
 pub use program::{view, warmup};

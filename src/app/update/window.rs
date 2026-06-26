@@ -100,23 +100,37 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
         Message::Minimized(minimized) => {
             let changed = win.minimized != minimized;
             win.minimized = minimized;
+            if !changed {
+                return Task::none();
+            }
             // Pause an open video the instant the window minimizes (audio stops
             // at once, not after the frame queue stalls), and resume on restore
             // only if it was playing.
-            if changed {
-                let mut resume = win.video_resumes_on_restore;
-                if let Some(session) = win.viewer_mut().and_then(|v| v.video.as_mut()) {
-                    if minimized {
-                        resume = session.playing;
-                        session.pause();
-                    } else if resume {
-                        session.play();
-                        resume = false;
-                    }
+            let mut resume = win.video_resumes_on_restore;
+            if let Some(session) = win.viewer_mut().and_then(|v| v.video.as_mut()) {
+                if minimized {
+                    resume = session.playing;
+                    session.pause();
+                } else if resume {
+                    session.play();
+                    resume = false;
                 }
-                win.video_resumes_on_restore = resume;
             }
-            Task::none()
+            win.video_resumes_on_restore = resume;
+
+            // Release this window's GPU textures while it sits minimized, and
+            // re-upload them from their RAM sources on restore (no disk read).
+            let pipeline = shared.pipeline.clone();
+            match win.viewer_mut() {
+                Some(viewer) if minimized => {
+                    viewer.release_textures();
+                    Task::none()
+                }
+                Some(viewer) => Task::batch(crate::app::update::fire_restore_textures(
+                    &pipeline, viewer,
+                )),
+                None => Task::none(),
+            }
         }
 
         Message::CloseRequested(id) => {
@@ -191,6 +205,34 @@ mod tests {
         assert!(app.window.minimized);
         let _ = update(&mut app.window, &mut app.shared, Message::Minimized(false));
         assert!(!app.window.minimized);
+    }
+
+    #[test]
+    fn minimizing_releases_the_cached_textures() {
+        use crate::app::state::CachedImage;
+        use crate::app::test_support::viewing_app;
+
+        let mut app = viewing_app(&["a.png"], 0);
+        let image = CachedImage {
+            handle: iced::widget::image::Handle::from_rgba(2, 2, vec![0u8; 16]),
+            original_size: (2, 2),
+            keepalive: Some(crate::ui::image_surface::test_keepalive()),
+        };
+        let cost = image.byte_cost();
+        app.viewer_mut().unwrap().cache.insert("a.png".into(), image, cost);
+
+        let _ = update(&mut app.window, &mut app.shared, Message::Minimized(true));
+
+        // The RAM source stays cached; only the GPU keepalive is released.
+        let v = app.viewer().unwrap();
+        assert!(v.cache.contains(std::path::Path::new("a.png")));
+        assert!(
+            v.cache
+                .peek(std::path::Path::new("a.png"))
+                .unwrap()
+                .keepalive
+                .is_none()
+        );
     }
 
     #[test]

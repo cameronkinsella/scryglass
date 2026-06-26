@@ -346,6 +346,41 @@ pub(crate) fn fire_load(
     })
 }
 
+/// Re-upload a restored window's resident images from their RAM sources after a
+/// minimize freed the GPU textures, displayed image first. Each upload reuses a
+/// still-resident shared texture (another window kept it) or re-uploads from the
+/// surviving handle, never a disk read.
+pub(crate) fn fire_restore_textures(pipeline: &Pipeline, viewer: &Viewer) -> Vec<Task<Message>> {
+    viewer
+        .restore_list()
+        .into_iter()
+        .map(|(path, handle, original_size)| {
+            let pipeline = pipeline.clone();
+            Task::future(async move {
+                let keepalive = match pipeline.dedup_get(&path) {
+                    Some((_, _, keep)) => Some(keep),
+                    None => {
+                        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                        if crate::ui::image_surface::submit_upload(handle.clone(), ready_tx) {
+                            ready_rx.await.ok()
+                        } else {
+                            None
+                        }
+                    }
+                };
+                Message::Media(MediaMessage::Reuploaded {
+                    path,
+                    image: CachedImage {
+                        handle,
+                        original_size,
+                        keepalive,
+                    },
+                })
+            })
+        })
+        .collect()
+}
+
 /// Warm the prefetch window around the cursor.
 pub(crate) fn fire_prefetch(
     pipeline: &Pipeline,

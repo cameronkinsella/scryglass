@@ -79,7 +79,7 @@ impl Source {
 
 /// A resident decode keyed for cross-window reuse: the shared handle, its
 /// pixel size, and a weak ref to the keepalive holding its texture alive.
-type DedupEntry = (Handle, (u32, u32), Weak<()>);
+type DedupEntry = (Handle, (u32, u32), Weak<crate::ui::image_surface::ResidentImage>);
 
 /// Shared load orchestrator. Cheap to clone.
 #[derive(Clone)]
@@ -135,7 +135,10 @@ impl Pipeline {
     /// Look up a decode of `path` already resident in another window: the
     /// shared handle, its size, and a strong keepalive clone, or None if no
     /// window holds it. Drops the entry when its texture has been evicted.
-    pub fn dedup_get(&self, path: &Path) -> Option<(Handle, (u32, u32), Arc<()>)> {
+    pub fn dedup_get(
+        &self,
+        path: &Path,
+    ) -> Option<(Handle, (u32, u32), crate::ui::image_surface::Keepalive)> {
         let mut map = self.image_dedup.lock().ok()?;
         let (handle, size, weak) = map.get(path)?;
         if let Some(strong) = weak.upgrade() {
@@ -152,7 +155,7 @@ impl Pipeline {
         path: PathBuf,
         handle: Handle,
         size: (u32, u32),
-        keepalive: &Arc<()>,
+        keepalive: &crate::ui::image_surface::Keepalive,
     ) {
         if let Ok(mut map) = self.image_dedup.lock() {
             map.retain(|_, (_, _, weak)| weak.strong_count() > 0);
@@ -512,7 +515,7 @@ mod tests {
         let pipeline = Pipeline::new(None);
         let path = PathBuf::from("/img/a.png");
         let handle = Handle::from_rgba(2, 2, vec![0u8; 16]);
-        let keepalive = Arc::new(());
+        let keepalive = crate::ui::image_surface::test_keepalive();
 
         pipeline.dedup_insert(path.clone(), handle, (2, 2), &keepalive);
         let hit = pipeline.dedup_get(&path).expect("a resident entry is reused");
