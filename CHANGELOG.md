@@ -3,6 +3,13 @@
 Notable changes to scryglass, newest first. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.2.1
+
+### Fixed
+
+- The window reopens at its last windowed size, even when closed while
+  maximized or fullscreen.
+
 ## 0.2.0
 
 ### Added
