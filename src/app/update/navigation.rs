@@ -135,8 +135,6 @@ pub(crate) fn open_viewer(
         ));
         tasks.push(fire_load(&pipeline, &mut viewer, current, Lane::Current));
     }
-    tasks.extend(fire_prefetch(&pipeline, &mut viewer, depth));
-
     // Set the scroll offset before the thumbnailer fires, so it reads the
     // cursor as on screen and fans from there, not from index 0.
     if shared.config.show_filmstrip {
@@ -159,6 +157,8 @@ pub(crate) fn open_viewer(
         window_w,
         show_filmstrip,
     ));
+    // Prefetch after thumbnailing (see complete_navigation).
+    tasks.extend(fire_prefetch(&pipeline, &mut viewer, depth));
 
     viewer.resort_to_first = opened_container;
     win.session = Session::Viewing(Box::new(viewer));
@@ -488,8 +488,6 @@ pub(crate) fn complete_navigation(
         tasks.push(fire_load(&pipeline, viewer, current, Lane::Current));
     }
 
-    tasks.extend(fire_prefetch(&pipeline, viewer, depth));
-
     let pinned = viewer.pinned_paths(depth);
     viewer.cache.evict_over_budget(&pinned);
 
@@ -510,7 +508,8 @@ pub(crate) fn complete_navigation(
         }
     }
 
-    // Re-aim the cursor fan at the new position.
+    // Re-aim the cursor fan. Thumbnail before prefetch: the thumbnailer skips
+    // files already being full-loaded, so prefetch-first leaves no blur.
     tasks.extend(fire_thumbnailer(
         &pipeline,
         viewer,
@@ -518,6 +517,7 @@ pub(crate) fn complete_navigation(
         window_w,
         show_filmstrip,
     ));
+    tasks.extend(fire_prefetch(&pipeline, viewer, depth));
 
     if shared.config.show_info {
         tasks.push(fire_exif(win, shared));
@@ -589,6 +589,16 @@ mod tests {
             let n: usize = p.file_stem().unwrap().to_str().unwrap().parse().unwrap();
             (90..=110).contains(&n)
         }));
+    }
+
+    #[test]
+    fn navigating_blurs_neighbors_even_while_prefetching_them() {
+        let mut app = viewing_app(&["a.png", "b.png", "c.png", "d.png"], 0);
+        let _ = complete_navigation(&mut app.window, &mut app.shared, 0, true);
+        let v = app.viewer().unwrap();
+        // The next image is queued for a blur, not only a full prefetch load.
+        assert!(v.in_flight_thumbs.contains(std::path::Path::new("b.png")));
+        assert!(v.in_flight.contains(std::path::Path::new("b.png")));
     }
 
     #[test]
