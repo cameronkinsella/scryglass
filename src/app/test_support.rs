@@ -62,6 +62,8 @@ pub(crate) fn empty_app() -> TestApp {
             zoom_slider_open: false,
             fullscreen: false,
             focused: true,
+            minimized: false,
+            video_resumes_on_restore: false,
             help_open: false,
             modal: None,
             opening_since: None,

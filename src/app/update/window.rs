@@ -13,6 +13,10 @@ pub enum Message {
     },
     /// Native focus gained or lost, tracked per window for the resource tiers.
     Focused(bool),
+    /// Periodic poll for OS-minimize state, since iced has no minimize event.
+    CheckMinimize,
+    /// Result of the minimize poll.
+    Minimized(bool),
     CloseRequested(iced::window::Id),
 }
 use iced::Task;
@@ -90,6 +94,31 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             Task::none()
         }
 
+        Message::CheckMinimize => iced::window::is_minimized(win.id)
+            .map(|m| AppMessage::Window(Message::Minimized(m.unwrap_or(false)))),
+
+        Message::Minimized(minimized) => {
+            let changed = win.minimized != minimized;
+            win.minimized = minimized;
+            // Pause an open video the instant the window minimizes (audio stops
+            // at once, not after the frame queue stalls), and resume on restore
+            // only if it was playing.
+            if changed {
+                let mut resume = win.video_resumes_on_restore;
+                if let Some(session) = win.viewer_mut().and_then(|v| v.video.as_mut()) {
+                    if minimized {
+                        resume = session.playing;
+                        session.pause();
+                    } else if resume {
+                        session.play();
+                        resume = false;
+                    }
+                }
+                win.video_resumes_on_restore = resume;
+            }
+            Task::none()
+        }
+
         Message::CloseRequested(id) => {
             // Persist this window's full restore stack as the next window's
             // geometry: the restored windowed bounds, plus the maximized and
@@ -153,6 +182,15 @@ mod tests {
         assert!(!app.window.zoom_slider_open);
         let _ = update(&mut app.window, &mut app.shared, Message::Focused(true));
         assert!(app.window.focused);
+    }
+
+    #[test]
+    fn minimize_poll_result_updates_the_flag() {
+        let mut app = empty_app();
+        let _ = update(&mut app.window, &mut app.shared, Message::Minimized(true));
+        assert!(app.window.minimized);
+        let _ = update(&mut app.window, &mut app.shared, Message::Minimized(false));
+        assert!(!app.window.minimized);
     }
 
     #[test]

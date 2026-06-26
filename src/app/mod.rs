@@ -149,6 +149,12 @@ pub struct Window {
     /// Whether this window currently has native focus. The resource tiers key
     /// VRAM retention on it.
     pub(crate) focused: bool,
+    /// Whether the window is OS-minimized. A minimized window shows nothing,
+    /// so it drives no redraw timers.
+    pub(crate) minimized: bool,
+    /// Whether an open video should resume when the window un-minimizes, set
+    /// when it was playing at minimize time. A manual pause is not resumed.
+    pub(crate) video_resumes_on_restore: bool,
     /// Whether the shortcut help overlay is open.
     pub(crate) help_open: bool,
     /// A blocking dialog over the viewer, if one is open. Keyboard-driven

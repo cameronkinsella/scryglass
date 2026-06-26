@@ -74,6 +74,19 @@ fn forward_stream() -> impl Stream<Item = Envelope> {
 fn window_subscriptions(id: window::Id, win: &Window) -> Vec<Subscription<Message>> {
     let mut subs = Vec::new();
 
+    // Poll OS-minimize state (iced has no minimize event) only while there is
+    // playback, so a minimize pauses the video promptly without waking idle
+    // windows.
+    if win
+        .viewer()
+        .is_some_and(|v| v.video.is_some() || v.anim_player.is_animating())
+    {
+        subs.push(
+            iced::time::every(Duration::from_millis(200))
+                .map(|_| Message::Window(WindowMessage::CheckMinimize)),
+        );
+    }
+
     // The opening spinner runs before any viewer exists.
     if win.opening_since.is_some() {
         subs.push(
@@ -91,6 +104,7 @@ fn window_subscriptions(id: window::Id, win: &Window) -> Vec<Subscription<Messag
         }
 
         if viewer.pending_since.is_none()
+            && !win.minimized
             && viewer.anim_player.is_animating()
             && let Some(delay) = viewer.anim_player.current_delay()
         {
@@ -99,7 +113,7 @@ fn window_subscriptions(id: window::Id, win: &Window) -> Vec<Subscription<Messag
 
         // Video pacing: pull frames due for display ~60×/s while a
         // session is active (paused sessions still need control redraws).
-        if viewer.video.is_some() {
+        if viewer.video.is_some() && !win.minimized {
             subs.push(
                 iced::time::every(Duration::from_millis(16))
                     .map(|_| Message::VideoControls(VideoControlsMessage::Tick)),
