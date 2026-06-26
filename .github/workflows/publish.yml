@@ -1,0 +1,46 @@
+name: Publish
+
+# crates.io is irreversible, so publish only when a GitHub release is published.
+# The release workflow drafts it on tag; publishing that draft is the go-ahead.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write # mint the OIDC token crates.io Trusted Publishing verifies
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  crates-io:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    # A manual approval gate before the irreversible publish.
+    environment: release
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Check tag matches crate version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          crate=$(cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[] | select(.name == "scryglass") | .version')
+          if [ "$tag" != "$crate" ]; then
+            echo "tag v$tag does not match crate version $crate"
+            exit 1
+          fi
+
+      - name: Authenticate via Trusted Publishing
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      # CI and the release build already compile every platform, so skip the
+      # redundant verify build here (it would only add the GUI build deps back).
+      - name: Publish to crates.io
+        run: cargo publish --no-verify --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

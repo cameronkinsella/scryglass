@@ -29,9 +29,6 @@ jobs:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             triplet: x64-linux
-          # The minimum macOS the binaries require comes from the pinned
-          # deployment target (see vcpkg-triplets), not the image, so
-          # build with the newest SDKs.
           - os: macos-26
             target: aarch64-apple-darwin
             triplet: arm64-osx
@@ -47,7 +44,8 @@ jobs:
         shell: bash
         run: |
           tag="${GITHUB_REF#refs/tags/v}"
-          crate=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          crate=$(cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[] | select(.name == "scryglass") | .version')
           if [ "$tag" != "$crate" ]; then
             echo "tag v$tag does not match crate version $crate"
             exit 1

@@ -73,3 +73,17 @@ jobs:
       # clippy compiles without linking apt FFmpeg, which lacks the all-features libs.
       - name: Check and lint all features
         run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+
+  package:
+    name: Crate packaging
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev
+      - name: List the files the crate would publish
+        run: cargo package --list
+      - name: Dry-run the crates.io publish
+        run: cargo publish --dry-run --locked
