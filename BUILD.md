@@ -35,14 +35,18 @@ Feature requirements:
 | `video`        | Video playback and AVIF decoding    | FFmpeg dev libraries, libclang, audio system libs  |
 | `video-static` | Static FFmpeg link for `video`      | Static FFmpeg libraries; use vcpkg instructions below |
 
-## Editing the video shader
+## Editing the shaders
 
-The YUV-to-RGB video shader is written in Rust in `shaders/yuv/` (a rust-gpu
-crate) and compiled to the committed `src/ui/video_surface/yuv.spv`. Because
-that file is committed and the shader crate is excluded from the workspace,
-normal builds and `cargo install` need only stable Rust.
+The GPU shaders are written in Rust as rust-gpu crates under `shaders/` and
+compiled to committed SPIR-V:
 
-You only regenerate it after changing `shaders/yuv/src/lib.rs`:
+- `shaders/yuv/` -> `src/ui/video_surface/yuv.spv` (YUV-to-RGB video).
+- `shaders/image/` -> `src/ui/image_surface/image.spv` (RGBA still image).
+
+Because the `.spv` files are committed and the shader crates are excluded from
+the workspace, normal builds and `cargo install` need only stable Rust.
+
+You only regenerate them after changing a `shaders/*/src/lib.rs`:
 
 ```
 cargo install --git https://github.com/Rust-GPU/rust-gpu --tag v0.10.0-alpha.1 cargo-gpu
@@ -51,8 +55,9 @@ cargo xtask build-shaders
 
 [cargo-gpu](https://github.com/Rust-GPU/rust-gpu/tree/main/crates/cargo-gpu)
 installs the matching nightly and builds the codegen backend on first run
-(slow), then compiles the shader. Commit the regenerated `yuv.spv`; CI rebuilds
-it and fails if the committed copy is stale.
+(slow), then compiles the shaders. `cargo xtask build-shaders` builds all of
+them. Commit the regenerated `.spv` files. CI rebuilds them and fails if a
+committed copy is stale.
 
 ## Shared Native Builds
 

@@ -4,15 +4,17 @@ on:
   push:
     branches: [master]
     paths:
-      - shaders/yuv/**
+      - shaders/**
       - xtask/**
       - src/ui/video_surface/yuv.spv
+      - src/ui/image_surface/image.spv
       - .github/workflows/shader.yml
   pull_request:
     paths:
-      - shaders/yuv/**
+      - shaders/**
       - xtask/**
       - src/ui/video_surface/yuv.spv
+      - src/ui/image_surface/image.spv
       - .github/workflows/shader.yml
 
 env:
@@ -29,5 +31,5 @@ jobs:
       # cargo-gpu installs the matching nightly and builds the backend itself.
       - run: cargo install --git https://github.com/Rust-GPU/rust-gpu --tag v0.10.0-alpha.1 cargo-gpu
       - run: cargo xtask build-shaders
-      - name: Fail if the committed yuv.spv is stale
-        run: git diff --exit-code -- src/ui/video_surface/yuv.spv
+      - name: Fail if a committed .spv is stale
+        run: git diff --exit-code -- src/ui/video_surface/yuv.spv src/ui/image_surface/image.spv

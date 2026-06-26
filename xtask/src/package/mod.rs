@@ -1,6 +1,6 @@
-//! `cargo xtask package` — build the host platform's two release artifacts:
-//! a slim binary archive (zip on Windows, tar.gz on Unix) and the OS-native
-//! application (Inno installer / AppImage / dmg). Each is one file, with the
+//! `cargo xtask package` builds the host platform's two release artifacts:
+//! the slim binary archive (zip on Windows, tar.gz on Unix) and the OS-native
+//! application (Inno installer, AppImage, or dmg). Each is one file with the
 //! license notices embedded inside.
 
 use std::path::{Path, PathBuf};

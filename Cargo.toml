@@ -24,7 +24,7 @@ bin-dir = "{ name }-v{ version }-{ target }/{ bin }{ binary-ext }"
 members = ["xtask"]
 default-members = ["."]
 # Built by cargo-gpu on a pinned nightly, not the app.
-exclude = ["shaders/yuv"]
+exclude = ["shaders/yuv", "shaders/image"]
 
 [dependencies]
 # image-without-codecs: the media pipeline owns all decoding and hands
