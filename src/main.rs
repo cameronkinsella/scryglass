@@ -9,6 +9,7 @@ mod components;
 mod config;
 #[cfg(feature = "video")]
 mod gpu_keepalive;
+mod ipc;
 mod media;
 mod nav;
 mod platform;
@@ -26,6 +27,13 @@ use std::path::PathBuf;
 fn main() -> anyhow::Result<()> {
     // A file passed by the OS (file association, "Open with", or the shell).
     let initial_path = std::env::args_os().nth(1).map(PathBuf::from);
+
+    // If another instance is running, hand it the path and exit; it opens the
+    // file as a new window.
+    if let ipc::Role::Forwarded = ipc::establish(initial_path.as_deref()) {
+        return Ok(());
+    }
+
     let boot = move || app::boot(initial_path.clone());
 
     // A daemon owns its windows: boot opens the first, and the app keeps

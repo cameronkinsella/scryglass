@@ -14,6 +14,8 @@ pub(super) mod settings;
 pub(crate) mod video_flow;
 pub(crate) mod window;
 
+use std::path::PathBuf;
+
 use iced::Task;
 
 use crate::components::toasts::{Message as ToastMessage, Toast, ToastKind};
@@ -53,15 +55,38 @@ pub fn update(app: &mut App, envelope: Envelope) -> Task<Envelope> {
         Envelope::Opened(_id) => Task::none(),
         Envelope::Closed(id) => {
             app.windows.remove(&id);
-            // A daemon keeps running with no windows, so exit once the last
-            // one is gone.
+            // A daemon keeps running with no windows, so exit once the last one
+            // is gone. iced::exit() does not terminate when the last window
+            // closed while minimized (the idle winit loop never processes it),
+            // so the process would linger holding the IPC socket. Exit directly.
             if app.windows.is_empty() {
-                iced::exit()
-            } else {
-                Task::none()
+                std::process::exit(0);
             }
+            Task::none()
         }
+        Envelope::Forwarded(path) => open_new_window(app, path),
     }
+}
+
+/// Open a new window for a forwarded launch at the last-saved size (the OS
+/// places it). A forward with no path opens an empty window.
+fn open_new_window(app: &mut App, path: Option<PathBuf>) -> Task<Envelope> {
+    let size = iced::Size::new(
+        app.shared.config.window_width,
+        app.shared.config.window_height,
+    );
+    let (id, opened) = iced::window::open(super::boot::window_settings(size));
+    let mut win = super::boot::new_window(id, size);
+    super::recalc_viewport(&mut win, &app.shared);
+    let open = match path {
+        Some(path) => {
+            win.opening_since = Some(iced::time::Instant::now());
+            Envelope::wrap(id, open_path(path))
+        }
+        None => Task::none(),
+    };
+    app.windows.insert(id, win);
+    Task::batch([opened.map(Envelope::Opened), open])
 }
 
 /// Handle a message for one window: auto-dismiss transient UI, then dispatch
@@ -172,5 +197,45 @@ mod tests {
             Envelope::Win(id, Message::Viewer(ViewerMessage::Next)),
         );
         assert!(app.windows[&id].viewer().unwrap().pending_nav.is_none());
+    }
+
+    #[test]
+    fn a_bare_relaunch_opens_an_empty_window() {
+        let (mut app, id) = into_app(empty_app());
+        let _ = update(&mut app, Envelope::Forwarded(None));
+        assert_eq!(app.windows.len(), 2);
+        let new_id = app.windows.keys().find(|k| **k != id).copied().unwrap();
+        let win = &app.windows[&new_id];
+        assert!(matches!(win.session, crate::app::state::Session::Empty));
+        // No path to load, so it shows the drop prompt, not the opening spinner.
+        assert!(win.opening_since.is_none());
+    }
+
+    #[test]
+    fn a_forwarded_path_opens_a_loading_window() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("photo.png");
+        std::fs::write(&file, b"").unwrap();
+        let (mut app, id) = into_app(empty_app());
+        let _ = update(&mut app, Envelope::Forwarded(Some(file)));
+        assert_eq!(app.windows.len(), 2);
+        let new_id = app.windows.keys().find(|k| **k != id).copied().unwrap();
+        assert!(app.windows[&new_id].opening_since.is_some());
+    }
+
+    #[test]
+    fn new_windows_take_the_saved_size_not_the_open_window() {
+        let (mut app, id) = into_app(empty_app());
+        // The open window is large (e.g. it was maximized) but the saved size
+        // is smaller. A new window uses the saved size, never copies the big one.
+        app.windows.get_mut(&id).unwrap().window_size = iced::Size::new(3000.0, 2000.0);
+        app.shared.config.window_width = 800.0;
+        app.shared.config.window_height = 600.0;
+        let _ = update(&mut app, Envelope::Forwarded(None));
+        let new_id = app.windows.keys().find(|k| **k != id).copied().unwrap();
+        assert_eq!(
+            app.windows[&new_id].window_size,
+            iced::Size::new(800.0, 600.0)
+        );
     }
 }

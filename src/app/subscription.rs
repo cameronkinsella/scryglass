@@ -31,6 +31,8 @@ pub fn subscription(app: &App) -> Subscription<Envelope> {
             .map(|id| Envelope::Win(id, Message::Window(WindowMessage::CloseRequested(id)))),
         // A closed window's state is dropped; the app exits with the last one.
         iced::window::close_events().map(Envelope::Closed),
+        // Files forwarded by a second launch open as new windows.
+        ipc_forwards(),
     ];
 
     for (&id, win) in &app.windows {
@@ -42,6 +44,29 @@ pub fn subscription(app: &App) -> Subscription<Envelope> {
     }
 
     Subscription::batch(subs)
+}
+
+/// A long-lived subscription that yields the file paths later launches forward
+/// to this (primary) instance, each to open as a new window.
+fn ipc_forwards() -> Subscription<Envelope> {
+    Subscription::run(forward_stream)
+}
+
+fn forward_stream() -> impl Stream<Item = Envelope> {
+    iced::stream::channel(
+        4,
+        |mut output: iced::futures::channel::mpsc::Sender<Envelope>| async move {
+            if let Some(mut rx) = crate::ipc::take_forwards() {
+                while let Some(forwarded) = rx.recv().await {
+                    if output.send(Envelope::Forwarded(forwarded)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            // Not the primary instance (or already taken): nothing to forward.
+            std::future::pending::<()>().await;
+        },
+    )
 }
 
 /// The timer and watch subscriptions for one window. Untagged; the caller

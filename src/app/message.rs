@@ -36,6 +36,9 @@ pub enum Envelope {
     /// A window closed; its state is dropped, and the process exits once the
     /// last one is gone.
     Closed(iced::window::Id),
+    /// A later launch forwarded a new window to open: a file path, or None for
+    /// a bare relaunch (an empty window).
+    Forwarded(Option<std::path::PathBuf>),
 }
 
 impl Envelope {
