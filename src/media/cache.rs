@@ -83,6 +83,20 @@ impl<T> ImageCache<T> {
         self.budget = budget_bytes;
     }
 
+    /// Drop every entry whose path is not in `keep`, regardless of budget. Used
+    /// to shed an unfocused window's prefetch down to just its on-screen image.
+    pub fn retain(&mut self, keep: &HashSet<PathBuf>) {
+        let mut freed = 0;
+        self.entries.retain(|path, entry| {
+            let stay = keep.contains(path);
+            if !stay {
+                freed += entry.bytes;
+            }
+            stay
+        });
+        self.used_bytes = self.used_bytes.saturating_sub(freed);
+    }
+
     /// Remove an entry (file deleted or renamed), returning its value.
     pub fn remove(&mut self, path: &Path) -> Option<T> {
         let entry = self.entries.remove(path)?;
@@ -191,6 +205,19 @@ mod tests {
         cache.evict_over_budget(&pins(&["new.png"]));
         assert!(!cache.contains(Path::new("old.png")));
         assert!(cache.contains(Path::new("new.png")));
+    }
+
+    #[test]
+    fn retain_drops_unkept_entries_and_frees_their_bytes() {
+        let mut cache: ImageCache<u8> = ImageCache::new(100);
+        cache.insert("a.png".into(), 1, 40);
+        cache.insert("b.png".into(), 2, 30);
+        cache.insert("c.png".into(), 3, 20);
+        cache.retain(&pins(&["b.png"]));
+        assert!(!cache.contains(Path::new("a.png")));
+        assert!(cache.contains(Path::new("b.png")));
+        assert!(!cache.contains(Path::new("c.png")));
+        assert_eq!(cache.used_bytes(), 30);
     }
 
     #[test]

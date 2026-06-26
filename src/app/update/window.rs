@@ -13,14 +13,22 @@ pub enum Message {
     },
     /// Native focus gained or lost, tracked per window for the resource tiers.
     Focused(bool),
+    /// Fires after a window has been unfocused for [`PREFETCH_IDLE`]; drops the
+    /// prefetch look-ahead if the window is still unfocused since `since`.
+    PrefetchIdle(iced::time::Instant),
     /// Periodic poll for OS-minimize state, since iced has no minimize event.
     CheckMinimize,
     /// Result of the minimize poll.
     Minimized(bool),
     CloseRequested(iced::window::Id),
 }
+
+/// How long a window sits unfocused before its prefetch look-ahead is shed. A
+/// brief glance away keeps it; only a sustained switch reclaims the neighbors.
+const PREFETCH_IDLE: std::time::Duration = std::time::Duration::from_secs(15);
 use iced::Task;
 
+use super::fire_prefetch;
 use crate::app::viewer_math::{clamp_pan, compute_zoom};
 use crate::app::{Message as AppMessage, Shared, Window, recalc_viewport};
 
@@ -86,10 +94,45 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
         }
 
         Message::Focused(focused) => {
+            let changed = win.focused != focused;
             win.focused = focused;
             // Losing focus dismisses the zoom pop-up, which has no owner to track.
             if !focused {
                 win.zoom_slider_open = false;
+            }
+            if !changed {
+                return Task::none();
+            }
+            if focused {
+                // Re-warm the look-ahead the idle drop may have shed.
+                win.unfocused_since = None;
+                let pipeline = shared.pipeline.clone();
+                let depth = shared.config.prefetch_depth;
+                if let Some(viewer) = win.viewer_mut() {
+                    return Task::batch(fire_prefetch(&pipeline, viewer, depth));
+                }
+                Task::none()
+            } else {
+                // Arm the idle drop: fire once PREFETCH_IDLE elapses, tagged with
+                // this moment so a refocus-then-unfocus supersedes it.
+                let since = iced::time::Instant::now();
+                win.unfocused_since = Some(since);
+                Task::future(async move {
+                    tokio::time::sleep(PREFETCH_IDLE).await;
+                    AppMessage::Window(Message::PrefetchIdle(since))
+                })
+            }
+        }
+
+        Message::PrefetchIdle(since) => {
+            // Still unfocused since the same moment: shed the prefetch neighbors.
+            // A refocus (or a later unfocus) cleared or moved `unfocused_since`,
+            // so this no-ops on a stale timer.
+            if win.unfocused_since == Some(since)
+                && let Some(viewer) = win.viewer_mut()
+            {
+                viewer.drop_prefetch();
+                win.unfocused_since = None;
             }
             Task::none()
         }
@@ -209,17 +252,10 @@ mod tests {
 
     #[test]
     fn minimizing_releases_the_cached_textures() {
-        use crate::app::state::CachedImage;
         use crate::app::test_support::viewing_app;
 
         let mut app = viewing_app(&["a.png"], 0);
-        let image = CachedImage {
-            handle: iced::widget::image::Handle::from_rgba(2, 2, vec![0u8; 16]),
-            original_size: (2, 2),
-            keepalive: Some(crate::ui::image_surface::test_keepalive()),
-        };
-        let cost = image.byte_cost();
-        app.viewer_mut().unwrap().cache.insert("a.png".into(), image, cost);
+        cache_image(&mut app, "a.png");
 
         let _ = update(&mut app.window, &mut app.shared, Message::Minimized(true));
 
@@ -233,6 +269,65 @@ mod tests {
                 .keepalive
                 .is_none()
         );
+    }
+
+    fn cache_image(app: &mut crate::app::test_support::TestApp, path: &str) {
+        use crate::app::state::CachedImage;
+        let image = CachedImage {
+            handle: iced::widget::image::Handle::from_rgba(2, 2, vec![0u8; 16]),
+            original_size: (2, 2),
+            keepalive: Some(crate::ui::image_surface::test_keepalive()),
+        };
+        let cost = image.byte_cost();
+        app.viewer_mut().unwrap().cache.insert(path.into(), image, cost);
+    }
+
+    #[test]
+    fn losing_focus_arms_the_idle_prefetch_drop() {
+        use crate::app::test_support::viewing_app;
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        assert!(app.window.unfocused_since.is_none());
+        let _ = update(&mut app.window, &mut app.shared, Message::Focused(false));
+        assert!(app.window.unfocused_since.is_some());
+        // Regaining focus disarms it.
+        let _ = update(&mut app.window, &mut app.shared, Message::Focused(true));
+        assert!(app.window.unfocused_since.is_none());
+    }
+
+    #[test]
+    fn the_idle_timer_sheds_prefetch_when_still_unfocused() {
+        use crate::app::test_support::viewing_app;
+        let mut app = viewing_app(&["a.png", "b.png", "c.png"], 1);
+        cache_image(&mut app, "a.png");
+        cache_image(&mut app, "b.png");
+        cache_image(&mut app, "c.png");
+        app.viewer_mut().unwrap().displayed_path = Some("b.png".into());
+
+        let _ = update(&mut app.window, &mut app.shared, Message::Focused(false));
+        let since = app.window.unfocused_since.unwrap();
+        let _ = update(&mut app.window, &mut app.shared, Message::PrefetchIdle(since));
+
+        let v = app.viewer().unwrap();
+        assert!(v.cache.contains(std::path::Path::new("b.png")));
+        assert!(!v.cache.contains(std::path::Path::new("a.png")));
+        assert!(!v.cache.contains(std::path::Path::new("c.png")));
+    }
+
+    #[test]
+    fn a_stale_idle_timer_keeps_the_prefetch() {
+        use crate::app::test_support::viewing_app;
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        cache_image(&mut app, "a.png");
+        cache_image(&mut app, "b.png");
+        app.viewer_mut().unwrap().displayed_path = Some("a.png".into());
+
+        let _ = update(&mut app.window, &mut app.shared, Message::Focused(false));
+        // A refocus disarms the drop; the old timer firing late must no-op.
+        let stale = iced::time::Instant::now();
+        let _ = update(&mut app.window, &mut app.shared, Message::Focused(true));
+        let _ = update(&mut app.window, &mut app.shared, Message::PrefetchIdle(stale));
+
+        assert!(app.viewer().unwrap().cache.contains(std::path::Path::new("b.png")));
     }
 
     #[test]

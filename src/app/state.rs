@@ -288,6 +288,17 @@ impl Viewer {
         list
     }
 
+    /// Shed the prefetch look-ahead down to just the on-screen image, freeing
+    /// the neighbors' VRAM and RAM. Called when a window has sat unfocused long
+    /// enough that its look-ahead is unlikely to be used soon; refocus re-warms
+    /// it. Thumbnails are kept (small, and the filmstrip draws them).
+    pub fn drop_prefetch(&mut self) {
+        let keep: HashSet<PathBuf> = std::iter::once(self.nav.current().to_path_buf())
+            .chain(self.displayed_path.clone())
+            .collect();
+        self.cache.retain(&keep);
+    }
+
     /// The paths that must stay cached: the current image plus the
     /// prefetch window around it.
     pub fn pinned_paths(&self, depth: usize) -> HashSet<PathBuf> {
@@ -519,5 +530,20 @@ mod tests {
         let list = viewer.restore_list();
         assert_eq!(list.len(), 3);
         assert_eq!(list[0].0, PathBuf::from("b.png"));
+    }
+
+    #[test]
+    fn drop_prefetch_keeps_only_the_on_screen_image() {
+        let mut viewer = test_viewer(&["a.png", "b.png", "c.png"], 1);
+        cache_image(&mut viewer, "a.png");
+        cache_image(&mut viewer, "b.png");
+        cache_image(&mut viewer, "c.png");
+        viewer.displayed_path = Some(PathBuf::from("b.png"));
+
+        viewer.drop_prefetch();
+
+        assert!(viewer.cache.contains(Path::new("b.png")));
+        assert!(!viewer.cache.contains(Path::new("a.png")));
+        assert!(!viewer.cache.contains(Path::new("c.png")));
     }
 }
