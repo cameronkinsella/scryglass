@@ -353,7 +353,18 @@ impl ImagePipeline {
         }
     }
 
-    fn draw_resident(
+    /// Write the per-draw uniforms (the dst/src rects) without touching the
+    /// texture maps. Used by the texture-owning render path, which carries its
+    /// own resident image rather than looking one up by id.
+    pub(super) fn write_uniforms(&self, queue: &wgpu::Queue, dst: [f32; 4], src: [f32; 4]) {
+        queue.write_buffer(&self.uniforms, 0, &build_uniforms(dst, src, self.is_srgb));
+    }
+
+    /// Draw a resident image the caller already owns (its `Keepalive` keeps the
+    /// texture alive for the whole frame), bypassing the id→texture map. This is
+    /// what makes a black screen unrepresentable: the window renders the texture it
+    /// holds, so nothing elsewhere can free it out from under the draw.
+    pub(super) fn draw_resident(
         &self,
         render_pass: &mut wgpu::RenderPass<'_>,
         resident: &ResidentImage,

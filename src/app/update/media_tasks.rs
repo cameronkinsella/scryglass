@@ -214,6 +214,7 @@ pub(crate) fn show_loaded(
     viewer.displayed = DisplayedImage::Full {
         handle: image.handle,
         original_size: image.original_size,
+        texture: image.keepalive,
     };
     viewer.displayed_path = Some(path.to_path_buf());
     viewer.pending_since = None;

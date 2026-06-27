@@ -104,10 +104,15 @@ pub enum DisplayedImage {
     None,
     /// A blurred low-res stand-in while the full image decodes.
     Placeholder(Thumb),
-    /// The fully decoded image, held as its RGBA source handle.
+    /// The fully decoded image, held as its RGBA source handle plus the GPU
+    /// texture it renders. Owning the texture here (not looking it up by id) is
+    /// what makes a black screen impossible: nothing can free a texture the
+    /// on-screen image still holds. `None` only for the animation/bootstrap
+    /// paths, which fall back to the id→texture map.
     Full {
         handle: Handle,
         original_size: (u32, u32),
+        texture: Option<crate::ui::image_surface::Keepalive>,
     },
     /// Live video, drawn by the GPU YUV surface. Carries dimensions for
     /// zoom and the info panel. The frame planes live on the viewer.
@@ -629,6 +634,7 @@ mod tests {
         viewer.displayed = DisplayedImage::Full {
             handle: Handle::from_rgba(2, 2, vec![0u8; 16]),
             original_size: (2, 2),
+            texture: None,
         };
         viewer.displayed_path = Some(PathBuf::from("a.png"));
 

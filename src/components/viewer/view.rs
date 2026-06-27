@@ -162,8 +162,10 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
         DisplayedImage::Full {
             handle,
             original_size,
+            texture,
         } => ui::image_surface::view(
             handle.clone(),
+            texture.clone(),
             *original_size,
             viewer.zoom,
             viewer.pan,

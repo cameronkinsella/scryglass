@@ -7,14 +7,19 @@ use iced::widget::image::Handle;
 use iced::widget::shader;
 use iced::{Element, Length, Rectangle, mouse, wgpu};
 
-use super::pipeline::ImagePipeline;
+use super::pipeline::{ImagePipeline, Keepalive};
 use crate::app::Message;
 use crate::ui::image_display::display_geometry;
 
 /// Build the still-image surface element for `handle` at the given zoom/pan.
 /// Fills the image area like the placeholder and video paths do.
+///
+/// When `texture` is `Some`, the surface renders that resident texture directly
+/// (the display owns it, so a black screen is impossible). `None` falls back to
+/// the id→texture map for the animation/bootstrap paths that don't hold a keepalive.
 pub fn view(
     handle: Handle,
+    texture: Option<Keepalive>,
     original: (u32, u32),
     zoom: f32,
     pan: (f32, f32),
@@ -22,7 +27,7 @@ pub fn view(
     pixelated: bool,
 ) -> Element<'static, Message> {
     shader::Shader::new(ImageSurface::new(
-        handle, original, zoom, pan, viewport, pixelated,
+        handle, texture, original, zoom, pan, viewport, pixelated,
     ))
     .width(Length::Fill)
     .height(Length::Fill)
@@ -41,6 +46,8 @@ pub fn warmup() -> Element<'static, Message> {
 /// The shader program: the image to show and where to place it.
 struct ImageSurface {
     handle: Handle,
+    /// The resident texture the display owns, drawn directly when present.
+    texture: Option<Keepalive>,
     valid: bool,
     /// Destination rect in normalized widget space: x0, y0, x1, y1.
     dst: [f32; 4],
@@ -53,6 +60,7 @@ struct ImageSurface {
 impl ImageSurface {
     fn new(
         handle: Handle,
+        texture: Option<Keepalive>,
         original: (u32, u32),
         zoom: f32,
         pan: (f32, f32),
@@ -63,6 +71,7 @@ impl ImageSurface {
         match display_geometry(zoom, pan, viewport, original) {
             Some((dst, src)) => Self {
                 handle,
+                texture,
                 valid: true,
                 dst,
                 src,
@@ -70,6 +79,7 @@ impl ImageSurface {
             },
             None => Self {
                 handle,
+                texture,
                 valid: false,
                 dst: [0.0; 4],
                 src: [0.0; 4],
@@ -82,6 +92,7 @@ impl ImageSurface {
     fn warmup() -> Self {
         Self {
             handle: Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
+            texture: None,
             valid: false,
             dst: [0.0; 4],
             src: [0.0; 4],
@@ -102,6 +113,7 @@ impl<T> shader::Program<T> for ImageSurface {
     ) -> ImagePrimitive {
         ImagePrimitive {
             handle: self.handle.clone(),
+            texture: self.texture.clone(),
             valid: self.valid,
             dst: self.dst,
             src: self.src,
@@ -113,6 +125,9 @@ impl<T> shader::Program<T> for ImageSurface {
 /// One still's worth of work handed to the renderer.
 pub struct ImagePrimitive {
     handle: Handle,
+    /// The resident texture to draw, owned for the whole frame. `None` falls back
+    /// to the id→texture map (animation/bootstrap).
+    texture: Option<Keepalive>,
     valid: bool,
     dst: [f32; 4],
     src: [f32; 4],
@@ -139,14 +154,23 @@ impl shader::Primitive for ImagePrimitive {
         _bounds: &Rectangle,
         _viewport: &shader::Viewport,
     ) {
-        if self.valid {
-            pipeline.prepare(device, queue, &self.handle, self.dst, self.src);
+        if !self.valid {
+            return;
+        }
+        // A held texture only needs the uniforms written; the id→texture map (and
+        // its inline upload) is the fallback for the keepalive-less paths.
+        match &self.texture {
+            Some(_) => pipeline.write_uniforms(queue, self.dst, self.src),
+            None => pipeline.prepare(device, queue, &self.handle, self.dst, self.src),
         }
     }
 
     fn draw(&self, pipeline: &ImagePipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
         if self.valid {
-            pipeline.draw(render_pass, self.nearest);
+            match &self.texture {
+                Some(texture) => pipeline.draw_resident(render_pass, texture, self.nearest),
+                None => pipeline.draw(render_pass, self.nearest),
+            }
         }
         true
     }

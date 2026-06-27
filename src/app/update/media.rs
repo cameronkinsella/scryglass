@@ -296,6 +296,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             viewer.displayed = DisplayedImage::Full {
                 handle: image.handle,
                 original_size: image.original_size,
+                texture: image.keepalive,
             };
             viewer.displayed_rotation = baked;
             viewer.pan = (0.0, 0.0);
@@ -332,6 +333,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                     viewer.displayed = DisplayedImage::Full {
                         handle: image.handle.clone(),
                         original_size: image.original_size,
+                        texture: image.keepalive.clone(),
                     };
                 }
                 let cost = image.byte_cost();
@@ -392,6 +394,9 @@ pub(crate) fn update_anim(
         viewer.displayed = DisplayedImage::Full {
             handle,
             original_size: (w, h),
+            // Animation frames re-upload every tick and have no app-held keepalive
+            // here, so they keep the id→texture render path.
+            texture: None,
         };
         viewer.displayed_path = Some(viewer.nav.current().to_path_buf());
         viewer.pending_since = None;
