@@ -74,14 +74,14 @@ fn forward_stream() -> impl Stream<Item = Envelope> {
 fn window_subscriptions(id: window::Id, win: &Window) -> Vec<Subscription<Message>> {
     let mut subs = Vec::new();
 
-    // Poll OS-minimize state (iced has no minimize event) for any window with a
-    // viewer, so a minimize both reclaims its textures and pauses its video. The
-    // poll is brisk while there is playback (a snappy pause) and lazy otherwise.
-    if let Some(viewer) = win.viewer() {
-        let playing = viewer.video.is_some() || viewer.anim_player.is_animating();
-        let period = if playing { 200 } else { 500 };
+    // iced has no minimize event, so focus changes drive minimize/restore
+    // detection directly (see the Focused handler). This slow fallback only
+    // covers a minimize that happens while the window is already unfocused, for
+    // which no event fires. A focused window can't be minimized, so it never
+    // polls.
+    if win.viewer().is_some() && !win.focused {
         subs.push(
-            iced::time::every(Duration::from_millis(period))
+            iced::time::every(Duration::from_secs(1))
                 .map(|_| Message::Window(WindowMessage::CheckMinimize)),
         );
     }

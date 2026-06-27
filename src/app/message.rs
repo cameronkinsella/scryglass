@@ -106,6 +106,13 @@ pub fn is_modal_blocked(msg: &Message) -> bool {
     )
 }
 
+/// Window-system events and periodic polls (focus, minimize checks, resize,
+/// move, the resource-tier timers). None of these are the user interacting
+/// outside an open menu, so they must never dismiss one.
+pub fn is_background_message(msg: &Message) -> bool {
+    matches!(msg, Message::Window(w) if !matches!(w, window::Message::CloseRequested(_)))
+}
+
 pub fn is_menu_message(msg: &Message) -> bool {
     matches!(
         msg,
@@ -150,11 +157,6 @@ pub fn is_menu_message(msg: &Message) -> bool {
                     | viewer::Message::ToggleInfo
                     | viewer::Message::ToggleCheckerboard
             )
-            | Message::Window(
-                window::Message::Resized(_)
-                    | window::Message::Moved(_)
-                    | window::Message::WindowState { .. }
-            )
             | Message::Modal(modal::Message::RequestDelete | modal::Message::RequestRename)
     )
 }
@@ -195,11 +197,6 @@ pub fn is_context_menu_message(msg: &Message) -> bool {
                     | viewer::Message::NextReleased
                     | viewer::Message::PrevReleased
             )
-            | Message::Window(
-                window::Message::Resized(_)
-                    | window::Message::Moved(_)
-                    | window::Message::WindowState { .. }
-            )
     )
 }
 
@@ -227,12 +224,29 @@ mod tests {
     #[test]
     fn passive_messages_do_not_close_menus() {
         assert!(is_menu_message(&media::Message::SpinnerTick.into()));
-        assert!(is_menu_message(
-            &window::Message::Resized(iced::Size::new(800.0, 600.0)).into()
-        ));
         assert!(is_menu_message(&toasts::Message::Dismiss(7).into()));
         assert!(is_menu_message(
             &open::Message::FileDialogResult(None).into()
+        ));
+    }
+
+    #[test]
+    fn background_window_events_do_not_close_menus() {
+        // The minimize poll and focus changes must never close a menu (the bug
+        // where the periodic CheckMinimize self-closed it).
+        assert!(is_background_message(
+            &window::Message::CheckMinimize.into()
+        ));
+        assert!(is_background_message(
+            &window::Message::Focused(false).into()
+        ));
+        assert!(is_background_message(
+            &window::Message::Resized(iced::Size::new(800.0, 600.0)).into()
+        ));
+        assert!(!is_menu_message(&window::Message::CheckMinimize.into()));
+        // A genuine close request is not background.
+        assert!(!is_background_message(
+            &window::Message::CloseRequested(iced::window::Id::unique()).into()
         ));
     }
 
@@ -259,7 +273,9 @@ mod tests {
             &context_menu::Message::OpenImageLocation.into()
         ));
         assert!(is_context_menu_message(&media::Message::SpinnerTick.into()));
-        assert!(is_context_menu_message(
+        // Window-system events are background, not context-menu messages, but
+        // still must not close the context menu.
+        assert!(is_background_message(
             &window::Message::Resized(iced::Size::new(800.0, 600.0)).into()
         ));
     }

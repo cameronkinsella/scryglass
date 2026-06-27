@@ -33,7 +33,9 @@ pub(crate) use navigation::{
 };
 pub(crate) use settings::{probe_disk_cache_size, save_config};
 
-use super::message::{is_context_menu_message, is_menu_message, is_modal_blocked};
+use super::message::{
+    is_background_message, is_context_menu_message, is_menu_message, is_modal_blocked,
+};
 use super::state::Direction;
 use super::{App, Envelope, Message, Shared, Window};
 
@@ -131,13 +133,16 @@ fn open_new_window(app: &mut App, path: Option<PathBuf>) -> Task<Envelope> {
 /// Handle a message for one window: auto-dismiss transient UI, then dispatch
 /// to the component that owns it.
 fn dispatch(win: &mut Window, shared: &mut Shared, message: Message) -> Task<Message> {
-    // Auto-dismiss any open dropdown when the user interacts outside the menu.
-    if win.open_menu.is_some() && !is_menu_message(&message) {
+    // Auto-dismiss any open dropdown when the user interacts outside the menu,
+    // but never on a background event like the minimize poll.
+    if win.open_menu.is_some() && !is_menu_message(&message) && !is_background_message(&message) {
         win.open_menu = None;
     }
 
-    // Auto-dismiss context menu on any non-context-menu interaction.
-    if win.context_menu_pos.is_some() && !is_context_menu_message(&message) {
+    if win.context_menu_pos.is_some()
+        && !is_context_menu_message(&message)
+        && !is_background_message(&message)
+    {
         win.context_menu_pos = None;
     }
 

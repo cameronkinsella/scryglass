@@ -103,6 +103,9 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             if !changed {
                 return Task::none();
             }
+            // A focus change brackets a minimize/restore, so confirm the
+            // minimize state on it instead of polling continuously.
+            let minimize = check_minimize(win.id);
             if focused {
                 // Re-warm the look-ahead the idle drop may have shed, and
                 // promote the on-screen image back to full-res for crisp zoom.
@@ -115,18 +118,20 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                     if let Some(displayed) = viewer.displayed_path.clone() {
                         tasks.push(fire_reupload_res(viewer, &displayed, Size::ZERO, true));
                     }
+                    tasks.push(minimize);
                     return Task::batch(tasks);
                 }
-                Task::none()
+                minimize
             } else {
                 // Arm the idle drop: fire once PREFETCH_IDLE elapses, tagged with
                 // this moment so a refocus-then-unfocus supersedes it.
                 let since = iced::time::Instant::now();
                 win.unfocused_since = Some(since);
-                Task::future(async move {
+                let arm = Task::future(async move {
                     tokio::time::sleep(PREFETCH_IDLE).await;
                     AppMessage::Window(Message::PrefetchIdle(since))
-                })
+                });
+                Task::batch([arm, minimize])
             }
         }
 
@@ -151,8 +156,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             Task::none()
         }
 
-        Message::CheckMinimize => iced::window::is_minimized(win.id)
-            .map(|m| AppMessage::Window(Message::Minimized(m.unwrap_or(false)))),
+        Message::CheckMinimize => check_minimize(win.id),
 
         Message::Minimized(minimized) => {
             let changed = win.minimized != minimized;
@@ -227,6 +231,19 @@ fn check_window_state(id: iced::window::Id) -> Task<AppMessage> {
 /// maximized, minimized, nor fullscreen.
 fn should_persist(maximized: bool, minimized: bool, mode: iced::window::Mode) -> bool {
     !maximized && !minimized && mode == iced::window::Mode::Windowed
+}
+
+/// Query the OS minimize state. iced surfaces no minimize event on any backend
+/// (it drops winit's `Occluded`), so this polls `is_minimized` on the focus
+/// changes that bracket a minimize, plus a slow fallback for a minimize that
+/// lands while the window is already unfocused. The poll is deliberate, not a
+/// stopgap: the only event-driven alternative is a Windows-only 0x0 `Resized`,
+/// and a one-platform event cannot be regression-tested in CI the way an
+/// `is_minimized` poll can. The query reports on every backend but Wayland,
+/// which has no way to know its own minimize state.
+fn check_minimize(id: iced::window::Id) -> Task<AppMessage> {
+    iced::window::is_minimized(id)
+        .map(|m| AppMessage::Window(Message::Minimized(m.unwrap_or(false))))
 }
 
 #[cfg(test)]
