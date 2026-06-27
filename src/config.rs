@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 use std::sync::LazyLock;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -100,6 +101,219 @@ impl ZoomMode {
     }
 }
 
+/// What resolution a focused window's prefetch neighbors are uploaded at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrefetchVram {
+    /// Full-resolution texture (instant crisp zoom when navigated to).
+    FullRes,
+    /// Downscaled to the window (smaller VRAM); promoted on navigation.
+    #[default]
+    ViewRes,
+    /// No texture; decoded into RAM only, uploaded on navigation.
+    None,
+}
+
+/// When a backgrounded window's RAM source is evicted (re-decoded on return).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvictPolicy {
+    /// Never evict; keep the full-res source in RAM.
+    Never,
+    /// Evict after a fixed delay.
+    Fixed(Duration),
+    /// Evict after a delay that scales with the image's decode time.
+    Dynamic,
+}
+
+impl Serialize for EvictPolicy {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            EvictPolicy::Never => s.serialize_str("never"),
+            EvictPolicy::Dynamic => s.serialize_str("dynamic"),
+            EvictPolicy::Fixed(d) => s.serialize_str(&humantime::format_duration(*d).to_string()),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EvictPolicy {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(match s.as_str() {
+            "never" => EvictPolicy::Never,
+            "dynamic" => EvictPolicy::Dynamic,
+            _ => {
+                EvictPolicy::Fixed(humantime::parse_duration(&s).map_err(serde::de::Error::custom)?)
+            }
+        })
+    }
+}
+
+/// Serde for a `Duration` as a humantime string (`"15s"`, `"200ms"`).
+mod humantime_dur {
+    use std::time::Duration;
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&humantime::format_duration(*d).to_string())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
+        let s = String::deserialize(d)?;
+        humantime::parse_duration(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Serde for an `Option<Duration>` where `None` is the string `"never"`.
+mod humantime_opt {
+    use std::time::Duration;
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(d: &Option<Duration>, s: S) -> Result<S::Ok, S::Error> {
+        match d {
+            None => s.serialize_str("never"),
+            Some(d) => s.serialize_str(&humantime::format_duration(*d).to_string()),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+        let s = String::deserialize(d)?;
+        if s.eq_ignore_ascii_case("never") {
+            Ok(None)
+        } else {
+            humantime::parse_duration(&s)
+                .map(Some)
+                .map_err(serde::de::Error::custom)
+        }
+    }
+}
+
+/// The reclamation pipeline a backgrounded window runs: full-res VRAM, then
+/// (after each timer) demote to view-res, drop the VRAM, and evict the RAM
+/// source. A `None` timer skips that stage. Shared by the unfocused and
+/// minimized states so their logic and labels are identical.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StatePipeline {
+    /// Demote the on-screen image full-res -> view-res after this delay.
+    #[serde(with = "humantime_opt")]
+    pub demote_vram_after: Option<Duration>,
+    /// Drop the on-screen image's VRAM entirely after this delay.
+    #[serde(with = "humantime_opt")]
+    pub drop_vram_after: Option<Duration>,
+    /// When to evict the RAM source.
+    pub evict_ram: EvictPolicy,
+    /// Dynamic eviction: delay for an instant-decode image.
+    #[serde(with = "humantime_dur")]
+    pub evict_ram_min: Duration,
+    /// Dynamic eviction: delay for an image at the decode-latency ceiling.
+    #[serde(with = "humantime_dur")]
+    pub evict_ram_max: Duration,
+    /// Dynamic eviction: an image slower than this to decode is never evicted.
+    #[serde(with = "humantime_dur")]
+    pub max_decode_latency: Duration,
+}
+
+impl Default for StatePipeline {
+    /// Conservative fallback for a deleted key: do nothing aggressive. The real
+    /// per-state defaults are set in [`ResourceConfig::default`].
+    fn default() -> Self {
+        Self {
+            demote_vram_after: None,
+            drop_vram_after: None,
+            evict_ram: EvictPolicy::Never,
+            evict_ram_min: Duration::from_secs(30),
+            evict_ram_max: Duration::from_secs(600),
+            max_decode_latency: Duration::from_millis(200),
+        }
+    }
+}
+
+impl StatePipeline {
+    /// The RAM-eviction delay for an image given its decode time, or `None` to
+    /// never evict. Dynamic mode interpolates linearly between `evict_ram_min`
+    /// (instant decode) and `evict_ram_max` (at the latency ceiling); an image
+    /// at or past the ceiling, or one whose decode time is unknown, is kept.
+    // Consumed by the eviction pipeline stage; tested here in isolation.
+    #[allow(dead_code)]
+    pub fn evict_delay(&self, decode: Option<Duration>) -> Option<Duration> {
+        match self.evict_ram {
+            EvictPolicy::Never => None,
+            EvictPolicy::Fixed(d) => Some(d),
+            EvictPolicy::Dynamic => {
+                let decode = decode?;
+                if decode >= self.max_decode_latency {
+                    return None;
+                }
+                let t = decode.as_secs_f64() / self.max_decode_latency.as_secs_f64();
+                let min = self.evict_ram_min.as_secs_f64();
+                let max = self.evict_ram_max.as_secs_f64();
+                Some(Duration::from_secs_f64(min + (max - min) * t))
+            }
+        }
+    }
+}
+
+/// The minimized state's pipeline plus its video-pause toggle.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MinimizedConfig {
+    /// Pause an open video while the window is minimized.
+    pub pause_video: bool,
+    #[serde(flatten)]
+    pub pipeline: StatePipeline,
+}
+
+impl Default for MinimizedConfig {
+    fn default() -> Self {
+        Self {
+            pause_video: true,
+            pipeline: StatePipeline::default(),
+        }
+    }
+}
+
+/// Advanced memory/VRAM resource model. The defaults are scryglass's opinion;
+/// every field is tunable in `config.toml`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ResourceConfig {
+    /// VRAM tier for a focused window's prefetch neighbors.
+    pub prefetch_vram: PrefetchVram,
+    /// Reclamation pipeline for an unfocused window.
+    pub unfocused: StatePipeline,
+    /// Reclamation pipeline for a minimized window.
+    pub minimized: MinimizedConfig,
+}
+
+impl Default for ResourceConfig {
+    fn default() -> Self {
+        Self {
+            prefetch_vram: PrefetchVram::ViewRes,
+            unfocused: StatePipeline {
+                demote_vram_after: Some(Duration::from_secs(15)),
+                drop_vram_after: None,
+                evict_ram: EvictPolicy::Dynamic,
+                evict_ram_min: Duration::from_secs(30),
+                evict_ram_max: Duration::from_secs(600),
+                max_decode_latency: Duration::from_millis(200),
+            },
+            minimized: MinimizedConfig {
+                pause_video: true,
+                pipeline: StatePipeline {
+                    demote_vram_after: None,
+                    drop_vram_after: Some(Duration::ZERO),
+                    evict_ram: EvictPolicy::Dynamic,
+                    evict_ram_min: Duration::from_secs(15),
+                    evict_ram_max: Duration::from_secs(300),
+                    max_decode_latency: Duration::from_millis(200),
+                },
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -157,6 +371,8 @@ pub struct AppConfig {
     pub show_info: bool,
     /// Draw a checkerboard behind images (reveals transparency).
     pub show_checkerboard: bool,
+    /// Advanced memory/VRAM resource model (see `docs/advanced-settings.md`).
+    pub resource: ResourceConfig,
 }
 
 impl Default for AppConfig {
@@ -189,6 +405,7 @@ impl Default for AppConfig {
             show_footer: true,
             show_info: false,
             show_checkerboard: false,
+            resource: ResourceConfig::default(),
         }
     }
 }
@@ -291,6 +508,28 @@ mod tests {
             show_footer: true,
             show_info: true,
             show_checkerboard: true,
+            resource: ResourceConfig {
+                prefetch_vram: PrefetchVram::FullRes,
+                unfocused: StatePipeline {
+                    demote_vram_after: Some(Duration::from_secs(20)),
+                    drop_vram_after: None,
+                    evict_ram: EvictPolicy::Fixed(Duration::from_secs(90)),
+                    evict_ram_min: Duration::from_secs(25),
+                    evict_ram_max: Duration::from_secs(500),
+                    max_decode_latency: Duration::from_millis(150),
+                },
+                minimized: MinimizedConfig {
+                    pause_video: false,
+                    pipeline: StatePipeline {
+                        demote_vram_after: Some(Duration::from_secs(5)),
+                        drop_vram_after: Some(Duration::from_secs(10)),
+                        evict_ram: EvictPolicy::Never,
+                        evict_ram_min: Duration::from_secs(10),
+                        evict_ram_max: Duration::from_secs(120),
+                        max_decode_latency: Duration::from_millis(250),
+                    },
+                },
+            },
         };
         assert_eq!(AppConfig::from_toml(&cfg.to_toml()), cfg);
     }
@@ -316,6 +555,91 @@ mod tests {
         let cfg = AppConfig::from_toml("sort_key = \"NaturalName\"\nshow_footer = false\n");
         assert_eq!(cfg.sort_key, SortKey::Name);
         assert!(!cfg.show_footer);
+    }
+
+    #[test]
+    fn timers_parse_human_durations_and_never() {
+        let cfg = AppConfig::from_toml(
+            "[resource.unfocused]\ndemote_vram_after = \"500ms\"\ndrop_vram_after = \"never\"\n",
+        );
+        assert_eq!(
+            cfg.resource.unfocused.demote_vram_after,
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(cfg.resource.unfocused.drop_vram_after, None);
+    }
+
+    #[test]
+    fn evict_policy_parses_never_dynamic_and_a_duration() {
+        let parse = |s: &str| {
+            AppConfig::from_toml(&format!("[resource.unfocused]\nevict_ram = \"{s}\"\n"))
+                .resource
+                .unfocused
+                .evict_ram
+        };
+        assert_eq!(parse("never"), EvictPolicy::Never);
+        assert_eq!(parse("dynamic"), EvictPolicy::Dynamic);
+        assert_eq!(parse("2m"), EvictPolicy::Fixed(Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn evict_delay_never_and_fixed() {
+        let mut p = StatePipeline::default();
+        assert_eq!(p.evict_delay(Some(Duration::from_millis(10))), None);
+        p.evict_ram = EvictPolicy::Fixed(Duration::from_secs(60));
+        assert_eq!(
+            p.evict_delay(Some(Duration::from_millis(10))),
+            Some(Duration::from_secs(60))
+        );
+        // Fixed ignores decode time, even unknown.
+        assert_eq!(p.evict_delay(None), Some(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn evict_delay_dynamic_interpolates_and_keeps_slow_or_unknown() {
+        let p = StatePipeline {
+            evict_ram: EvictPolicy::Dynamic,
+            evict_ram_min: Duration::from_secs(30),
+            evict_ram_max: Duration::from_secs(630),
+            max_decode_latency: Duration::from_millis(200),
+            ..StatePipeline::default()
+        };
+        // Instant decode -> min; halfway -> midpoint; at/over ceiling -> never.
+        assert_eq!(
+            p.evict_delay(Some(Duration::ZERO)),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            p.evict_delay(Some(Duration::from_millis(100))),
+            Some(Duration::from_secs(330))
+        );
+        assert_eq!(p.evict_delay(Some(Duration::from_millis(200))), None);
+        assert_eq!(p.evict_delay(Some(Duration::from_millis(250))), None);
+        assert_eq!(p.evict_delay(None), None);
+    }
+
+    #[test]
+    fn every_config_key_is_documented() {
+        fn collect_keys(value: &toml::Value, out: &mut std::collections::BTreeSet<String>) {
+            if let toml::Value::Table(table) = value {
+                for (key, child) in table {
+                    out.insert(key.clone());
+                    collect_keys(child, out);
+                }
+            }
+        }
+        let toml_str = AppConfig::default().to_toml();
+        let value: toml::Value = toml::from_str(&toml_str).unwrap();
+        let mut keys = std::collections::BTreeSet::new();
+        collect_keys(&value, &mut keys);
+
+        let doc = include_str!("../docs/advanced-settings.md");
+        for key in &keys {
+            assert!(
+                doc.contains(key.as_str()),
+                "config key `{key}` is not documented in docs/advanced-settings.md"
+            );
+        }
     }
 
     #[test]
