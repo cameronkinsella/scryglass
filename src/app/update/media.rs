@@ -320,7 +320,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             // Only promote if navigation is still resting on this image, so a
             // quick pass-through never re-uploads it at full resolution.
             if viewer.displayed_path.as_deref() == Some(&*path) {
-                crate::app::update::fire_promote(viewer, &path)
+                crate::app::update::fire_reupload_res(viewer, &path, iced::Size::ZERO, true)
             } else {
                 Task::none()
             }
@@ -517,7 +517,13 @@ mod tests {
         );
 
         let v = app.viewer().unwrap();
-        assert!(v.cache.peek(Path::new("a.png")).unwrap().keepalive.is_some());
+        assert!(
+            v.cache
+                .peek(Path::new("a.png"))
+                .unwrap()
+                .keepalive
+                .is_some()
+        );
     }
 
     #[test]

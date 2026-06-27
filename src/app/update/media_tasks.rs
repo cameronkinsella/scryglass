@@ -436,28 +436,34 @@ pub(crate) fn fire_restore_textures(
         .collect()
 }
 
-/// Promote the on-screen image to a full-resolution texture so zoom stays
-/// crisp, re-uploading from its in-RAM full-res handle (no disk). A no-op when
-/// it is already full-res or not cached.
-pub(crate) fn fire_promote(viewer: &Viewer, path: &std::path::Path) -> Task<Message> {
+/// Re-upload `path`'s texture at full resolution (`full`, for crisp zoom on the
+/// focused image) or downscaled to view resolution (for an unfocused or
+/// passed-by image), from its in-RAM full-res handle (no disk). A no-op when it
+/// is already at that resolution or not cached.
+pub(crate) fn fire_reupload_res(
+    viewer: &Viewer,
+    path: &std::path::Path,
+    view: Size,
+    full: bool,
+) -> Task<Message> {
     let Some(cached) = viewer.cache.peek(path) else {
         return Task::none();
     };
-    if cached.gpu_full {
+    if cached.gpu_full == full {
         return Task::none();
     }
     let handle = cached.handle.clone();
     let original_size = cached.original_size;
     let p = path.to_path_buf();
     Task::future(async move {
-        let keepalive = upload_at_res(&handle, original_size, Size::ZERO, true).await;
+        let keepalive = upload_at_res(&handle, original_size, view, full).await;
         Message::Media(MediaMessage::Reuploaded {
             path: p,
             image: CachedImage {
                 handle,
                 original_size,
                 keepalive,
-                gpu_full: true,
+                gpu_full: full,
             },
         })
     })

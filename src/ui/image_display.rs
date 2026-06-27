@@ -376,8 +376,14 @@ mod tests {
 
     #[test]
     fn geometry_zero_viewport_draws_nothing() {
-        assert_eq!(display_geometry(1.0, (0.0, 0.0), (0.0, 600.0), (400, 300)), None);
-        assert_eq!(display_geometry(1.0, (0.0, 0.0), (800.0, 0.0), (400, 300)), None);
+        assert_eq!(
+            display_geometry(1.0, (0.0, 0.0), (0.0, 600.0), (400, 300)),
+            None
+        );
+        assert_eq!(
+            display_geometry(1.0, (0.0, 0.0), (800.0, 0.0), (400, 300)),
+            None
+        );
     }
 
     #[test]

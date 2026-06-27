@@ -60,10 +60,7 @@ pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Envelope>) {
 
     let mut windows = HashMap::new();
     windows.insert(id, win);
-    let app = App {
-        shared,
-        windows,
-    };
+    let app = App { shared, windows };
     (
         app,
         Task::batch([

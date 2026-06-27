@@ -9,8 +9,8 @@ use iced::widget::shader;
 use iced::{Element, Length, Rectangle, mouse, wgpu};
 
 use super::pipeline::VideoPipeline;
-use crate::ui::image_display::display_geometry;
 use crate::app::Message;
+use crate::ui::image_display::display_geometry;
 use crate::video::VideoFrame;
 
 /// Build the video surface element for the current frame at the given

@@ -529,8 +529,22 @@ mod tests {
         // The RAM sources stay cached, only the GPU keepalives are gone.
         assert!(viewer.cache.contains(Path::new("a.png")));
         assert!(viewer.cache.contains(Path::new("b.png")));
-        assert!(viewer.cache.peek(Path::new("a.png")).unwrap().keepalive.is_none());
-        assert!(viewer.cache.peek(Path::new("b.png")).unwrap().keepalive.is_none());
+        assert!(
+            viewer
+                .cache
+                .peek(Path::new("a.png"))
+                .unwrap()
+                .keepalive
+                .is_none()
+        );
+        assert!(
+            viewer
+                .cache
+                .peek(Path::new("b.png"))
+                .unwrap()
+                .keepalive
+                .is_none()
+        );
     }
 
     #[test]

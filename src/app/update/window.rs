@@ -28,7 +28,7 @@ pub enum Message {
 const PREFETCH_IDLE: std::time::Duration = std::time::Duration::from_secs(15);
 use iced::Task;
 
-use super::fire_prefetch;
+use super::{fire_prefetch, fire_reupload_res};
 use crate::app::viewer_math::{clamp_pan, compute_zoom};
 use crate::app::{Message as AppMessage, Shared, Window, recalc_viewport};
 
@@ -104,13 +104,18 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 return Task::none();
             }
             if focused {
-                // Re-warm the look-ahead the idle drop may have shed.
+                // Re-warm the look-ahead the idle drop may have shed, and
+                // promote the on-screen image back to full-res for crisp zoom.
                 win.unfocused_since = None;
                 let pipeline = shared.pipeline.clone();
                 let depth = shared.config.prefetch_depth;
                 let view = win.viewport_size;
                 if let Some(viewer) = win.viewer_mut() {
-                    return Task::batch(fire_prefetch(&pipeline, viewer, depth, view));
+                    let mut tasks = fire_prefetch(&pipeline, viewer, depth, view);
+                    if let Some(displayed) = viewer.displayed_path.clone() {
+                        tasks.push(fire_reupload_res(viewer, &displayed, Size::ZERO, true));
+                    }
+                    return Task::batch(tasks);
                 }
                 Task::none()
             } else {
@@ -126,14 +131,22 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
         }
 
         Message::PrefetchIdle(since) => {
-            // Still unfocused since the same moment: shed the prefetch neighbors.
-            // A refocus (or a later unfocus) cleared or moved `unfocused_since`,
-            // so this no-ops on a stale timer.
-            if win.unfocused_since == Some(since)
-                && let Some(viewer) = win.viewer_mut()
-            {
-                viewer.drop_prefetch();
-                win.unfocused_since = None;
+            // Still unfocused since the same moment: shed the prefetch neighbors
+            // and demote the on-screen image to view resolution, so this window
+            // holds nothing at full-res while it sits in the background. A refocus
+            // (or a later unfocus) cleared or moved `unfocused_since`, so a stale
+            // timer no-ops.
+            if win.unfocused_since != Some(since) {
+                return Task::none();
+            }
+            win.unfocused_since = None;
+            let view = win.viewport_size;
+            let Some(viewer) = win.viewer_mut() else {
+                return Task::none();
+            };
+            viewer.drop_prefetch();
+            if let Some(displayed) = viewer.displayed_path.clone() {
+                return fire_reupload_res(viewer, &displayed, view, false);
             }
             Task::none()
         }
@@ -282,7 +295,10 @@ mod tests {
             gpu_full: true,
         };
         let cost = image.byte_cost();
-        app.viewer_mut().unwrap().cache.insert(path.into(), image, cost);
+        app.viewer_mut()
+            .unwrap()
+            .cache
+            .insert(path.into(), image, cost);
     }
 
     #[test]
@@ -308,7 +324,11 @@ mod tests {
 
         let _ = update(&mut app.window, &mut app.shared, Message::Focused(false));
         let since = app.window.unfocused_since.unwrap();
-        let _ = update(&mut app.window, &mut app.shared, Message::PrefetchIdle(since));
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::PrefetchIdle(since),
+        );
 
         let v = app.viewer().unwrap();
         assert!(v.cache.contains(std::path::Path::new("b.png")));
@@ -328,9 +348,18 @@ mod tests {
         // A refocus disarms the drop; the old timer firing late must no-op.
         let stale = iced::time::Instant::now();
         let _ = update(&mut app.window, &mut app.shared, Message::Focused(true));
-        let _ = update(&mut app.window, &mut app.shared, Message::PrefetchIdle(stale));
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::PrefetchIdle(stale),
+        );
 
-        assert!(app.viewer().unwrap().cache.contains(std::path::Path::new("b.png")));
+        assert!(
+            app.viewer()
+                .unwrap()
+                .cache
+                .contains(std::path::Path::new("b.png"))
+        );
     }
 
     #[test]
@@ -489,7 +518,11 @@ mod tests {
         app.window.maximized = true;
         app.window.fullscreen = true;
         let id = app.window.id;
-        let _ = update(&mut app.window, &mut app.shared, Message::CloseRequested(id));
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::CloseRequested(id),
+        );
         assert_eq!(app.shared.config.window_width, 1024.0);
         assert_eq!(app.shared.config.window_height, 768.0);
         assert_eq!(app.shared.config.window_x, Some(120.0));

@@ -129,6 +129,8 @@ pub fn is_menu_message(msg: &Message) -> bool {
                     | media::Message::Resorted(_)
                     | media::Message::ExifLoaded(_, _)
                     | media::Message::ViewRotated { .. }
+                    | media::Message::Reuploaded { .. }
+                    | media::Message::PromoteCurrent(_)
                     | media::Message::SpinnerTick
             )
             | Message::Toast(toasts::Message::Dismiss(_))
@@ -177,6 +179,8 @@ pub fn is_context_menu_message(msg: &Message) -> bool {
                     | media::Message::Resorted(_)
                     | media::Message::ExifLoaded(_, _)
                     | media::Message::ViewRotated { .. }
+                    | media::Message::Reuploaded { .. }
+                    | media::Message::PromoteCurrent(_)
                     | media::Message::SpinnerTick
             )
             | Message::Toast(toasts::Message::Dismiss(_))

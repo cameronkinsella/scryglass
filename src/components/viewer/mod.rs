@@ -46,7 +46,8 @@ use crate::app::viewer_math::{
     clamp_pan, compute_zoom, nudge_zoom_percent, pan_for_zoom_toward_cursor,
 };
 use crate::app::{
-    Message as AppMessage, Shared, Window, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, recalc_viewport,
+    MediaMessage, Message as AppMessage, Shared, Window, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP,
+    recalc_viewport,
 };
 
 pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) -> Task<AppMessage> {
@@ -180,7 +181,16 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 let img_h = h as f32 * viewer.zoom;
                 viewer.pan = clamp_pan(viewer.pan, img_w, img_h, viewport);
             }
-            Task::none()
+            // A wheel zoom reaches even an unfocused (hovered) window, where the
+            // image may have been demoted to view-res. Re-promote it to full-res
+            // so it re-sharpens, debounced: PromoteCurrent is a no-op once full.
+            match scroll_rederive_target(win) {
+                Some(path) => Task::future(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    AppMessage::Media(MediaMessage::PromoteCurrent(path))
+                }),
+                None => Task::none(),
+            }
         }
         Message::ZoomStep(direction) => {
             let viewport = win.viewport_size;
@@ -375,6 +385,22 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
     }
 }
 
+/// The on-screen image to re-promote to full-res after a wheel zoom, if any.
+/// Only an unfocused window with a demoted (view-res) image needs it: a focused
+/// window keeps its image full-res, and a wheel zoom is the one zoom path that
+/// reaches a window without focusing it.
+fn scroll_rederive_target(win: &Window) -> Option<std::path::PathBuf> {
+    if win.focused {
+        return None;
+    }
+    let viewer = win.viewer()?;
+    let path = viewer.displayed_path.clone()?;
+    if viewer.cache.peek(&path)?.gpu_full {
+        return None;
+    }
+    Some(path)
+}
+
 /// Set an absolute zoom factor, zooming toward the viewport center.
 fn apply_zoom(win: &mut Window, _shared: &mut Shared, zoom: f32) {
     let viewport = win.viewport_size;
@@ -479,6 +505,41 @@ mod tests {
         let _ = update(&mut app.window, &mut app.shared, Message::ResetZoom);
         assert!(!viewer(&app).manual_zoom);
         assert_eq!(viewer(&app).pan, (0.0, 0.0));
+    }
+
+    fn show_cached(app: &mut TestApp, path: &str, gpu_full: bool) {
+        use crate::app::state::CachedImage;
+        let image = CachedImage {
+            handle: iced::widget::image::Handle::from_rgba(2, 2, vec![0u8; 16]),
+            original_size: (2, 2),
+            keepalive: None,
+            gpu_full,
+        };
+        let cost = image.byte_cost();
+        let v = app.viewer_mut().unwrap();
+        v.displayed_path = Some(path.into());
+        v.cache.insert(path.into(), image, cost);
+    }
+
+    #[test]
+    fn scroll_rederive_targets_only_a_demoted_unfocused_image() {
+        let mut app = viewing_app(&["a.png"], 0);
+        show_cached(&mut app, "a.png", false);
+
+        // A focused window keeps its image full-res, so nothing to re-promote.
+        app.window.focused = true;
+        assert_eq!(scroll_rederive_target(&app.window), None);
+
+        // Unfocused with a view-res image: re-promote it on a wheel zoom.
+        app.window.focused = false;
+        assert_eq!(
+            scroll_rederive_target(&app.window),
+            Some(std::path::PathBuf::from("a.png"))
+        );
+
+        // A full-res image needs no re-promote even while unfocused.
+        show_cached(&mut app, "a.png", true);
+        assert_eq!(scroll_rederive_target(&app.window), None);
     }
 
     #[test]

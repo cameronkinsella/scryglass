@@ -463,7 +463,14 @@ fn make_image(
             depth_or_array_layers: 1,
         },
     );
-    bind_texture(device, layout, uniforms, sampler_linear, sampler_nearest, &texture)
+    bind_texture(
+        device,
+        layout,
+        uniforms,
+        sampler_linear,
+        sampler_nearest,
+        &texture,
+    )
 }
 
 /// Queue an image for the upload thread at its full resolution. Returns false
@@ -550,11 +557,10 @@ fn spawn_upload_thread(
                         }
                         let staging_buf = staging.as_ref().expect("staging buffer");
                         let texture = create_rgba_texture(&device, width, height);
-                        let mut encoder = device.create_command_encoder(
-                            &wgpu::CommandEncoderDescriptor {
+                        let mut encoder =
+                            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                                 label: Some("scryglass image upload"),
-                            },
-                        );
+                            });
                         // Copy each row into recycled staging at the aligned row
                         // stride, then schedule the buffer-to-texture copy.
                         if let Some(size) = wgpu::BufferSize::new(total) {

@@ -21,10 +21,12 @@ pub fn view(
     viewport: (f32, f32),
     pixelated: bool,
 ) -> Element<'static, Message> {
-    shader::Shader::new(ImageSurface::new(handle, original, zoom, pan, viewport, pixelated))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    shader::Shader::new(ImageSurface::new(
+        handle, original, zoom, pan, viewport, pixelated,
+    ))
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
 
 /// A no-op surface that draws nothing but makes iced build the image pipeline

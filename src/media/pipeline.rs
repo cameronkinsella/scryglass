@@ -79,7 +79,11 @@ impl Source {
 
 /// A resident decode keyed for cross-window reuse: the shared handle, its
 /// pixel size, and a weak ref to the keepalive holding its texture alive.
-type DedupEntry = (Handle, (u32, u32), Weak<crate::ui::image_surface::ResidentImage>);
+type DedupEntry = (
+    Handle,
+    (u32, u32),
+    Weak<crate::ui::image_surface::ResidentImage>,
+);
 
 /// Shared load orchestrator. Cheap to clone.
 #[derive(Clone)]
@@ -518,7 +522,9 @@ mod tests {
         let keepalive = crate::ui::image_surface::test_keepalive();
 
         pipeline.dedup_insert(path.clone(), handle, (2, 2), &keepalive);
-        let hit = pipeline.dedup_get(&path).expect("a resident entry is reused");
+        let hit = pipeline
+            .dedup_get(&path)
+            .expect("a resident entry is reused");
         assert_eq!(hit.1, (2, 2));
 
         // Once every window has dropped the keepalive, the entry is gone.

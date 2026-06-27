@@ -18,7 +18,10 @@ use crate::media::animation::{AnimatedImage, FrameCanvas};
 pub enum AnimMessage {
     /// A composited frame finished uploading: its handle plus the keepalive
     /// holding its texture resident, or None if the upload could not run.
-    FrameAllocated(PathBuf, Option<(Handle, crate::ui::image_surface::Keepalive)>),
+    FrameAllocated(
+        PathBuf,
+        Option<(Handle, crate::ui::image_surface::Keepalive)>,
+    ),
     /// Timer tick, advance to the next frame.
     Tick,
 }

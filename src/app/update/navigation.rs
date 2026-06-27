@@ -134,7 +134,13 @@ pub(crate) fn open_viewer(
             current.clone(),
             ThumbUrgency::Urgent,
         ));
-        tasks.push(fire_load(&pipeline, &mut viewer, current, Lane::Current, view));
+        tasks.push(fire_load(
+            &pipeline,
+            &mut viewer,
+            current,
+            Lane::Current,
+            view,
+        ));
     }
     // Set the scroll offset before the thumbnailer fires, so it reads the
     // cursor as on screen and fans from there, not from index 0.
@@ -498,7 +504,13 @@ pub(crate) fn complete_navigation(
         // guaranteed here. The full image (or animation) loads behind it.
         viewer.pending_since = Some(Instant::now());
         show_placeholder_or_clear(viewer, &current, zoom_mode, viewport);
-        tasks.push(fire_load(&pipeline, viewer, current, Lane::Current, viewport));
+        tasks.push(fire_load(
+            &pipeline,
+            viewer,
+            current,
+            Lane::Current,
+            viewport,
+        ));
     }
 
     let pinned = viewer.pinned_paths(depth);
