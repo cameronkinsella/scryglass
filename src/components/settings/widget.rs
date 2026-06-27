@@ -150,6 +150,14 @@ pub fn settings<'a>(
 
     rows = rows.push(rule::horizontal(1));
     rows = rows.push(
+        button(text("Advanced settings").size(12))
+            .on_press(SettingsMessage::OpenAdvanced)
+            .padding([2, 6])
+            .style(theme::link_button),
+    );
+
+    rows = rows.push(rule::horizontal(1));
+    rows = rows.push(
         text(concat!("scryglass v", env!("CARGO_PKG_VERSION")))
             .size(11)
             .style(theme::secondary_text),

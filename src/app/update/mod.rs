@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use iced::Task;
 
 use crate::components::toasts::{Message as ToastMessage, Toast, ToastKind};
+use crate::config::AppConfig;
 
 pub(crate) use file_ops::{
     copy_bitmap, copy_rgba_bitmap, file_op_target, fire_delete, purge_disk_thumb, validate_rename,
@@ -82,7 +83,53 @@ fn route(app: &mut App, envelope: Envelope) -> Task<Envelope> {
             Task::none()
         }
         Envelope::Forwarded(path) => open_new_window(app, path),
+        // A live config edit reparsed cleanly. Ignore one equal to the in-memory
+        // config (the app's own save tripping the watcher); otherwise apply it.
+        Envelope::ConfigReloaded(config) => {
+            if *config != app.shared.config {
+                apply_config(app, *config);
+            }
+            Task::none()
+        }
+        Envelope::ConfigInvalid => config_invalid_toast(app),
     }
+}
+
+/// Adopt a hand-edited config across the whole app: re-theme (read live from the
+/// config at render), recompute every viewport (chrome/zoom-mode changes shift
+/// it), and let the budget rebalance and the decay tiers pick up the new values
+/// on their next pass. Window geometry only takes effect on the next window.
+fn apply_config(app: &mut App, config: AppConfig) {
+    app.shared.config = config;
+    for win in app.windows.values_mut() {
+        super::recalc_viewport(win, &app.shared);
+    }
+}
+
+/// Warn that a live config edit no longer parses, on the focused window (or any
+/// window). The current settings stay in effect.
+fn config_invalid_toast(app: &mut App) -> Task<Envelope> {
+    let target = app
+        .windows
+        .iter()
+        .find(|(_, w)| w.focused)
+        .map(|(id, _)| *id)
+        .or_else(|| app.windows.keys().next().copied());
+    let Some(id) = target else {
+        return Task::none();
+    };
+    let Some(win) = app.windows.get_mut(&id) else {
+        return Task::none();
+    };
+    Envelope::wrap(
+        id,
+        push_toast(
+            win,
+            &mut app.shared,
+            ToastKind::Error,
+            "config.toml has a syntax error; keeping the current settings.".into(),
+        ),
+    )
 }
 
 /// Divide the image and thumbnail budgets evenly across the windows that hold a
@@ -276,6 +323,23 @@ mod tests {
         app.windows.remove(&id2);
         rebalance_budgets(&mut app);
         assert_eq!(app.windows[&id1].viewer().unwrap().cache.budget(), full);
+    }
+
+    #[test]
+    fn a_config_reload_applies_new_settings_across_windows() {
+        use crate::config::ThemeChoice;
+        let (mut app, _id) = into_app(viewing_app(&["a.png"], 0));
+        let mut edited = app.shared.config.clone();
+        edited.theme = ThemeChoice::Light;
+        edited.cache_budget_mb = 1234;
+
+        let _ = update(&mut app, Envelope::ConfigReloaded(Box::new(edited)));
+
+        assert_eq!(app.shared.config.theme, ThemeChoice::Light);
+        assert_eq!(app.shared.config.cache_budget_mb, 1234);
+        // The new budget reached the viewer window (rebalance ran after apply).
+        let viewer = app.windows.values().next().unwrap().viewer().unwrap();
+        assert_eq!(viewer.cache.budget(), 1234 * 1024 * 1024);
     }
 
     #[test]

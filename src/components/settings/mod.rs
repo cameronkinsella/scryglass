@@ -3,6 +3,7 @@ pub enum Message {
     Open,
     Close,
     ShowHelp,
+    OpenAdvanced,
     DiskCacheSize(u64),
     #[cfg(feature = "disk-thumbs")]
     ClearDiskThumbs,
@@ -29,6 +30,7 @@ use crate::app::update::{probe_disk_cache_size, push_toast, save_config};
 use crate::app::{Message as AppMessage, Modal, Shared, Window};
 use crate::components::empty;
 use crate::components::toasts::ToastKind;
+use crate::config::AppConfig;
 
 pub(crate) fn view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, AppMessage> {
     match win.modal {
@@ -68,6 +70,28 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             win.modal = None;
             win.help_open = true;
             Task::none()
+        }
+
+        Message::OpenAdvanced => {
+            let Some(path) = AppConfig::path() else {
+                return push_toast(
+                    win,
+                    shared,
+                    ToastKind::Error,
+                    "No config location is available.".into(),
+                );
+            };
+            // Ensure the file exists for the editor, writing the current settings
+            // if it is missing. The open (and any write) runs off the UI thread;
+            // the watcher applies whatever the user saves.
+            let config = shared.config.clone();
+            Task::future(async move {
+                if !path.exists() {
+                    config.save().await;
+                }
+                let _ = tokio::task::spawn_blocking(move || open::that(path)).await;
+            })
+            .discard()
         }
 
         Message::ToggleFileAssociations => {

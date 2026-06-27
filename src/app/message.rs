@@ -24,8 +24,8 @@ pub enum Message {
 }
 
 /// The daemon-level message. Every per-window [`Message`] is tagged with the
-/// window it targets; the rest are window-lifecycle events the runtime feeds
-/// back. Component code only ever deals in [`Message`]; the top-level update
+/// window it targets. The rest are window-lifecycle events the runtime feeds
+/// back. Component code only ever deals in [`Message`]. The top-level update
 /// and view wrap and unwrap the envelope at the boundary.
 #[derive(Debug, Clone)]
 pub enum Envelope {
@@ -33,12 +33,18 @@ pub enum Envelope {
     Win(iced::window::Id, Message),
     /// A window the app requested has finished opening.
     Opened(iced::window::Id),
-    /// A window closed; its state is dropped, and the process exits once the
+    /// A window closed. Its state is dropped, and the process exits once the
     /// last one is gone.
     Closed(iced::window::Id),
     /// A later launch forwarded a new window to open: a file path, or None for
     /// a bare relaunch (an empty window).
     Forwarded(Option<std::path::PathBuf>),
+    /// The watched config file changed and reparsed to a new, valid config
+    /// (boxed to keep the envelope small).
+    ConfigReloaded(Box<crate::config::AppConfig>),
+    /// The watched config file changed but no longer parses. Keep the current
+    /// settings and warn.
+    ConfigInvalid,
 }
 
 impl Envelope {

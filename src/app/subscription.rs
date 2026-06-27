@@ -33,6 +33,8 @@ pub fn subscription(app: &App) -> Subscription<Envelope> {
         iced::window::close_events().map(Envelope::Closed),
         // Files forwarded by a second launch open as new windows.
         ipc_forwards(),
+        // Apply hand-edits to config.toml live, across all windows.
+        config_watch(),
     ];
 
     for (&id, win) in &app.windows {
@@ -137,6 +139,69 @@ fn window_subscriptions(id: window::Id, win: &Window) -> Vec<Subscription<Messag
     }
 
     subs
+}
+
+/// Watch config.toml for hand-edits and reparse it live, so settings changes
+/// apply without a relaunch. App-level (one watcher, not per-window).
+fn config_watch() -> Subscription<Envelope> {
+    Subscription::run(config_watch_stream)
+}
+
+/// Read and parse config.toml on each change (off the update thread), emitting
+/// the new config or an invalid-parse signal. A read failure (mid-write) is
+/// skipped; the next event retries. The app's own atomic saves trip this too,
+/// but the update side ignores a reload equal to the in-memory config.
+fn config_watch_stream() -> impl Stream<Item = Envelope> {
+    use notify::{RecursiveMode, Watcher};
+
+    iced::stream::channel(
+        4,
+        |mut output: iced::futures::channel::mpsc::Sender<Envelope>| async move {
+            let Some(path) = crate::config::AppConfig::path() else {
+                return;
+            };
+            let Some(dir) = path.parent().map(std::path::Path::to_path_buf) else {
+                return;
+            };
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+            let watched = path.clone();
+            let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                if let Ok(event) = res
+                    && event.paths.contains(&watched)
+                {
+                    let _ = tx.send(());
+                }
+            });
+            let Ok(mut watcher) = watcher else {
+                return;
+            };
+            // Watch the directory (notify cannot watch a not-yet-existing file).
+            if watcher.watch(&dir, RecursiveMode::NonRecursive).is_err() {
+                return;
+            }
+            while rx.recv().await.is_some() {
+                // Let an editor's write/rename burst settle before reading once.
+                while let Ok(again) =
+                    tokio::time::timeout(Duration::from_millis(300), rx.recv()).await
+                {
+                    if again.is_none() {
+                        return;
+                    }
+                }
+                let envelope = match std::fs::read_to_string(&path) {
+                    Ok(text) => match crate::config::AppConfig::try_from_toml(&text) {
+                        Ok(config) => Envelope::ConfigReloaded(Box::new(config)),
+                        Err(_) => Envelope::ConfigInvalid,
+                    },
+                    // Transient (read raced a write); wait for the next event.
+                    Err(_) => continue,
+                };
+                if output.send(envelope).await.is_err() {
+                    return;
+                }
+            }
+        },
+    )
 }
 
 /// Subscribe to filesystem changes in `dir`, keyed by the window and the
