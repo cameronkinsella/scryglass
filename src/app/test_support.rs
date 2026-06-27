@@ -62,7 +62,7 @@ pub(crate) fn empty_app() -> TestApp {
             zoom_slider_open: false,
             fullscreen: false,
             focused: true,
-            unfocused_since: None,
+            tier_generation: 0,
             minimized: false,
             video_resumes_on_restore: false,
             help_open: false,

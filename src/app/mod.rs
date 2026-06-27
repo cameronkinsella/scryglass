@@ -149,9 +149,10 @@ pub struct Window {
     /// Whether this window currently has native focus. The resource tiers key
     /// VRAM retention on it.
     pub(crate) focused: bool,
-    /// When the window last lost focus, used to drop its prefetch after an idle
-    /// delay. `None` while focused or once its prefetch has been shed.
-    pub(crate) unfocused_since: Option<iced::time::Instant>,
+    /// Bumped on every focus or minimize change, so a deferred resource-tier
+    /// timer can tell whether it is still current when it fires (a stale one
+    /// no-ops). Replaces tracking a per-stage timestamp.
+    pub(crate) tier_generation: u64,
     /// Whether the window is OS-minimized. A minimized window shows nothing,
     /// so it drives no redraw timers.
     pub(crate) minimized: bool,

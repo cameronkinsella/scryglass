@@ -14,9 +14,11 @@ pub enum Message {
     /// Native focus gained or lost, tracked per window for the resource tiers.
     Focused(bool),
     /// Fires after a window has been unfocused for [`PREFETCH_IDLE`]; drops the
-    /// prefetch look-ahead if the window is still unfocused since `since`.
-    PrefetchIdle(iced::time::Instant),
-    /// Periodic poll for OS-minimize state, since iced has no minimize event.
+    /// prefetch look-ahead if the carried tier generation is still current (no
+    /// focus or minimize change has happened since it was armed).
+    PrefetchIdle(u64),
+    /// Re-checks OS-minimize state, off the focus-change events and a slow
+    /// unfocused fallback, since iced has no minimize event.
     CheckMinimize,
     /// Result of the minimize poll.
     Minimized(bool),
@@ -109,7 +111,8 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             if focused {
                 // Re-warm the look-ahead the idle drop may have shed, and
                 // promote the on-screen image back to full-res for crisp zoom.
-                win.unfocused_since = None;
+                // Bumping the generation supersedes any pending idle-drop timer.
+                win.tier_generation = win.tier_generation.wrapping_add(1);
                 let pipeline = shared.pipeline.clone();
                 let depth = shared.config.prefetch_depth;
                 let view = win.viewport_size;
@@ -124,27 +127,26 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 minimize
             } else {
                 // Arm the idle drop: fire once PREFETCH_IDLE elapses, tagged with
-                // this moment so a refocus-then-unfocus supersedes it.
-                let since = iced::time::Instant::now();
-                win.unfocused_since = Some(since);
+                // this window's new tier generation so a later focus or minimize
+                // change supersedes it.
+                win.tier_generation = win.tier_generation.wrapping_add(1);
+                let generation = win.tier_generation;
                 let arm = Task::future(async move {
                     tokio::time::sleep(PREFETCH_IDLE).await;
-                    AppMessage::Window(Message::PrefetchIdle(since))
+                    AppMessage::Window(Message::PrefetchIdle(generation))
                 });
                 Task::batch([arm, minimize])
             }
         }
 
-        Message::PrefetchIdle(since) => {
-            // Still unfocused since the same moment: shed the prefetch neighbors
-            // and demote the on-screen image to view resolution, so this window
-            // holds nothing at full-res while it sits in the background. A refocus
-            // (or a later unfocus) cleared or moved `unfocused_since`, so a stale
-            // timer no-ops.
-            if win.unfocused_since != Some(since) {
+        Message::PrefetchIdle(generation) => {
+            // Shed the prefetch neighbors and demote the on-screen image to view
+            // resolution, so this window holds nothing at full-res while it sits
+            // in the background. A later focus or minimize change bumped the tier
+            // generation, so a superseded timer no-ops.
+            if generation != win.tier_generation {
                 return Task::none();
             }
-            win.unfocused_since = None;
             let view = win.viewport_size;
             let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
@@ -164,6 +166,10 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             if !changed {
                 return Task::none();
             }
+            // A minimize or restore supersedes any pending unfocused idle-drop
+            // timer, so it never demotes a window that is no longer just sitting
+            // unfocused.
+            win.tier_generation = win.tier_generation.wrapping_add(1);
             // Pause an open video the instant the window minimizes (audio stops
             // at once, not after the frame queue stalls), and resume on restore
             // only if it was playing.
@@ -319,15 +325,17 @@ mod tests {
     }
 
     #[test]
-    fn losing_focus_arms_the_idle_prefetch_drop() {
+    fn focus_changes_advance_the_tier_generation() {
         use crate::app::test_support::viewing_app;
         let mut app = viewing_app(&["a.png", "b.png"], 0);
-        assert!(app.window.unfocused_since.is_none());
+        let armed = app.window.tier_generation;
+        // Losing focus arms an idle-drop timer under a fresh generation.
         let _ = update(&mut app.window, &mut app.shared, Message::Focused(false));
-        assert!(app.window.unfocused_since.is_some());
-        // Regaining focus disarms it.
+        assert_ne!(app.window.tier_generation, armed);
+        // Regaining focus supersedes it with another generation.
+        let unfocused = app.window.tier_generation;
         let _ = update(&mut app.window, &mut app.shared, Message::Focused(true));
-        assert!(app.window.unfocused_since.is_none());
+        assert_ne!(app.window.tier_generation, unfocused);
     }
 
     #[test]
@@ -340,11 +348,11 @@ mod tests {
         app.viewer_mut().unwrap().displayed_path = Some("b.png".into());
 
         let _ = update(&mut app.window, &mut app.shared, Message::Focused(false));
-        let since = app.window.unfocused_since.unwrap();
+        let generation = app.window.tier_generation;
         let _ = update(
             &mut app.window,
             &mut app.shared,
-            Message::PrefetchIdle(since),
+            Message::PrefetchIdle(generation),
         );
 
         let v = app.viewer().unwrap();
@@ -362,13 +370,40 @@ mod tests {
         app.viewer_mut().unwrap().displayed_path = Some("a.png".into());
 
         let _ = update(&mut app.window, &mut app.shared, Message::Focused(false));
-        // A refocus disarms the drop; the old timer firing late must no-op.
-        let stale = iced::time::Instant::now();
+        // A refocus supersedes the drop; the old timer firing late must no-op.
+        let stale = app.window.tier_generation;
         let _ = update(&mut app.window, &mut app.shared, Message::Focused(true));
         let _ = update(
             &mut app.window,
             &mut app.shared,
             Message::PrefetchIdle(stale),
+        );
+
+        assert!(
+            app.viewer()
+                .unwrap()
+                .cache
+                .contains(std::path::Path::new("b.png"))
+        );
+    }
+
+    #[test]
+    fn minimizing_supersedes_the_pending_idle_drop() {
+        use crate::app::test_support::viewing_app;
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        cache_image(&mut app, "a.png");
+        cache_image(&mut app, "b.png");
+        app.viewer_mut().unwrap().displayed_path = Some("a.png".into());
+
+        let _ = update(&mut app.window, &mut app.shared, Message::Focused(false));
+        let armed = app.window.tier_generation;
+        // Minimizing bumps the generation, so the idle-drop fired afterwards must
+        // no-op rather than demote a window that is no longer merely unfocused.
+        let _ = update(&mut app.window, &mut app.shared, Message::Minimized(true));
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::PrefetchIdle(armed),
         );
 
         assert!(
