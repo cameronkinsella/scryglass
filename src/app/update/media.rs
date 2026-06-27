@@ -320,7 +320,8 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             // Only promote if navigation is still resting on this image, so a
             // quick pass-through never re-uploads it at full resolution.
             if viewer.displayed_path.as_deref() == Some(&*path) {
-                crate::app::update::fire_reupload_res(viewer, &path, iced::Size::ZERO, true)
+                let zoom = viewer.zoom;
+                crate::app::update::fire_reupload_res(viewer, &path, zoom, true)
             } else {
                 Task::none()
             }

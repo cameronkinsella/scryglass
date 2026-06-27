@@ -68,18 +68,26 @@ const VIEW_HEADROOM: f32 = 1.5;
 /// fresh neighbors cannot saturate the CPU with resizes.
 static RESIZE_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
-/// The view-resolution target for an image of `original` size shown in `view`:
-/// its fit size in the viewport (with HiDPI headroom), never upscaled past
-/// native. This is the size a prefetch neighbor's GPU texture is downscaled to.
-pub(crate) fn view_target(original: (u32, u32), view: Size) -> (u32, u32) {
+/// The view-resolution target for an image of `original` size shown at `zoom`
+/// (1.0 = full native): the displayed pixel size with HiDPI headroom, never
+/// upscaled past native. A demoted but visible image targets its current zoom so
+/// it stays as crisp as what is on screen; a prefetch neighbor targets its fit
+/// zoom, since it is shown fit when navigated to.
+pub(crate) fn view_target(original: (u32, u32), zoom: f32) -> (u32, u32) {
     let (w, h) = (original.0.max(1) as f32, original.1.max(1) as f32);
-    let cap_w = (view.width * VIEW_HEADROOM).max(1.0);
-    let cap_h = (view.height * VIEW_HEADROOM).max(1.0);
-    let scale = (cap_w / w).min(cap_h / h).min(1.0);
+    let scale = (zoom * VIEW_HEADROOM).clamp(0.0, 1.0);
     (
         ((w * scale).round() as u32).max(1),
         ((h * scale).round() as u32).max(1),
     )
+}
+
+/// The fit zoom for an image of `original` size in `view`: the uniform scale that
+/// makes it fit on both axes, never upscaled. This is what an image shows at when
+/// navigated to fresh, so prefetch and restored textures target it.
+fn fit_zoom(original: (u32, u32), view: Size) -> f32 {
+    let (w, h) = (original.0.max(1) as f32, original.1.max(1) as f32);
+    (view.width / w).min(view.height / h).min(1.0)
 }
 
 /// Downscale a full-res RGBA handle to `target`, for a prefetch neighbor's
@@ -368,7 +376,10 @@ pub(crate) fn fire_load(
             // resident before displaying, so navigation never stalls the UI
             // thread on a texture upload.
             Task::future(async move {
-                let keepalive = upload_at_res(&handle, original_size, view, full).await;
+                // A prefetch neighbor is downscaled to its fit zoom; the current
+                // image uploads full-res, so the zoom is ignored there.
+                let zoom = fit_zoom(original_size, view);
+                let keepalive = upload_at_res(&handle, original_size, zoom, full).await;
                 Message::Media(MediaMessage::Loaded {
                     path: p.clone(),
                     result: Ok(LoadedMedia::Static {
@@ -420,7 +431,12 @@ pub(crate) fn fire_restore_textures(
             Task::future(async move {
                 let keepalive = match pipeline.dedup_get(&path) {
                     Some((_, _, keep)) => Some(keep),
-                    None => upload_at_res(&handle, original_size, view, gpu_full).await,
+                    None => {
+                        // Restore each texture at the fit zoom it is shown at when
+                        // navigated to; full-res entries ignore the zoom.
+                        let zoom = fit_zoom(original_size, view);
+                        upload_at_res(&handle, original_size, zoom, gpu_full).await
+                    }
                 };
                 Message::Media(MediaMessage::Reuploaded {
                     path,
@@ -437,13 +453,13 @@ pub(crate) fn fire_restore_textures(
 }
 
 /// Re-upload `path`'s texture at full resolution (`full`, for crisp zoom on the
-/// focused image) or downscaled to view resolution (for an unfocused or
-/// passed-by image), from its in-RAM full-res handle (no disk). A no-op when it
-/// is already at that resolution or not cached.
+/// focused image) or downscaled to the view resolution for `zoom` (for an
+/// unfocused or passed-by image), from its in-RAM full-res handle (no disk). A
+/// no-op when it is already at that resolution or not cached.
 pub(crate) fn fire_reupload_res(
     viewer: &Viewer,
     path: &std::path::Path,
-    view: Size,
+    zoom: f32,
     full: bool,
 ) -> Task<Message> {
     let Some(cached) = viewer.cache.peek(path) else {
@@ -456,7 +472,7 @@ pub(crate) fn fire_reupload_res(
     let original_size = cached.original_size;
     let p = path.to_path_buf();
     Task::future(async move {
-        let keepalive = upload_at_res(&handle, original_size, view, full).await;
+        let keepalive = upload_at_res(&handle, original_size, zoom, full).await;
         Message::Media(MediaMessage::Reuploaded {
             path: p,
             image: CachedImage {
@@ -469,12 +485,13 @@ pub(crate) fn fire_reupload_res(
     })
 }
 
-/// Upload `handle` at full resolution (`full`) or downscaled to view resolution,
-/// resolving to the keepalive once resident. Keyed by the handle's own id.
+/// Upload `handle` at full resolution (`full`) or downscaled to the view
+/// resolution for `zoom`, resolving to the keepalive once resident. Keyed by the
+/// handle's own id.
 async fn upload_at_res(
     handle: &Handle,
     original_size: (u32, u32),
-    view: Size,
+    zoom: f32,
     full: bool,
 ) -> Option<crate::ui::image_surface::Keepalive> {
     let gpu_handle = if full {
@@ -484,7 +501,7 @@ async fn upload_at_res(
         // saturates the CPU with resizes.
         let _permit = RESIZE_GATE.acquire().await.ok();
         let h = handle.clone();
-        tokio::task::spawn_blocking(move || downscale(&h, view_target(original_size, view)))
+        tokio::task::spawn_blocking(move || downscale(&h, view_target(original_size, zoom)))
             .await
             .unwrap_or_else(|_| handle.clone())
     };
@@ -544,23 +561,32 @@ mod tests {
     use crate::app::test_support::viewing_app;
 
     #[test]
-    fn view_target_downscales_a_large_image_to_its_fit_size() {
-        // 4000x3000 in an 800x600 viewport (x1.5 headroom -> 1200x900 cap).
-        let t = view_target((4000, 3000), Size::new(800.0, 600.0));
-        assert_eq!(t, (1200, 900));
+    fn view_target_downscales_to_the_fit_zoom_with_headroom() {
+        // 4000x3000 fit into 800x600 is a 0.2 zoom; x1.5 headroom -> 0.3 -> 1200x900.
+        let zoom = fit_zoom((4000, 3000), Size::new(800.0, 600.0));
+        assert_eq!(view_target((4000, 3000), zoom), (1200, 900));
     }
 
     #[test]
-    fn view_target_never_upscales_a_small_image() {
-        let t = view_target((100, 80), Size::new(800.0, 600.0));
-        assert_eq!(t, (100, 80));
+    fn view_target_never_upscales_past_native() {
+        // A small image at fit zoom, and even zoomed way in, stays at native.
+        let zoom = fit_zoom((100, 80), Size::new(800.0, 600.0));
+        assert_eq!(view_target((100, 80), zoom), (100, 80));
+        assert_eq!(view_target((100, 80), 8.0), (100, 80));
     }
 
     #[test]
     fn view_target_preserves_aspect_on_a_wide_image() {
-        // 4000x1000 in 800x600: width binds at 1200 -> height scales to 300.
-        let t = view_target((4000, 1000), Size::new(800.0, 600.0));
-        assert_eq!(t, (1200, 300));
+        // 4000x1000 in 800x600: width binds at 0.2 zoom -> 1200x300.
+        let zoom = fit_zoom((4000, 1000), Size::new(800.0, 600.0));
+        assert_eq!(view_target((4000, 1000), zoom), (1200, 300));
+    }
+
+    #[test]
+    fn view_target_keeps_more_resolution_when_zoomed_in() {
+        // A zoomed-in but demoted image targets its zoom, not its fit, so it
+        // stays crisp: 4000x3000 at 0.5 zoom -> x1.5 -> 0.75 -> 3000x2250.
+        assert_eq!(view_target((4000, 3000), 0.5), (3000, 2250));
     }
 
     #[test]

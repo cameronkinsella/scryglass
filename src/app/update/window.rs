@@ -119,7 +119,8 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 if let Some(viewer) = win.viewer_mut() {
                     let mut tasks = fire_prefetch(&pipeline, viewer, depth, view);
                     if let Some(displayed) = viewer.displayed_path.clone() {
-                        tasks.push(fire_reupload_res(viewer, &displayed, Size::ZERO, true));
+                        let zoom = viewer.zoom;
+                        tasks.push(fire_reupload_res(viewer, &displayed, zoom, true));
                     }
                     tasks.push(minimize);
                     return Task::batch(tasks);
@@ -147,13 +148,15 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             if generation != win.tier_generation {
                 return Task::none();
             }
-            let view = win.viewport_size;
             let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
             viewer.drop_prefetch();
             if let Some(displayed) = viewer.displayed_path.clone() {
-                return fire_reupload_res(viewer, &displayed, view, false);
+                // Demote to the resolution of the current zoom, so a zoomed-in
+                // background window stays as crisp as what is on screen.
+                let zoom = viewer.zoom;
+                return fire_reupload_res(viewer, &displayed, zoom, false);
             }
             Task::none()
         }
