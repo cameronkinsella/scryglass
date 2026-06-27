@@ -30,6 +30,9 @@ pub enum Message {
         path: PathBuf,
         image: CachedImage,
     },
+    /// Debounced after navigation settles on a view-res neighbor: promote it to
+    /// a full-res texture so zoom is crisp, unless navigation has moved on.
+    PromoteCurrent(PathBuf),
     Resorted(Vec<PathBuf>),
     SpinnerTick,
 }
@@ -109,9 +112,9 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                         .pending_nav
                         .map(|i| viewer.nav.files()[i].to_path_buf());
                     if viewer.nav.current() == path || pending_path.as_deref() == Some(&*path) {
-                        fire_load(&pipeline, viewer, path, Lane::Current)
+                        fire_load(&pipeline, viewer, path, Lane::Current, viewport)
                     } else if viewer.pinned_paths(depth).contains(&path) {
-                        fire_load(&pipeline, viewer, path, Lane::Prefetch)
+                        fire_load(&pipeline, viewer, path, Lane::Prefetch, viewport)
                     } else {
                         Task::none()
                     }
@@ -310,6 +313,19 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             Task::none()
         }
 
+        Message::PromoteCurrent(path) => {
+            let Some(viewer) = win.viewer_mut() else {
+                return Task::none();
+            };
+            // Only promote if navigation is still resting on this image, so a
+            // quick pass-through never re-uploads it at full resolution.
+            if viewer.displayed_path.as_deref() == Some(&*path) {
+                crate::app::update::fire_promote(viewer, &path)
+            } else {
+                Task::none()
+            }
+        }
+
         Message::ExifLoaded(path, fields) => {
             if let Some(viewer) = win.viewer_mut()
                 && viewer.nav.current() == path
@@ -478,6 +494,7 @@ mod tests {
             handle: handle.clone(),
             original_size: (2, 2),
             keepalive: None,
+            gpu_full: false,
         };
         let cost = released.byte_cost();
         app.viewer_mut()
@@ -494,6 +511,7 @@ mod tests {
                     handle,
                     original_size: (2, 2),
                     keepalive: Some(crate::ui::image_surface::test_keepalive()),
+                    gpu_full: true,
                 },
             },
         );
@@ -515,6 +533,7 @@ mod tests {
                     handle: iced::widget::image::Handle::from_rgba(2, 2, vec![0u8; 16]),
                     original_size: (2, 2),
                     keepalive: Some(crate::ui::image_surface::test_keepalive()),
+                    gpu_full: true,
                 },
             },
         );

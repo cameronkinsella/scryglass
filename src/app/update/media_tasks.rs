@@ -52,10 +52,64 @@ pub(crate) fn fire_rotate(viewer: &mut Viewer) -> Task<Message> {
                     handle,
                     original_size: (width, height),
                     keepalive,
+                    // Rotation re-uploads the displayed image at full resolution.
+                    gpu_full: true,
                 },
             })
         })
     })
+}
+
+/// Extra resolution kept over the logical viewport so the view-res texture
+/// stays crisp at fit on a HiDPI display (whose physical pixels exceed logical).
+const VIEW_HEADROOM: f32 = 1.5;
+
+/// Caps how many prefetch downscales run at once, so rapid navigation through
+/// fresh neighbors cannot saturate the CPU with resizes.
+static RESIZE_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+/// The view-resolution target for an image of `original` size shown in `view`:
+/// its fit size in the viewport (with HiDPI headroom), never upscaled past
+/// native. This is the size a prefetch neighbor's GPU texture is downscaled to.
+pub(crate) fn view_target(original: (u32, u32), view: Size) -> (u32, u32) {
+    let (w, h) = (original.0.max(1) as f32, original.1.max(1) as f32);
+    let cap_w = (view.width * VIEW_HEADROOM).max(1.0);
+    let cap_h = (view.height * VIEW_HEADROOM).max(1.0);
+    let scale = (cap_w / w).min(cap_h / h).min(1.0);
+    (
+        ((w * scale).round() as u32).max(1),
+        ((h * scale).round() as u32).max(1),
+    )
+}
+
+/// Downscale a full-res RGBA handle to `target`, for a prefetch neighbor's
+/// smaller GPU texture. Returns the original handle when it already fits. Borrows
+/// the source pixels (no full-res copy) so the resize stays cheap.
+fn downscale(handle: &Handle, target: (u32, u32)) -> Handle {
+    let Handle::Rgba {
+        width,
+        height,
+        pixels,
+        ..
+    } = handle
+    else {
+        return handle.clone();
+    };
+    if target.0 >= *width || target.1 >= *height {
+        return handle.clone();
+    }
+    let Some(view) =
+        image::ImageBuffer::<image::Rgba<u8>, &[u8]>::from_raw(*width, *height, pixels.as_ref())
+    else {
+        return handle.clone();
+    };
+    let resized = image::imageops::resize(
+        &view,
+        target.0,
+        target.1,
+        image::imageops::FilterType::Triangle,
+    );
+    Handle::from_rgba(target.0, target.1, resized.into_raw())
 }
 
 /// Rotate RGBA pixels behind a handle by quarter turns clockwise.
@@ -253,6 +307,7 @@ pub(crate) fn fire_load(
     viewer: &mut Viewer,
     path: PathBuf,
     lane: Lane,
+    view: Size,
 ) -> Task<Message> {
     if viewer.cache.contains(&path)
         || viewer.anim_player.has_cached(&path)
@@ -277,6 +332,9 @@ pub(crate) fn fire_load(
                     handle,
                     original_size,
                     keepalive: Some(keepalive),
+                    // The shared texture is whatever the holder uploaded; the
+                    // display path promotes it to full-res if it isn't.
+                    gpu_full: false,
                 },
                 thumb: None,
             }),
@@ -302,17 +360,15 @@ pub(crate) fn fire_load(
             });
             let handle = Handle::from_rgba(img.width, img.height, img.pixels);
             let p = path.clone();
+            // The current image uploads at full resolution (crisp zoom); a
+            // prefetch neighbor uploads at view resolution to save VRAM, keyed by
+            // the same id so the display path can promote it later from RAM.
+            let full = matches!(lane, Lane::Current);
             // Hand the texture to the upload thread, then wait for it to become
             // resident before displaying, so navigation never stalls the UI
             // thread on a texture upload.
             Task::future(async move {
-                let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-                let keepalive =
-                    if crate::ui::image_surface::submit_upload(handle.clone(), ready_tx) {
-                        ready_rx.await.ok()
-                    } else {
-                        None
-                    };
+                let keepalive = upload_at_res(&handle, original_size, view, full).await;
                 Message::Media(MediaMessage::Loaded {
                     path: p.clone(),
                     result: Ok(LoadedMedia::Static {
@@ -320,6 +376,7 @@ pub(crate) fn fire_load(
                             handle,
                             original_size,
                             keepalive,
+                            gpu_full: full,
                         },
                         thumb,
                     }),
@@ -349,24 +406,21 @@ pub(crate) fn fire_load(
 /// Re-upload a restored window's resident images from their RAM sources after a
 /// minimize freed the GPU textures, displayed image first. Each upload reuses a
 /// still-resident shared texture (another window kept it) or re-uploads from the
-/// surviving handle, never a disk read.
-pub(crate) fn fire_restore_textures(pipeline: &Pipeline, viewer: &Viewer) -> Vec<Task<Message>> {
+/// surviving handle, never a disk read, at the same resolution it had.
+pub(crate) fn fire_restore_textures(
+    pipeline: &Pipeline,
+    viewer: &Viewer,
+    view: Size,
+) -> Vec<Task<Message>> {
     viewer
         .restore_list()
         .into_iter()
-        .map(|(path, handle, original_size)| {
+        .map(|(path, handle, original_size, gpu_full)| {
             let pipeline = pipeline.clone();
             Task::future(async move {
                 let keepalive = match pipeline.dedup_get(&path) {
                     Some((_, _, keep)) => Some(keep),
-                    None => {
-                        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-                        if crate::ui::image_surface::submit_upload(handle.clone(), ready_tx) {
-                            ready_rx.await.ok()
-                        } else {
-                            None
-                        }
-                    }
+                    None => upload_at_res(&handle, original_size, view, gpu_full).await,
                 };
                 Message::Media(MediaMessage::Reuploaded {
                     path,
@@ -374,6 +428,7 @@ pub(crate) fn fire_restore_textures(pipeline: &Pipeline, viewer: &Viewer) -> Vec
                         handle,
                         original_size,
                         keepalive,
+                        gpu_full,
                     },
                 })
             })
@@ -381,17 +436,72 @@ pub(crate) fn fire_restore_textures(pipeline: &Pipeline, viewer: &Viewer) -> Vec
         .collect()
 }
 
-/// Warm the prefetch window around the cursor.
+/// Promote the on-screen image to a full-resolution texture so zoom stays
+/// crisp, re-uploading from its in-RAM full-res handle (no disk). A no-op when
+/// it is already full-res or not cached.
+pub(crate) fn fire_promote(viewer: &Viewer, path: &std::path::Path) -> Task<Message> {
+    let Some(cached) = viewer.cache.peek(path) else {
+        return Task::none();
+    };
+    if cached.gpu_full {
+        return Task::none();
+    }
+    let handle = cached.handle.clone();
+    let original_size = cached.original_size;
+    let p = path.to_path_buf();
+    Task::future(async move {
+        let keepalive = upload_at_res(&handle, original_size, Size::ZERO, true).await;
+        Message::Media(MediaMessage::Reuploaded {
+            path: p,
+            image: CachedImage {
+                handle,
+                original_size,
+                keepalive,
+                gpu_full: true,
+            },
+        })
+    })
+}
+
+/// Upload `handle` at full resolution (`full`) or downscaled to view resolution,
+/// resolving to the keepalive once resident. Keyed by the handle's own id.
+async fn upload_at_res(
+    handle: &Handle,
+    original_size: (u32, u32),
+    view: Size,
+    full: bool,
+) -> Option<crate::ui::image_surface::Keepalive> {
+    let gpu_handle = if full {
+        handle.clone()
+    } else {
+        // Bound concurrent downscales so spamming through new neighbors never
+        // saturates the CPU with resizes.
+        let _permit = RESIZE_GATE.acquire().await.ok();
+        let h = handle.clone();
+        tokio::task::spawn_blocking(move || downscale(&h, view_target(original_size, view)))
+            .await
+            .unwrap_or_else(|_| handle.clone())
+    };
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    if crate::ui::image_surface::submit_upload_at(handle.id(), gpu_handle, ready_tx) {
+        ready_rx.await.ok()
+    } else {
+        None
+    }
+}
+
+/// Warm the prefetch window around the cursor at view resolution.
 pub(crate) fn fire_prefetch(
     pipeline: &Pipeline,
     viewer: &mut Viewer,
     depth: usize,
+    view: Size,
 ) -> Vec<Task<Message>> {
     viewer
         .nav
         .peek_around(depth)
         .into_iter()
-        .map(|p| fire_load(pipeline, viewer, p, Lane::Prefetch))
+        .map(|p| fire_load(pipeline, viewer, p, Lane::Prefetch, view))
         .collect()
 }
 
@@ -426,6 +536,44 @@ fn probe_file_size(path: PathBuf) -> Task<Message> {
 mod tests {
     use super::*;
     use crate::app::test_support::viewing_app;
+
+    #[test]
+    fn view_target_downscales_a_large_image_to_its_fit_size() {
+        // 4000x3000 in an 800x600 viewport (x1.5 headroom -> 1200x900 cap).
+        let t = view_target((4000, 3000), Size::new(800.0, 600.0));
+        assert_eq!(t, (1200, 900));
+    }
+
+    #[test]
+    fn view_target_never_upscales_a_small_image() {
+        let t = view_target((100, 80), Size::new(800.0, 600.0));
+        assert_eq!(t, (100, 80));
+    }
+
+    #[test]
+    fn view_target_preserves_aspect_on_a_wide_image() {
+        // 4000x1000 in 800x600: width binds at 1200 -> height scales to 300.
+        let t = view_target((4000, 1000), Size::new(800.0, 600.0));
+        assert_eq!(t, (1200, 300));
+    }
+
+    #[test]
+    fn downscale_shrinks_to_the_target_dimensions() {
+        let handle = Handle::from_rgba(8, 6, vec![200u8; 8 * 6 * 4]);
+        let Handle::Rgba { width, height, .. } = downscale(&handle, (4, 3)) else {
+            panic!("expected rgba");
+        };
+        assert_eq!((width, height), (4, 3));
+    }
+
+    #[test]
+    fn downscale_keeps_an_image_that_already_fits() {
+        let handle = Handle::from_rgba(4, 4, vec![200u8; 4 * 4 * 4]);
+        let Handle::Rgba { width, height, .. } = downscale(&handle, (8, 8)) else {
+            panic!("expected rgba");
+        };
+        assert_eq!((width, height), (4, 4));
+    }
 
     fn names(n: usize) -> Vec<String> {
         (0..n).map(|i| format!("{i:04}.png")).collect()

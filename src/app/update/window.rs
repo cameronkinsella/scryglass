@@ -108,8 +108,9 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 win.unfocused_since = None;
                 let pipeline = shared.pipeline.clone();
                 let depth = shared.config.prefetch_depth;
+                let view = win.viewport_size;
                 if let Some(viewer) = win.viewer_mut() {
-                    return Task::batch(fire_prefetch(&pipeline, viewer, depth));
+                    return Task::batch(fire_prefetch(&pipeline, viewer, depth, view));
                 }
                 Task::none()
             } else {
@@ -164,13 +165,14 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             // Release this window's GPU textures while it sits minimized, and
             // re-upload them from their RAM sources on restore (no disk read).
             let pipeline = shared.pipeline.clone();
+            let view = win.viewport_size;
             match win.viewer_mut() {
                 Some(viewer) if minimized => {
                     viewer.release_textures();
                     Task::none()
                 }
                 Some(viewer) => Task::batch(crate::app::update::fire_restore_textures(
-                    &pipeline, viewer,
+                    &pipeline, viewer, view,
                 )),
                 None => Task::none(),
             }
@@ -277,6 +279,7 @@ mod tests {
             handle: iced::widget::image::Handle::from_rgba(2, 2, vec![0u8; 16]),
             original_size: (2, 2),
             keepalive: Some(crate::ui::image_surface::test_keepalive()),
+            gpu_full: true,
         };
         let cost = image.byte_cost();
         app.viewer_mut().unwrap().cache.insert(path.into(), image, cost);

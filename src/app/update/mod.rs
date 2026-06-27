@@ -24,8 +24,8 @@ pub(crate) use file_ops::{
     copy_bitmap, copy_rgba_bitmap, file_op_target, fire_delete, purge_disk_thumb, validate_rename,
 };
 pub(crate) use media_tasks::{
-    fire_exif, fire_load, fire_prefetch, fire_restore_textures, fire_rotate, fire_thumbnailer,
-    show_loaded, show_placeholder,
+    fire_exif, fire_load, fire_prefetch, fire_promote, fire_restore_textures, fire_rotate,
+    fire_thumbnailer, show_loaded, show_placeholder,
 };
 pub(crate) use navigation::open_path;
 pub(crate) use navigation::{

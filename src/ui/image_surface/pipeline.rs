@@ -32,6 +32,10 @@ struct UploadContext {
 /// render thread stalls the frame (iced drops on its worker for the same reason).
 enum Job {
     Upload {
+        /// The image id this texture is for. View-res and full-res uploads share
+        /// one id (the `handle` carries the pixels), so promoting or demoting an
+        /// image just replaces its texture.
+        id: Id,
         handle: Handle,
         /// Resolved with the keepalive once the texture is resident. The app
         /// holds it for as long as it wants the image; dropping it frees the
@@ -462,10 +466,23 @@ fn make_image(
     bind_texture(device, layout, uniforms, sampler_linear, sampler_nearest, &texture)
 }
 
-/// Queue an image for the upload thread. Returns false when the pipeline is not
-/// built yet (the first image) or the image is oversize for the device, in which
-/// case `ready` is dropped and prepare's on-thread fallback covers the display.
+/// Queue an image for the upload thread at its full resolution. Returns false
+/// when the pipeline is not built yet (the first image) or the image is oversize
+/// for the device, in which case `ready` is dropped and prepare's on-thread
+/// fallback covers the display.
 pub fn submit_upload(handle: Handle, ready: tokio::sync::oneshot::Sender<Keepalive>) -> bool {
+    submit_upload_at(handle.id(), handle, ready)
+}
+
+/// Queue `handle`'s pixels as the texture for image `id`, which may differ from
+/// `handle`'s own id. A view-res and a full-res upload for the same image share
+/// one `id`, so promoting or demoting an image is just another upload that
+/// replaces its texture.
+pub fn submit_upload_at(
+    id: Id,
+    handle: Handle,
+    ready: tokio::sync::oneshot::Sender<Keepalive>,
+) -> bool {
     let Some(ctx) = UPLOAD_CONTEXT.get() else {
         return false;
     };
@@ -475,7 +492,7 @@ pub fn submit_upload(handle: Handle, ready: tokio::sync::oneshot::Sender<Keepali
     if *width == 0 || *height == 0 || *width > ctx.max_dim || *height > ctx.max_dim {
         return false;
     }
-    ctx.jobs.send(Job::Upload { handle, ready }).is_ok()
+    ctx.jobs.send(Job::Upload { id, handle, ready }).is_ok()
 }
 
 /// The dedicated upload thread, modeled on iced's image worker. It drains jobs
@@ -505,19 +522,19 @@ fn spawn_upload_thread(
             let mut staging_cap: u64 = 0;
             while let Some(job) = jobs.blocking_recv() {
                 match job {
-                    Job::Upload { handle, ready } => {
+                    Job::Upload { id, handle, ready } => {
                         let Handle::Rgba {
-                            id,
                             width,
                             height,
                             pixels,
+                            ..
                         } = &handle
                         else {
                             // Never reached (loads decode to Rgba); drop `ready`
                             // so the awaiter sees no keepalive.
                             continue;
                         };
-                        let (id, width, height) = (*id, *width, *height);
+                        let (width, height) = (*width, *height);
                         let bytes_per_row =
                             (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
                         let total = bytes_per_row as u64 * height as u64;

@@ -35,6 +35,11 @@ pub struct CachedImage {
     /// context exists. Held for its refcount, never read.
     #[allow(dead_code)]
     pub keepalive: Option<crate::ui::image_surface::Keepalive>,
+    /// Whether the GPU texture holds the full-resolution pixels. Prefetched
+    /// neighbors upload at view resolution to save VRAM; the displayed image is
+    /// promoted to full resolution so zoom stays crisp. The RAM `handle` is
+    /// always full-res, so promotion never re-reads from disk.
+    pub gpu_full: bool,
 }
 
 impl CachedImage {
@@ -275,16 +280,24 @@ impl Viewer {
     }
 
     /// The resident images to re-upload after a minimize freed their textures,
-    /// each as `(path, handle, original_size)`, with the displayed image first
-    /// so it reappears before its neighbors.
-    pub fn restore_list(&self) -> Vec<(PathBuf, Handle, (u32, u32))> {
+    /// each as `(path, handle, original_size, gpu_full)`, with the displayed
+    /// image first so it reappears before its neighbors. Each keeps the
+    /// resolution it had, so prefetch neighbors stay view-res.
+    pub fn restore_list(&self) -> Vec<(PathBuf, Handle, (u32, u32), bool)> {
         let current = self.displayed_path.clone();
-        let mut list: Vec<(PathBuf, Handle, (u32, u32))> = self
+        let mut list: Vec<(PathBuf, Handle, (u32, u32), bool)> = self
             .cache
             .iter()
-            .map(|(path, image)| (path.to_path_buf(), image.handle.clone(), image.original_size))
+            .map(|(path, image)| {
+                (
+                    path.to_path_buf(),
+                    image.handle.clone(),
+                    image.original_size,
+                    image.gpu_full,
+                )
+            })
             .collect();
-        list.sort_by_key(|(path, _, _)| Some(path.clone()) != current);
+        list.sort_by_key(|(path, _, _, _)| Some(path.clone()) != current);
         list
     }
 
@@ -499,6 +512,7 @@ mod tests {
             handle,
             original_size: (2, 2),
             keepalive: Some(crate::ui::image_surface::test_keepalive()),
+            gpu_full: true,
         };
         let cost = image.byte_cost();
         viewer.cache.insert(PathBuf::from(path), image, cost);
