@@ -208,9 +208,13 @@ impl DiskThumbs {
     }
 }
 
-/// The cache root, whether or not the store is currently enabled.
+/// The cache root, whether or not the store is currently enabled:
+/// `<exe>/data/thumbs` in a portable install, else under the OS cache dir.
 fn store_root() -> Option<PathBuf> {
-    Some(dirs::cache_dir()?.join("scryglass").join("thumbs"))
+    match crate::config::data_dir() {
+        crate::config::DataDir::Portable(data) => Some(data.join("thumbs")),
+        _ => Some(dirs::cache_dir()?.join("scryglass").join("thumbs")),
+    }
 }
 
 /// Total bytes under `root`, summing the two-level bucket layout.

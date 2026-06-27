@@ -1,11 +1,12 @@
 //! Application configuration: persisted settings, pre-fetch depth, and
 //! supported image formats.
 //!
-//! Settings live in `config_dir()/scryglass/config.toml`. Every field has a
-//! serde default so the format can evolve additively: unknown keys are
-//! ignored and missing keys fall back to defaults.
+//! Settings live in `config_dir()/scryglass/config.toml`, or in
+//! `<exe>/data/config.toml` for a portable install (see [`data_dir`]). Every
+//! field has a serde default so the format can evolve additively: unknown keys
+//! are ignored and missing keys fall back to defaults.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -408,6 +409,51 @@ impl Default for AppConfig {
     }
 }
 
+/// Where the app keeps its data: beside the executable (portable), or in the
+/// per-user OS directories.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DataDir {
+    /// `<exe>/data` exists and is writable: config and thumbnails live there, so
+    /// the install is portable and trace-free.
+    Portable(PathBuf),
+    /// `<exe>/data` exists but is not writable: fall back to the OS dirs, warn.
+    PortableReadOnly,
+    /// No portable folder: use the per-user OS directories.
+    System,
+}
+
+/// Resolve the data location once. A `data/` folder beside the executable is the
+/// opt-in marker for a portable build that travels with its folder; otherwise
+/// the per-user OS directories are used.
+pub fn data_dir() -> &'static DataDir {
+    static DATA_DIR: LazyLock<DataDir> = LazyLock::new(|| {
+        let Some(data) = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|p| p.join("data")))
+        else {
+            return DataDir::System;
+        };
+        if !data.is_dir() {
+            DataDir::System
+        } else if dir_is_writable(&data) {
+            DataDir::Portable(data)
+        } else {
+            DataDir::PortableReadOnly
+        }
+    });
+    &DATA_DIR
+}
+
+/// Whether `dir` accepts a new file, tested by creating and removing a probe.
+fn dir_is_writable(dir: &Path) -> bool {
+    let probe = dir.join(".scryglass-write-test");
+    std::fs::File::create(&probe)
+        .map(|_| {
+            let _ = std::fs::remove_file(&probe);
+        })
+        .is_ok()
+}
+
 /// The outcome of loading the persisted config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigLoad {
@@ -431,9 +477,15 @@ impl AppConfig {
         &SUPPORTED_EXTENSIONS
     }
 
-    /// Location of the persisted config file, if a config dir exists.
+    /// Location of the persisted config file: `<exe>/data/config.toml` in a
+    /// portable install, else `config_dir()/scryglass/config.toml`.
     pub fn path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("scryglass").join("config.toml"))
+        match data_dir() {
+            DataDir::Portable(data) => Some(data.join("config.toml")),
+            DataDir::System | DataDir::PortableReadOnly => {
+                dirs::config_dir().map(|d| d.join("scryglass").join("config.toml"))
+            }
+        }
     }
 
     /// Load the persisted config, reporting the outcome so a malformed file is

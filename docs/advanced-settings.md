@@ -3,9 +3,11 @@
 scryglass keeps its settings in `config.toml` (open it from **Settings → Open
 Advanced Settings**, or find it next to the app in portable mode, otherwise under
 your OS config directory). Most settings have an in-app control; the ones here can
-only be changed by editing the file. Every key has a sensible default, so you only
-set what you want to change. Unknown keys are ignored and missing keys fall back to
-their default, so the file is safe to evolve and hand-edit.
+only be changed by editing the file. Saved edits apply live across all open windows,
+with no relaunch (decay-pipeline changes take effect on the next image). Every key
+has a sensible default, so you only set what you want to change. Unknown keys are
+ignored and missing keys fall back to their default, so the file is safe to evolve
+and hand-edit; a syntax error is reported and the previous settings are kept.
 
 Durations are written as readable strings: `"15s"`, `"200ms"`, `"1m30s"`, or
 `"never"` to disable.

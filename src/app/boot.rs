@@ -71,6 +71,27 @@ pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Envelope>) {
         ConfigLoad::Ok | ConfigLoad::Missing => Task::none(),
     };
 
+    // A portable `data/` folder that can't be written falls back to the system
+    // dirs; say so, since the user expected settings to live beside the app.
+    let portable_toast = if matches!(
+        crate::config::data_dir(),
+        crate::config::DataDir::PortableReadOnly
+    ) {
+        Envelope::wrap(
+            id,
+            update::push_toast(
+                &mut win,
+                &mut shared,
+                ToastKind::Error,
+                "The data folder next to scryglass isn't writable; \
+                 using the system config location instead."
+                    .into(),
+            ),
+        )
+    } else {
+        Task::none()
+    };
+
     let open = match initial_open_path(initial_path) {
         Some(path) => {
             win.opening_since = Some(iced::time::Instant::now());
@@ -90,6 +111,7 @@ pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Envelope>) {
             opened.map(Envelope::Opened),
             open,
             config_toast,
+            portable_toast,
         ]),
     )
 }
