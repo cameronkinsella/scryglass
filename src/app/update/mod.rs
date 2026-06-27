@@ -90,6 +90,7 @@ fn route(app: &mut App, envelope: Envelope) -> Task<Envelope> {
 /// Cheap per message (a count plus a budget compare); only a viewer whose share
 /// actually changed pays for an eviction pass.
 fn rebalance_budgets(app: &mut App) {
+    // TODO: add a config knob to scope the cache budget per-window or globally.
     let share = app
         .windows
         .values()

@@ -189,13 +189,13 @@ mod humantime_opt {
     }
 }
 
-/// The reclamation pipeline a backgrounded window runs: full-res VRAM, then
+/// The decay pipeline a backgrounded window runs: full-res VRAM, then
 /// (after each timer) demote to view-res, drop the VRAM, and evict the RAM
 /// source. A `None` timer skips that stage. Shared by the unfocused and
 /// minimized states so their logic and labels are identical.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct StatePipeline {
+pub struct DecayPipeline {
     /// Demote the on-screen image full-res -> view-res after this delay.
     #[serde(with = "humantime_opt")]
     pub demote_vram_after: Option<Duration>,
@@ -215,7 +215,7 @@ pub struct StatePipeline {
     pub max_decode_latency: Duration,
 }
 
-impl Default for StatePipeline {
+impl Default for DecayPipeline {
     /// Conservative fallback for a deleted key: do nothing aggressive. The real
     /// per-state defaults are set in [`ResourceConfig::default`].
     fn default() -> Self {
@@ -230,13 +230,11 @@ impl Default for StatePipeline {
     }
 }
 
-impl StatePipeline {
+impl DecayPipeline {
     /// The RAM-eviction delay for an image given its decode time, or `None` to
     /// never evict. Dynamic mode interpolates linearly between `evict_ram_min`
     /// (instant decode) and `evict_ram_max` (at the latency ceiling); an image
     /// at or past the ceiling, or one whose decode time is unknown, is kept.
-    // Consumed by the eviction pipeline stage; tested here in isolation.
-    #[allow(dead_code)]
     pub fn evict_delay(&self, decode: Option<Duration>) -> Option<Duration> {
         match self.evict_ram {
             EvictPolicy::Never => None,
@@ -262,14 +260,14 @@ pub struct MinimizedConfig {
     /// Pause an open video while the window is minimized.
     pub pause_video: bool,
     #[serde(flatten)]
-    pub pipeline: StatePipeline,
+    pub pipeline: DecayPipeline,
 }
 
 impl Default for MinimizedConfig {
     fn default() -> Self {
         Self {
             pause_video: true,
-            pipeline: StatePipeline::default(),
+            pipeline: DecayPipeline::default(),
         }
     }
 }
@@ -279,11 +277,11 @@ impl Default for MinimizedConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ResourceConfig {
-    /// VRAM tier for a focused window's prefetch neighbors.
+    /// What resolution a focused window's prefetch neighbors upload at.
     pub prefetch_vram: PrefetchVram,
-    /// Reclamation pipeline for an unfocused window.
-    pub unfocused: StatePipeline,
-    /// Reclamation pipeline for a minimized window.
+    /// Decay pipeline for an unfocused window.
+    pub unfocused: DecayPipeline,
+    /// Decay pipeline for a minimized window.
     pub minimized: MinimizedConfig,
 }
 
@@ -291,7 +289,7 @@ impl Default for ResourceConfig {
     fn default() -> Self {
         Self {
             prefetch_vram: PrefetchVram::ViewRes,
-            unfocused: StatePipeline {
+            unfocused: DecayPipeline {
                 demote_vram_after: Some(Duration::from_secs(15)),
                 drop_vram_after: None,
                 evict_ram: EvictPolicy::Dynamic,
@@ -301,7 +299,7 @@ impl Default for ResourceConfig {
             },
             minimized: MinimizedConfig {
                 pause_video: true,
-                pipeline: StatePipeline {
+                pipeline: DecayPipeline {
                     demote_vram_after: None,
                     drop_vram_after: Some(Duration::ZERO),
                     evict_ram: EvictPolicy::Dynamic,
@@ -510,7 +508,7 @@ mod tests {
             show_checkerboard: true,
             resource: ResourceConfig {
                 prefetch_vram: PrefetchVram::FullRes,
-                unfocused: StatePipeline {
+                unfocused: DecayPipeline {
                     demote_vram_after: Some(Duration::from_secs(20)),
                     drop_vram_after: None,
                     evict_ram: EvictPolicy::Fixed(Duration::from_secs(90)),
@@ -520,7 +518,7 @@ mod tests {
                 },
                 minimized: MinimizedConfig {
                     pause_video: false,
-                    pipeline: StatePipeline {
+                    pipeline: DecayPipeline {
                         demote_vram_after: Some(Duration::from_secs(5)),
                         drop_vram_after: Some(Duration::from_secs(10)),
                         evict_ram: EvictPolicy::Never,
@@ -584,7 +582,7 @@ mod tests {
 
     #[test]
     fn evict_delay_never_and_fixed() {
-        let mut p = StatePipeline::default();
+        let mut p = DecayPipeline::default();
         assert_eq!(p.evict_delay(Some(Duration::from_millis(10))), None);
         p.evict_ram = EvictPolicy::Fixed(Duration::from_secs(60));
         assert_eq!(
@@ -597,12 +595,12 @@ mod tests {
 
     #[test]
     fn evict_delay_dynamic_interpolates_and_keeps_slow_or_unknown() {
-        let p = StatePipeline {
+        let p = DecayPipeline {
             evict_ram: EvictPolicy::Dynamic,
             evict_ram_min: Duration::from_secs(30),
             evict_ram_max: Duration::from_secs(630),
             max_decode_latency: Duration::from_millis(200),
-            ..StatePipeline::default()
+            ..DecayPipeline::default()
         };
         // Instant decode -> min; halfway -> midpoint; at/over ceiling -> never.
         assert_eq!(

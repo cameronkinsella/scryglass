@@ -56,6 +56,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             let zoom_mode = shared.config.zoom_mode;
             let viewport = win.viewport_size;
             let depth = shared.config.prefetch_depth;
+            let prefetch_vram = shared.config.resource.prefetch_vram;
             let pipeline = shared.pipeline.clone();
             let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
@@ -112,9 +113,23 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                         .pending_nav
                         .map(|i| viewer.nav.files()[i].to_path_buf());
                     if viewer.nav.current() == path || pending_path.as_deref() == Some(&*path) {
-                        fire_load(&pipeline, viewer, path, Lane::Current, viewport)
+                        fire_load(
+                            &pipeline,
+                            viewer,
+                            path,
+                            Lane::Current,
+                            viewport,
+                            prefetch_vram,
+                        )
                     } else if viewer.pinned_paths(depth).contains(&path) {
-                        fire_load(&pipeline, viewer, path, Lane::Prefetch, viewport)
+                        fire_load(
+                            &pipeline,
+                            viewer,
+                            path,
+                            Lane::Prefetch,
+                            viewport,
+                            prefetch_vram,
+                        )
                     } else {
                         Task::none()
                     }
@@ -307,6 +322,16 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                         keepalive,
                     );
                 }
+                // If a visible drop swapped this image to its thumbnail, bring the
+                // sharp image back now that its texture is resident, keeping zoom.
+                if viewer.displayed_path.as_deref() == Some(&*path)
+                    && matches!(viewer.displayed, DisplayedImage::Placeholder(_))
+                {
+                    viewer.displayed = DisplayedImage::Full {
+                        handle: image.handle.clone(),
+                        original_size: image.original_size,
+                    };
+                }
                 let cost = image.byte_cost();
                 viewer.cache.insert(path, image, cost);
             }
@@ -496,6 +521,7 @@ mod tests {
             original_size: (2, 2),
             keepalive: None,
             gpu_full: false,
+            decode_time: None,
         };
         let cost = released.byte_cost();
         app.viewer_mut()
@@ -513,6 +539,7 @@ mod tests {
                     original_size: (2, 2),
                     keepalive: Some(crate::ui::image_surface::test_keepalive()),
                     gpu_full: true,
+                    decode_time: None,
                 },
             },
         );
@@ -541,6 +568,7 @@ mod tests {
                     original_size: (2, 2),
                     keepalive: Some(crate::ui::image_surface::test_keepalive()),
                     gpu_full: true,
+                    decode_time: None,
                 },
             },
         );
@@ -550,12 +578,12 @@ mod tests {
     #[test]
     fn a_broken_file_becomes_a_navigable_error_stop() {
         use std::io::Write;
+
+        use tempfile::TempDir;
         // Real files so the not-found backstop doesn't fire. The cursor starts
         // on `a` with a pending move onto the (undecodable) `b`.
-        let dir = std::env::temp_dir().join(format!("scryglass-broken-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let (a, b) = (dir.join("a.png"), dir.join("b.png"));
+        let dir = TempDir::new().unwrap();
+        let (a, b) = (dir.path().join("a.png"), dir.path().join("b.png"));
         for p in [&a, &b] {
             std::fs::File::create(p)
                 .unwrap()
@@ -588,7 +616,6 @@ mod tests {
         assert_eq!(v.nav.cursor(), 1);
         assert!(matches!(v.displayed, DisplayedImage::Error { .. }));
         assert!(v.failed_loads.contains_key(b.as_path()));
-
-        let _ = std::fs::remove_dir_all(&dir);
+        // `dir` (a TempDir) removes itself on drop.
     }
 }

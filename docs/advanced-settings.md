@@ -73,18 +73,20 @@ closed; you normally don't edit them by hand.
 scryglass reclaims a window's GPU and RAM as it moves to the background, and gives
 it back when you return. This is fully tunable. The defaults are a balance; a slim
 build can reclaim more aggressively, and a "blazing fast always" build can disable
-reclamation entirely.
+decay entirely.
 
-A backgrounded window runs a forward-only pipeline:
+A backgrounded window runs a forward-only **decay pipeline**:
 
 ```
 full-res VRAM  →demote→  view-res VRAM  →drop→  no VRAM  →evict→  no RAM
 ```
 
-Each step has its own timer (a duration, or `"never"` to skip it), measured from
-when the window entered the state. The steps can never run out of order, and
-re-focusing a window restores it. The **unfocused** and **minimized** states use
-the same controls, with different defaults.
+"Drop" frees the VRAM only (re-uploaded from the RAM copy on return); "evict"
+frees the RAM copy too (re-decoded from disk on return). Each step has its own
+timer (a duration, or `"never"` to skip it), measured from when the window
+entered the state. The steps can never run out of order, and re-focusing (or
+scroll-zooming) a window restores it. The **unfocused** and **minimized** states
+use the same controls, with different defaults.
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
@@ -96,7 +98,7 @@ the same controls, with different defaults.
 |---|---|---|---|
 | `demote_vram_after` | duration \| `"never"` | `"15s"` / `"never"` | Demote the on-screen image from full-res to view-res VRAM (and drop the prefetch look-ahead). |
 | `drop_vram_after` | duration \| `"never"` | `"never"` / `"0s"` | Drop the on-screen image's VRAM entirely (it falls back to its thumbnail until you return). |
-| `evict_ram` | `"never"` \| duration \| `"dynamic"` | `"dynamic"` / `"dynamic"` | When to drop the full-resolution copy from RAM. A duration is a fixed delay; `dynamic` decides per image from how long it took to decode (see below); `never` always keeps it. |
+| `evict_ram` | `"never"` \| duration \| `"dynamic"` | `"dynamic"` / `"dynamic"` | When to evict the full-resolution copy from RAM (re-decoded from disk on return). A duration is a fixed delay; `dynamic` decides per image from how long it took to decode (see below); `never` always keeps it. |
 | `evict_ram_min` | duration | `"30s"` / `"15s"` | `dynamic` only: the evict delay for an image that decodes instantly. |
 | `evict_ram_max` | duration | `"10m"` / `"5m"` | `dynamic` only: the evict delay for an image right at the latency ceiling. |
 | `max_decode_latency` | duration | `"200ms"` / `"200ms"` | `dynamic` only: an image that took longer than this to decode (read + decode) is never evicted, so slow storage (a NAS) stays resident. |

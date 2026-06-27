@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use iced::time::Instant;
 use iced::widget::image::Handle;
@@ -13,6 +14,10 @@ use crate::nav::Nav;
 
 /// Thumbnail cache budget, about 500 thumbs. Split across live windows.
 pub(crate) const THUMB_BUDGET_BYTES: usize = 128 * 1024 * 1024;
+
+/// A released texture to re-upload on restore: path, RAM handle, true size,
+/// whether it was full-res, and its decode time (carried forward for eviction).
+type RestoreEntry = (PathBuf, Handle, (u32, u32), bool, Option<Duration>);
 
 /// Whether the app is idle or actively viewing a directory of images.
 pub enum Session {
@@ -40,6 +45,11 @@ pub struct CachedImage {
     /// promoted to full resolution so zoom stays crisp. The RAM `handle` is
     /// always full-res, so promotion never re-reads from disk.
     pub gpu_full: bool,
+    /// How long this image took to read and decode, when it was decoded here.
+    /// Drives dynamic RAM eviction: a fast-decoding source is cheap to drop and
+    /// reproduce, a slow one is kept. `None` when reused from another window's
+    /// decode (cost unknown), so it is never evicted on a guess.
+    pub decode_time: Option<std::time::Duration>,
 }
 
 impl CachedImage {
@@ -279,25 +289,31 @@ impl Viewer {
         }
     }
 
-    /// The resident images to re-upload after a minimize freed their textures,
-    /// each as `(path, handle, original_size, gpu_full)`, with the displayed
-    /// image first so it reappears before its neighbors. Each keeps the
-    /// resolution it had, so prefetch neighbors stay view-res.
-    pub fn restore_list(&self) -> Vec<(PathBuf, Handle, (u32, u32), bool)> {
-        let current = self.displayed_path.clone();
-        let mut list: Vec<(PathBuf, Handle, (u32, u32), bool)> = self
+    /// The images whose textures were released and need re-uploading from their
+    /// surviving RAM source, each as `(path, handle, original_size, gpu_full,
+    /// decode_time)`, with the displayed image first so it reappears before its
+    /// neighbors. Already-resident entries are skipped, so a refocus that only
+    /// demoted (never released) re-seats nothing. Each keeps the resolution it
+    /// had, so prefetch neighbors stay view-res.
+    pub fn restore_list(&self) -> Vec<RestoreEntry> {
+        let current = self.displayed_path.as_ref();
+        let mut list: Vec<RestoreEntry> = self
             .cache
             .iter()
+            .filter(|(_, image)| image.keepalive.is_none())
             .map(|(path, image)| {
                 (
                     path.to_path_buf(),
                     image.handle.clone(),
                     image.original_size,
                     image.gpu_full,
+                    image.decode_time,
                 )
             })
             .collect();
-        list.sort_by_key(|(path, _, _, _)| Some(path.clone()) != current);
+        // Float the displayed image to the front so it reappears before its
+        // neighbors: only it compares equal to `current`, and `false` sorts first.
+        list.sort_by_key(|(path, ..)| Some(path) != current);
         list
     }
 
@@ -310,6 +326,28 @@ impl Viewer {
             .chain(self.displayed_path.clone())
             .collect();
         self.cache.retain(&keep);
+    }
+
+    /// Swap the on-screen image to its thumbnail blur, keeping the live zoom and
+    /// pan, so a visible window does not blank when its texture is about to be
+    /// freed. A no-op without a thumbnail, or when not showing a full image.
+    pub fn swap_display_to_thumb(&mut self) {
+        if !matches!(self.displayed, DisplayedImage::Full { .. }) {
+            return;
+        }
+        let Some(path) = self.displayed_path.as_ref() else {
+            return;
+        };
+        if let Some(thumb) = self.thumbs.get(path).cloned() {
+            self.displayed = DisplayedImage::Placeholder(thumb);
+        }
+    }
+
+    /// Evict every RAM source this window holds, so the on-screen image and its
+    /// prefetch neighbors re-decode from disk on return. The cache entries own
+    /// the `Handle`s and GPU keepalives, so this frees both. Thumbnails are kept.
+    pub fn evict_sources(&mut self) {
+        self.cache.retain(&HashSet::new());
     }
 
     /// The paths that must stay cached: the current image plus the
@@ -513,6 +551,7 @@ mod tests {
             original_size: (2, 2),
             keepalive: Some(crate::ui::image_surface::test_keepalive()),
             gpu_full: true,
+            decode_time: None,
         };
         let cost = image.byte_cost();
         viewer.cache.insert(PathBuf::from(path), image, cost);
@@ -554,10 +593,50 @@ mod tests {
         cache_image(&mut viewer, "b.png");
         cache_image(&mut viewer, "c.png");
         viewer.displayed_path = Some(PathBuf::from("b.png"));
+        // restore_list reports only released textures, as after a minimize.
+        viewer.release_textures();
 
         let list = viewer.restore_list();
         assert_eq!(list.len(), 3);
         assert_eq!(list[0].0, PathBuf::from("b.png"));
+    }
+
+    #[test]
+    fn restore_list_skips_still_resident_textures() {
+        let mut viewer = test_viewer(&["a.png", "b.png"], 0);
+        cache_image(&mut viewer, "a.png");
+        cache_image(&mut viewer, "b.png");
+        viewer.displayed_path = Some(PathBuf::from("a.png"));
+        // Nothing was released, so there is nothing to re-seat.
+        assert!(viewer.restore_list().is_empty());
+    }
+
+    #[test]
+    fn evict_sources_clears_every_ram_source() {
+        let mut viewer = test_viewer(&["a.png", "b.png"], 0);
+        cache_image(&mut viewer, "a.png");
+        cache_image(&mut viewer, "b.png");
+
+        viewer.evict_sources();
+
+        assert!(!viewer.cache.contains(Path::new("a.png")));
+        assert!(!viewer.cache.contains(Path::new("b.png")));
+    }
+
+    #[test]
+    fn swap_display_to_thumb_without_a_thumbnail_is_a_noop() {
+        let mut viewer = test_viewer(&["a.png"], 0);
+        viewer.displayed = DisplayedImage::Full {
+            handle: Handle::from_rgba(2, 2, vec![0u8; 16]),
+            original_size: (2, 2),
+        };
+        viewer.displayed_path = Some(PathBuf::from("a.png"));
+
+        // No thumbnail is cached, so the full image must stay on screen rather
+        // than blank.
+        viewer.swap_display_to_thumb();
+
+        assert!(matches!(viewer.displayed, DisplayedImage::Full { .. }));
     }
 
     #[test]

@@ -146,13 +146,13 @@ pub struct Window {
     pub(crate) zoom_slider_open: bool,
     /// Whether the window is borderless fullscreen (chrome hidden).
     pub(crate) fullscreen: bool,
-    /// Whether this window currently has native focus. The resource tiers key
+    /// Whether this window currently has native focus. The resource states key
     /// VRAM retention on it.
     pub(crate) focused: bool,
-    /// Bumped on every focus or minimize change, so a deferred resource-tier
+    /// Bumped on every focus or minimize change, so a deferred decay-stage
     /// timer can tell whether it is still current when it fires (a stale one
     /// no-ops). Replaces tracking a per-stage timestamp.
-    pub(crate) tier_generation: u64,
+    pub(crate) decay_generation: u64,
     /// Whether the window is OS-minimized. A minimized window shows nothing,
     /// so it drives no redraw timers.
     pub(crate) minimized: bool,

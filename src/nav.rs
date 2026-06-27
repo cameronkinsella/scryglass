@@ -502,19 +502,16 @@ mod tests {
 
     #[test]
     fn scan_directory_lists_supported_files_sorted() {
-        let dir = std::env::temp_dir().join(format!("scryglass-scan-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("b.png"), b"x").unwrap();
-        std::fs::write(dir.join("a.png"), b"x").unwrap();
-        std::fs::write(dir.join("notes.txt"), b"x").unwrap();
-        let names: Vec<String> = scan_directory(&dir)
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("b.png"), b"x").unwrap();
+        std::fs::write(dir.path().join("a.png"), b"x").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"x").unwrap();
+        let names: Vec<String> = scan_directory(dir.path())
             .unwrap()
             .iter()
             .filter_map(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned())
             .collect();
-        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(names, [String::from("a.png"), String::from("b.png")]);
     }
 

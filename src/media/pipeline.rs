@@ -167,6 +167,16 @@ impl Pipeline {
         }
     }
 
+    /// Drop dedup entries whose texture has been evicted. Each entry holds the
+    /// decoded handle strongly, so without this a backgrounded window that sheds
+    /// its textures keeps that RAM alive here until the next `dedup_insert`. The
+    /// decay pipeline calls this when it releases or evicts, to free it at once.
+    pub fn prune_dedup(&self) {
+        if let Ok(mut map) = self.image_dedup.lock() {
+            map.retain(|_, (_, _, weak)| weak.strong_count() > 0);
+        }
+    }
+
     /// The generation of the most recent navigation.
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
@@ -530,6 +540,25 @@ mod tests {
         // Once every window has dropped the keepalive, the entry is gone.
         drop(keepalive);
         drop(hit);
+        assert!(pipeline.dedup_get(&path).is_none());
+    }
+
+    #[test]
+    fn prune_dedup_releases_evicted_entries_without_a_lookup() {
+        let pipeline = Pipeline::new(None);
+        let path = PathBuf::from("/img/a.png");
+        let handle = Handle::from_rgba(2, 2, vec![0u8; 16]);
+        let keepalive = crate::ui::image_surface::test_keepalive();
+        pipeline.dedup_insert(path.clone(), handle, (2, 2), &keepalive);
+
+        // A still-resident texture survives a prune.
+        pipeline.prune_dedup();
+        assert!(pipeline.dedup_get(&path).is_some());
+
+        // Once its texture is gone, a prune drops the entry (and the decoded
+        // handle it was holding), with no dedup_get to trigger lazy cleanup.
+        drop(keepalive);
+        pipeline.prune_dedup();
         assert!(pipeline.dedup_get(&path).is_none());
     }
 

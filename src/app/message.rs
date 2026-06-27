@@ -107,7 +107,7 @@ pub fn is_modal_blocked(msg: &Message) -> bool {
 }
 
 /// Window-system events and periodic polls (focus, minimize checks, resize,
-/// move, the resource-tier timers). None of these are the user interacting
+/// move, the decay-stage timers). None of these are the user interacting
 /// outside an open menu, so they must never dismiss one.
 pub fn is_background_message(msg: &Message) -> bool {
     matches!(msg, Message::Window(w) if !matches!(w, window::Message::CloseRequested(_)))

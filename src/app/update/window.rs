@@ -11,28 +11,47 @@ pub enum Message {
         minimized: bool,
         mode: iced::window::Mode,
     },
-    /// Native focus gained or lost, tracked per window for the resource tiers.
+    /// Native focus gained or lost, tracked per window for the resource states.
     Focused(bool),
-    /// Fires after a window has been unfocused for [`PREFETCH_IDLE`]; drops the
-    /// prefetch look-ahead if the carried tier generation is still current (no
-    /// focus or minimize change has happened since it was armed).
-    PrefetchIdle(u64),
+    /// A decay stage firing for the carried decay generation. A later focus
+    /// or minimize change bumps the generation, so a superseded timer no-ops.
+    Decay {
+        generation: u64,
+        stage: DecayStage,
+    },
     /// Re-checks OS-minimize state, off the focus-change events and a slow
     /// unfocused fallback, since iced has no minimize event.
     CheckMinimize,
     /// Result of the minimize poll.
     Minimized(bool),
+    /// A scroll reached an unfocused window: restore its on-screen image to
+    /// full-res (re-decoding if evicted) and restart its decay, so a zoom there
+    /// is crisp without bringing the window forward.
+    Reactivate,
     CloseRequested(iced::window::Id),
 }
 
-/// How long a window sits unfocused before its prefetch look-ahead is shed. A
-/// brief glance away keeps it; only a sustained switch reclaims the neighbors.
-const PREFETCH_IDLE: std::time::Duration = std::time::Duration::from_secs(15);
+/// One stage of a backgrounded window's decay pipeline, run in this order
+/// and each at its own delay from when the window entered the state. The same
+/// three stages serve both the unfocused and minimized states; only their
+/// configured timers differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecayStage {
+    /// Demote the on-screen image to view-res and drop the prefetch look-ahead.
+    Demote,
+    /// Release all of this window's GPU textures (the RAM sources survive).
+    DropVram,
+    /// Evict this window's RAM sources, so they re-decode from disk on return.
+    EvictRam,
+}
+use std::time::Duration;
+
 use iced::Task;
 
-use super::{fire_prefetch, fire_reupload_res};
+use super::{fire_load, fire_prefetch, fire_restore_textures, fire_reupload_res};
 use crate::app::viewer_math::{clamp_pan, compute_zoom};
 use crate::app::{Message as AppMessage, Shared, Window, recalc_viewport};
+use crate::media::pipeline::{Lane, Pipeline};
 
 pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) -> Task<AppMessage> {
     match message {
@@ -105,61 +124,14 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             if !changed {
                 return Task::none();
             }
-            // A focus change brackets a minimize/restore, so confirm the
-            // minimize state on it instead of polling continuously.
-            let minimize = check_minimize(win.id);
-            if focused {
-                // Re-warm the look-ahead the idle drop may have shed, and
-                // promote the on-screen image back to full-res for crisp zoom.
-                // Bumping the generation supersedes any pending idle-drop timer.
-                win.tier_generation = win.tier_generation.wrapping_add(1);
-                let pipeline = shared.pipeline.clone();
-                let depth = shared.config.prefetch_depth;
-                let view = win.viewport_size;
-                if let Some(viewer) = win.viewer_mut() {
-                    let mut tasks = fire_prefetch(&pipeline, viewer, depth, view);
-                    if let Some(displayed) = viewer.displayed_path.clone() {
-                        let zoom = viewer.zoom;
-                        tasks.push(fire_reupload_res(viewer, &displayed, zoom, true));
-                    }
-                    tasks.push(minimize);
-                    return Task::batch(tasks);
-                }
-                minimize
-            } else {
-                // Arm the idle drop: fire once PREFETCH_IDLE elapses, tagged with
-                // this window's new tier generation so a later focus or minimize
-                // change supersedes it.
-                win.tier_generation = win.tier_generation.wrapping_add(1);
-                let generation = win.tier_generation;
-                let arm = Task::future(async move {
-                    tokio::time::sleep(PREFETCH_IDLE).await;
-                    AppMessage::Window(Message::PrefetchIdle(generation))
-                });
-                Task::batch([arm, minimize])
-            }
+            // A focus change brackets a minimize/restore, so confirm the minimize
+            // state on it instead of polling, and restart the decay pipeline.
+            Task::batch([restart_decay(win, shared), check_minimize(win.id)])
         }
 
-        Message::PrefetchIdle(generation) => {
-            // Shed the prefetch neighbors and demote the on-screen image to view
-            // resolution, so this window holds nothing at full-res while it sits
-            // in the background. A later focus or minimize change bumped the tier
-            // generation, so a superseded timer no-ops.
-            if generation != win.tier_generation {
-                return Task::none();
-            }
-            let Some(viewer) = win.viewer_mut() else {
-                return Task::none();
-            };
-            viewer.drop_prefetch();
-            if let Some(displayed) = viewer.displayed_path.clone() {
-                // Demote to the resolution of the current zoom, so a zoomed-in
-                // background window stays as crisp as what is on screen.
-                let zoom = viewer.zoom;
-                return fire_reupload_res(viewer, &displayed, zoom, false);
-            }
-            Task::none()
-        }
+        Message::Decay { generation, stage } => run_decay_stage(win, shared, generation, stage),
+
+        Message::Reactivate => restart_decay(win, shared),
 
         Message::CheckMinimize => check_minimize(win.id),
 
@@ -169,39 +141,23 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             if !changed {
                 return Task::none();
             }
-            // A minimize or restore supersedes any pending unfocused idle-drop
-            // timer, so it never demotes a window that is no longer just sitting
-            // unfocused.
-            win.tier_generation = win.tier_generation.wrapping_add(1);
-            // Pause an open video the instant the window minimizes (audio stops
-            // at once, not after the frame queue stalls), and resume on restore
-            // only if it was playing.
+            // Pause an open video the instant the window minimizes (audio stops at
+            // once, not after the frame queue stalls), and resume on restore only
+            // if it was playing. The pause is opt-out via config; an unfocused but
+            // un-minimized video keeps playing regardless.
+            let pause = shared.config.resource.minimized.pause_video;
             let mut resume = win.video_resumes_on_restore;
             if let Some(session) = win.viewer_mut().and_then(|v| v.video.as_mut()) {
-                if minimized {
+                if minimized && pause {
                     resume = session.playing;
                     session.pause();
-                } else if resume {
+                } else if !minimized && resume {
                     session.play();
                     resume = false;
                 }
             }
             win.video_resumes_on_restore = resume;
-
-            // Release this window's GPU textures while it sits minimized, and
-            // re-upload them from their RAM sources on restore (no disk read).
-            let pipeline = shared.pipeline.clone();
-            let view = win.viewport_size;
-            match win.viewer_mut() {
-                Some(viewer) if minimized => {
-                    viewer.release_textures();
-                    Task::none()
-                }
-                Some(viewer) => Task::batch(crate::app::update::fire_restore_textures(
-                    &pipeline, viewer, view,
-                )),
-                None => Task::none(),
-            }
+            restart_decay(win, shared)
         }
 
         Message::CloseRequested(id) => {
@@ -255,6 +211,195 @@ fn check_minimize(id: iced::window::Id) -> Task<AppMessage> {
         .map(|m| AppMessage::Window(Message::Minimized(m.unwrap_or(false))))
 }
 
+/// Run one decay stage, unless a focus or minimize change has since bumped
+/// the generation it was armed under (then it is stale and no-ops).
+fn run_decay_stage(
+    win: &mut Window,
+    shared: &mut Shared,
+    generation: u64,
+    stage: DecayStage,
+) -> Task<AppMessage> {
+    if generation != win.decay_generation {
+        return Task::none();
+    }
+    let minimized = win.minimized;
+    let Some(viewer) = win.viewer_mut() else {
+        return Task::none();
+    };
+    match stage {
+        DecayStage::Demote => {
+            viewer.drop_prefetch();
+            if let Some(displayed) = viewer.displayed_path.clone() {
+                // Demote to the resolution of the current zoom, so a zoomed-in
+                // background window stays as crisp as what is on screen.
+                let zoom = viewer.zoom;
+                return fire_reupload_res(viewer, &displayed, zoom, false);
+            }
+            Task::none()
+        }
+        DecayStage::DropVram => {
+            // A visible window swaps to its thumbnail first so it does not blank;
+            // a minimized window shows nothing, so it keeps the full display and
+            // re-seats it on restore.
+            if !minimized {
+                viewer.swap_display_to_thumb();
+            }
+            viewer.release_textures();
+            // The shed textures' dedup entries now hold their RAM for nothing.
+            shared.pipeline.prune_dedup();
+            Task::none()
+        }
+        DecayStage::EvictRam => {
+            // Evicting the RAM means the on-screen image must let go of its full
+            // handle too (even minimized, where it is not visible), or its pixels
+            // stay alive. The thumbnail stands in until a return re-decodes.
+            viewer.swap_display_to_thumb();
+            viewer.evict_sources();
+            shared.pipeline.prune_dedup();
+            Task::none()
+        }
+    }
+}
+
+/// Re-evaluate the window's resource state after a focus or minimize change.
+/// Bumps the decay generation (cancelling pending stage timers), restores the
+/// display to what the new state needs, then arms each enabled decay stage
+/// from config, clamped so the pipeline only ever runs forward.
+fn restart_decay(win: &mut Window, shared: &mut Shared) -> Task<AppMessage> {
+    win.decay_generation = win.decay_generation.wrapping_add(1);
+    let generation = win.decay_generation;
+    let pipeline = shared.pipeline.clone();
+    let depth = shared.config.prefetch_depth;
+    let prefetch_vram = shared.config.resource.prefetch_vram;
+    let view = win.viewport_size;
+
+    let mut tasks = restore_display(win, &pipeline, depth, view, prefetch_vram);
+
+    // A focused window rests at full-res and reclaims nothing; a minimized window
+    // takes precedence over focus.
+    let cfg = if win.minimized {
+        &shared.config.resource.minimized.pipeline
+    } else if win.focused {
+        return Task::batch(tasks);
+    } else {
+        &shared.config.resource.unfocused
+    };
+
+    // The eviction delay scales with the on-screen image's decode time.
+    let decode = win.viewer().and_then(|v| {
+        let path = v.displayed_path.as_deref()?;
+        v.cache.peek(path)?.decode_time
+    });
+    for (stage, delay) in decay_schedule(cfg, decode) {
+        tasks.push(arm_decay(generation, stage, delay));
+    }
+    Task::batch(tasks)
+}
+
+/// The enabled decay stages and their delays from state-entry, given a pipeline
+/// config and the on-screen image's decode time. Each "never" stage is dropped,
+/// and the surviving delays are clamped so a later stage never precedes an
+/// earlier one. This is the pure decision behind `restart_decay`, so the
+/// config-to-stages mapping is testable without a window or GPU.
+fn decay_schedule(
+    cfg: &crate::config::DecayPipeline,
+    decode: Option<Duration>,
+) -> Vec<(DecayStage, Duration)> {
+    let (demote, drop_vram, evict) = clamp_decay(
+        cfg.demote_vram_after,
+        cfg.drop_vram_after,
+        cfg.evict_delay(decode),
+    );
+    [
+        (DecayStage::Demote, demote),
+        (DecayStage::DropVram, drop_vram),
+        (DecayStage::EvictRam, evict),
+    ]
+    .into_iter()
+    .filter_map(|(stage, delay)| delay.map(|d| (stage, d)))
+    .collect()
+}
+
+/// Restore the on-screen image to what the window's new state needs: re-decode
+/// it if its RAM source was evicted, otherwise re-seat any released textures, and
+/// for a focused window re-warm the prefetch look-ahead and promote the image to
+/// full-res. A minimized window shows nothing, so nothing is restored.
+fn restore_display(
+    win: &mut Window,
+    pipeline: &Pipeline,
+    depth: usize,
+    view: iced::Size,
+    prefetch_vram: crate::config::PrefetchVram,
+) -> Vec<Task<AppMessage>> {
+    if win.minimized {
+        return Vec::new();
+    }
+    let focused = win.focused;
+    let Some(viewer) = win.viewer_mut() else {
+        return Vec::new();
+    };
+    let displayed = viewer.displayed_path.clone();
+    let evicted = displayed
+        .as_ref()
+        .is_some_and(|p| !viewer.cache.contains(p));
+
+    let mut tasks = Vec::new();
+    if evicted {
+        // The thumbnail blur is already on screen; re-decode behind it.
+        if let Some(p) = displayed.clone() {
+            tasks.push(fire_load(
+                pipeline,
+                viewer,
+                p,
+                Lane::Current,
+                view,
+                prefetch_vram,
+            ));
+        }
+    } else {
+        tasks.extend(fire_restore_textures(pipeline, viewer, view));
+        // Promote the on-screen image to full-res whether the window is focused
+        // or just reactivated by a scroll, so the visible image is crisp; only
+        // the prefetch look-ahead is focus-only.
+        if let Some(p) = displayed.clone() {
+            let zoom = viewer.zoom;
+            tasks.push(fire_reupload_res(viewer, &p, zoom, true));
+        }
+    }
+    if focused {
+        tasks.extend(fire_prefetch(pipeline, viewer, depth, view, prefetch_vram));
+    }
+    tasks
+}
+
+/// Clamp the pipeline deadlines so a later stage never runs before an earlier
+/// one: each enabled stage's effective delay is at least the previous enabled
+/// stage's. So drop never precedes demote, nor evict drop, whatever the config
+/// or the dynamic evict formula produced.
+fn clamp_decay(
+    demote: Option<Duration>,
+    drop_vram: Option<Duration>,
+    evict: Option<Duration>,
+) -> (Option<Duration>, Option<Duration>, Option<Duration>) {
+    let mut floor = Duration::ZERO;
+    let mut clamp = |t: Option<Duration>| {
+        t.map(|d| {
+            floor = d.max(floor);
+            floor
+        })
+    };
+    (clamp(demote), clamp(drop_vram), clamp(evict))
+}
+
+/// Arm a single pipeline stage to fire after `delay`, tagged with the current
+/// decay generation so a state change before it fires supersedes it.
+fn arm_decay(generation: u64, stage: DecayStage, delay: Duration) -> Task<AppMessage> {
+    Task::future(async move {
+        tokio::time::sleep(delay).await;
+        AppMessage::Window(Message::Decay { generation, stage })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,7 +443,17 @@ mod tests {
         let mut app = viewing_app(&["a.png"], 0);
         cache_image(&mut app, "a.png");
 
+        // Minimizing arms the drop-VRAM stage (at 0s by default); fire it.
         let _ = update(&mut app.window, &mut app.shared, Message::Minimized(true));
+        let generation = app.window.decay_generation;
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::Decay {
+                generation,
+                stage: DecayStage::DropVram,
+            },
+        );
 
         // The RAM source stays cached; only the GPU keepalive is released.
         let v = app.viewer().unwrap();
@@ -319,6 +474,7 @@ mod tests {
             original_size: (2, 2),
             keepalive: Some(crate::ui::image_surface::test_keepalive()),
             gpu_full: true,
+            decode_time: None,
         };
         let cost = image.byte_cost();
         app.viewer_mut()
@@ -328,17 +484,17 @@ mod tests {
     }
 
     #[test]
-    fn focus_changes_advance_the_tier_generation() {
+    fn focus_changes_advance_the_decay_generation() {
         use crate::app::test_support::viewing_app;
         let mut app = viewing_app(&["a.png", "b.png"], 0);
-        let armed = app.window.tier_generation;
+        let armed = app.window.decay_generation;
         // Losing focus arms an idle-drop timer under a fresh generation.
         let _ = update(&mut app.window, &mut app.shared, Message::Focused(false));
-        assert_ne!(app.window.tier_generation, armed);
+        assert_ne!(app.window.decay_generation, armed);
         // Regaining focus supersedes it with another generation.
-        let unfocused = app.window.tier_generation;
+        let unfocused = app.window.decay_generation;
         let _ = update(&mut app.window, &mut app.shared, Message::Focused(true));
-        assert_ne!(app.window.tier_generation, unfocused);
+        assert_ne!(app.window.decay_generation, unfocused);
     }
 
     #[test]
@@ -351,11 +507,14 @@ mod tests {
         app.viewer_mut().unwrap().displayed_path = Some("b.png".into());
 
         let _ = update(&mut app.window, &mut app.shared, Message::Focused(false));
-        let generation = app.window.tier_generation;
+        let generation = app.window.decay_generation;
         let _ = update(
             &mut app.window,
             &mut app.shared,
-            Message::PrefetchIdle(generation),
+            Message::Decay {
+                generation,
+                stage: DecayStage::Demote,
+            },
         );
 
         let v = app.viewer().unwrap();
@@ -374,12 +533,15 @@ mod tests {
 
         let _ = update(&mut app.window, &mut app.shared, Message::Focused(false));
         // A refocus supersedes the drop; the old timer firing late must no-op.
-        let stale = app.window.tier_generation;
+        let stale = app.window.decay_generation;
         let _ = update(&mut app.window, &mut app.shared, Message::Focused(true));
         let _ = update(
             &mut app.window,
             &mut app.shared,
-            Message::PrefetchIdle(stale),
+            Message::Decay {
+                generation: stale,
+                stage: DecayStage::Demote,
+            },
         );
 
         assert!(
@@ -399,14 +561,17 @@ mod tests {
         app.viewer_mut().unwrap().displayed_path = Some("a.png".into());
 
         let _ = update(&mut app.window, &mut app.shared, Message::Focused(false));
-        let armed = app.window.tier_generation;
+        let armed = app.window.decay_generation;
         // Minimizing bumps the generation, so the idle-drop fired afterwards must
         // no-op rather than demote a window that is no longer merely unfocused.
         let _ = update(&mut app.window, &mut app.shared, Message::Minimized(true));
         let _ = update(
             &mut app.window,
             &mut app.shared,
-            Message::PrefetchIdle(armed),
+            Message::Decay {
+                generation: armed,
+                stage: DecayStage::Demote,
+            },
         );
 
         assert!(
@@ -415,6 +580,173 @@ mod tests {
                 .cache
                 .contains(std::path::Path::new("b.png"))
         );
+    }
+
+    #[test]
+    fn the_evict_stage_clears_the_window_cache() {
+        use crate::app::test_support::viewing_app;
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        cache_image(&mut app, "a.png");
+        cache_image(&mut app, "b.png");
+        // Minimized, so no thumbnail swap is needed for the on-screen image.
+        app.window.minimized = true;
+        app.viewer_mut().unwrap().displayed_path = Some("a.png".into());
+
+        let generation = app.window.decay_generation;
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::Decay {
+                generation,
+                stage: DecayStage::EvictRam,
+            },
+        );
+
+        let v = app.viewer().unwrap();
+        assert!(!v.cache.contains(std::path::Path::new("a.png")));
+        assert!(!v.cache.contains(std::path::Path::new("b.png")));
+    }
+
+    #[test]
+    fn clamp_decay_never_runs_a_later_stage_first() {
+        let s = Duration::from_secs;
+        // A drop and evict configured before the demote are clamped up to it.
+        assert_eq!(
+            clamp_decay(Some(s(15)), Some(s(5)), Some(s(1))),
+            (Some(s(15)), Some(s(15)), Some(s(15)))
+        );
+        // A disabled stage is skipped but still raises the floor for later ones.
+        assert_eq!(
+            clamp_decay(Some(s(10)), None, Some(s(3))),
+            (Some(s(10)), None, Some(s(10)))
+        );
+        // Already-ordered timers pass through unchanged.
+        assert_eq!(
+            clamp_decay(Some(s(5)), Some(s(10)), Some(s(20))),
+            (Some(s(5)), Some(s(10)), Some(s(20)))
+        );
+    }
+
+    #[test]
+    fn decay_schedule_maps_config_to_enabled_clamped_stages() {
+        use crate::config::{DecayPipeline, EvictPolicy};
+        let s = Duration::from_secs;
+
+        // Demote plus a fixed evict; the disabled ("never") drop is skipped, and
+        // the evict is clamped to land no earlier than the demote.
+        let cfg = DecayPipeline {
+            demote_vram_after: Some(s(15)),
+            drop_vram_after: None,
+            evict_ram: EvictPolicy::Fixed(s(60)),
+            ..Default::default()
+        };
+        assert_eq!(
+            decay_schedule(&cfg, None),
+            vec![(DecayStage::Demote, s(15)), (DecayStage::EvictRam, s(60))]
+        );
+
+        // evict_ram = "never" drops the evict stage entirely.
+        let cfg = DecayPipeline {
+            evict_ram: EvictPolicy::Never,
+            ..cfg
+        };
+        assert_eq!(
+            decay_schedule(&cfg, None),
+            vec![(DecayStage::Demote, s(15))]
+        );
+
+        // A drop configured before the demote is clamped up to it, order kept.
+        let cfg = DecayPipeline {
+            demote_vram_after: Some(s(15)),
+            drop_vram_after: Some(s(5)),
+            evict_ram: EvictPolicy::Never,
+            ..Default::default()
+        };
+        assert_eq!(
+            decay_schedule(&cfg, None),
+            vec![(DecayStage::Demote, s(15)), (DecayStage::DropVram, s(15))]
+        );
+
+        // Everything disabled: nothing decays.
+        let cfg = DecayPipeline {
+            demote_vram_after: None,
+            drop_vram_after: None,
+            evict_ram: EvictPolicy::Never,
+            ..Default::default()
+        };
+        assert!(decay_schedule(&cfg, None).is_empty());
+
+        // Dynamic eviction needs a measured decode time; without one it never
+        // evicts (conservative), and with one it schedules a single evict stage.
+        let cfg = DecayPipeline {
+            demote_vram_after: None,
+            drop_vram_after: None,
+            evict_ram: EvictPolicy::Dynamic,
+            ..Default::default()
+        };
+        assert!(decay_schedule(&cfg, None).is_empty());
+        let sched = decay_schedule(&cfg, Some(std::time::Duration::from_millis(20)));
+        assert_eq!(sched.len(), 1);
+        assert_eq!(sched[0].0, DecayStage::EvictRam);
+    }
+
+    #[test]
+    fn decay_stages_free_the_expected_bytes() {
+        use crate::app::test_support::viewing_app;
+        // Three 2x2 RGBA images, 16 bytes of RAM each, cached and resident.
+        let mut app = viewing_app(&["a.png", "b.png", "c.png"], 1);
+        cache_image(&mut app, "a.png");
+        cache_image(&mut app, "b.png");
+        cache_image(&mut app, "c.png");
+        app.viewer_mut().unwrap().displayed_path = Some("b.png".into());
+        let generation = app.window.decay_generation;
+        assert_eq!(app.viewer().unwrap().cache.used_bytes(), 48);
+
+        // Demote sheds the two prefetch neighbors' RAM, keeps the on-screen image.
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::Decay {
+                generation,
+                stage: DecayStage::Demote,
+            },
+        );
+        assert_eq!(app.viewer().unwrap().cache.used_bytes(), 16);
+
+        // EvictRam frees the rest: no RAM held for this window.
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::Decay {
+                generation,
+                stage: DecayStage::EvictRam,
+            },
+        );
+        assert_eq!(app.viewer().unwrap().cache.used_bytes(), 0);
+    }
+
+    #[test]
+    fn drop_vram_releases_textures_but_keeps_ram() {
+        use crate::app::test_support::viewing_app;
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        cache_image(&mut app, "a.png");
+        cache_image(&mut app, "b.png");
+        let generation = app.window.decay_generation;
+        let ram = app.viewer().unwrap().cache.used_bytes();
+
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::Decay {
+                generation,
+                stage: DecayStage::DropVram,
+            },
+        );
+
+        let v = app.viewer().unwrap();
+        // RAM is untouched; every GPU keepalive (the resident texture) is gone.
+        assert_eq!(v.cache.used_bytes(), ram);
+        assert!(v.cache.iter().all(|(_, img)| img.keepalive.is_none()));
     }
 
     #[test]

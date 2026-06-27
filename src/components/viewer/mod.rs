@@ -39,6 +39,7 @@ use iced::Task;
 use iced::time::Instant;
 
 use crate::app::state::{Direction, DisplayedImage, DragState};
+use crate::app::update::window::Message as WindowMessage;
 use crate::app::update::{
     NavTarget, complete_navigation, fire_exif, fire_rotate, navigate, save_config, scrub_to,
 };
@@ -46,8 +47,7 @@ use crate::app::viewer_math::{
     clamp_pan, compute_zoom, nudge_zoom_percent, pan_for_zoom_toward_cursor,
 };
 use crate::app::{
-    MediaMessage, Message as AppMessage, Shared, Window, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP,
-    recalc_viewport,
+    Message as AppMessage, Shared, Window, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, recalc_viewport,
 };
 
 pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) -> Task<AppMessage> {
@@ -182,14 +182,16 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 viewer.pan = clamp_pan(viewer.pan, img_w, img_h, viewport);
             }
             // A wheel zoom reaches even an unfocused (hovered) window, where the
-            // image may have been demoted to view-res. Re-promote it to full-res
-            // so it re-sharpens, debounced: PromoteCurrent is a no-op once full.
-            match scroll_rederive_target(win) {
-                Some(path) => Task::future(async move {
+            // image may have decayed. Restore it to full-res (re-decoding if its
+            // RAM was evicted) and restart its decay, debounced so a wheel spin
+            // reactivates once.
+            if needs_reactivation(win) {
+                Task::future(async {
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                    AppMessage::Media(MediaMessage::PromoteCurrent(path))
-                }),
-                None => Task::none(),
+                    AppMessage::Window(WindowMessage::Reactivate)
+                })
+            } else {
+                Task::none()
             }
         }
         Message::ZoomStep(direction) => {
@@ -385,20 +387,26 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
     }
 }
 
-/// The on-screen image to re-promote to full-res after a wheel zoom, if any.
-/// Only an unfocused window with a demoted (view-res) image needs it: a focused
-/// window keeps its image full-res, and a wheel zoom is the one zoom path that
-/// reaches a window without focusing it.
-fn scroll_rederive_target(win: &Window) -> Option<std::path::PathBuf> {
+/// Whether a wheel zoom should reactivate the window: only an unfocused window
+/// whose on-screen image has decayed (demoted to view-res, its texture dropped,
+/// or its RAM evicted). A focused window keeps its image full-res, and a wheel
+/// zoom is the one zoom path that reaches a window without focusing it.
+fn needs_reactivation(win: &Window) -> bool {
     if win.focused {
-        return None;
+        return false;
     }
-    let viewer = win.viewer()?;
-    let path = viewer.displayed_path.clone()?;
-    if viewer.cache.peek(&path)?.gpu_full {
-        return None;
+    let Some(viewer) = win.viewer() else {
+        return false;
+    };
+    let Some(path) = viewer.displayed_path.as_deref() else {
+        return false;
+    };
+    match viewer.cache.peek(path) {
+        // Evicted (or never cached): needs a re-decode.
+        None => true,
+        // Demoted to view-res, or its texture was released.
+        Some(cached) => !cached.gpu_full || cached.keepalive.is_none(),
     }
-    Some(path)
 }
 
 /// Set an absolute zoom factor, zooming toward the viewport center.
@@ -507,13 +515,14 @@ mod tests {
         assert_eq!(viewer(&app).pan, (0.0, 0.0));
     }
 
-    fn show_cached(app: &mut TestApp, path: &str, gpu_full: bool) {
+    fn show_cached(app: &mut TestApp, path: &str, gpu_full: bool, resident: bool) {
         use crate::app::state::CachedImage;
         let image = CachedImage {
             handle: iced::widget::image::Handle::from_rgba(2, 2, vec![0u8; 16]),
             original_size: (2, 2),
-            keepalive: None,
+            keepalive: resident.then(crate::ui::image_surface::test_keepalive),
             gpu_full,
+            decode_time: None,
         };
         let cost = image.byte_cost();
         let v = app.viewer_mut().unwrap();
@@ -522,24 +531,32 @@ mod tests {
     }
 
     #[test]
-    fn scroll_rederive_targets_only_a_demoted_unfocused_image() {
+    fn needs_reactivation_only_for_a_decayed_unfocused_image() {
         let mut app = viewing_app(&["a.png"], 0);
-        show_cached(&mut app, "a.png", false);
+        show_cached(&mut app, "a.png", false, true);
 
-        // A focused window keeps its image full-res, so nothing to re-promote.
+        // A focused window keeps its image full-res, so nothing to reactivate.
         app.window.focused = true;
-        assert_eq!(scroll_rederive_target(&app.window), None);
+        assert!(!needs_reactivation(&app.window));
 
-        // Unfocused with a view-res image: re-promote it on a wheel zoom.
+        // Unfocused with a view-res image: reactivate on a wheel zoom.
         app.window.focused = false;
-        assert_eq!(
-            scroll_rederive_target(&app.window),
-            Some(std::path::PathBuf::from("a.png"))
-        );
+        assert!(needs_reactivation(&app.window));
 
-        // A full-res image needs no re-promote even while unfocused.
-        show_cached(&mut app, "a.png", true);
-        assert_eq!(scroll_rederive_target(&app.window), None);
+        // A full-res, resident image needs no reactivation while unfocused.
+        show_cached(&mut app, "a.png", true, true);
+        assert!(!needs_reactivation(&app.window));
+
+        // A released texture (full-res but no keepalive) does.
+        show_cached(&mut app, "a.png", true, false);
+        assert!(needs_reactivation(&app.window));
+
+        // An evicted source (no cache entry) does.
+        app.viewer_mut()
+            .unwrap()
+            .cache
+            .remove(std::path::Path::new("a.png"));
+        assert!(needs_reactivation(&app.window));
     }
 
     #[test]

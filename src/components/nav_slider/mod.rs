@@ -176,9 +176,12 @@ mod tests {
 
     fn drag_at(target: usize, rested: bool) -> SliderDrag {
         let since = if rested {
+            // Far enough in the past that the dwell has provably elapsed.
             iced::time::Instant::now() - DWELL - Duration::from_millis(10)
         } else {
-            iced::time::Instant::now()
+            // In the future, so `elapsed()` saturates to zero and the dwell is
+            // provably unmet whatever the test's own runtime: fully deterministic.
+            iced::time::Instant::now() + Duration::from_secs(3600)
         };
         SliderDrag { target, since }
     }

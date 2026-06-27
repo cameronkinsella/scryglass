@@ -14,8 +14,8 @@ use crate::nav::{self, Nav};
 
 use super::NavTarget;
 use super::media_tasks::{
-    fire_exif, fire_load, fire_prefetch, fire_thumb, fire_thumbnailer, probe_size, show_loaded,
-    show_placeholder_or_clear,
+    fire_exif, fire_load, fire_prefetch, fire_reupload_res, fire_thumb, fire_thumbnailer,
+    probe_size, show_loaded, show_placeholder_or_clear,
 };
 use super::video_flow::start_video;
 
@@ -80,6 +80,7 @@ pub(crate) fn open_viewer(
 ) -> Task<Message> {
     let window_id = win.id;
     let depth = shared.config.prefetch_depth;
+    let prefetch_vram = shared.config.resource.prefetch_vram;
     let budget = shared.config.cache_budget_mb * 1024 * 1024;
     let window_w = win.window_size.width;
     let view = win.viewport_size;
@@ -140,6 +141,7 @@ pub(crate) fn open_viewer(
             current,
             Lane::Current,
             view,
+            prefetch_vram,
         ));
     }
     // Set the scroll offset before the thumbnailer fires, so it reads the
@@ -165,7 +167,13 @@ pub(crate) fn open_viewer(
         show_filmstrip,
     ));
     // Prefetch after thumbnailing (see complete_navigation).
-    tasks.extend(fire_prefetch(&pipeline, &mut viewer, depth, view));
+    tasks.extend(fire_prefetch(
+        &pipeline,
+        &mut viewer,
+        depth,
+        view,
+        prefetch_vram,
+    ));
 
     viewer.resort_to_first = opened_container;
     win.session = Session::Viewing(Box::new(viewer));
@@ -256,6 +264,7 @@ pub(crate) fn open_path(path: PathBuf) -> Task<Message> {
 pub(crate) fn navigate(win: &mut Window, shared: &mut Shared, target: NavTarget) -> Task<Message> {
     let pipeline = shared.pipeline.clone();
     let view = win.viewport_size;
+    let prefetch_vram = shared.config.resource.prefetch_vram;
     let Some(viewer) = win.viewer_mut() else {
         return Task::none();
     };
@@ -298,7 +307,14 @@ pub(crate) fn navigate(win: &mut Window, shared: &mut Shared, target: NavTarget)
 
     let tasks = vec![
         fire_thumb(&pipeline, viewer, target_path.clone(), ThumbUrgency::Urgent),
-        fire_load(&pipeline, viewer, target_path, Lane::Current, view),
+        fire_load(
+            &pipeline,
+            viewer,
+            target_path,
+            Lane::Current,
+            view,
+            prefetch_vram,
+        ),
     ];
     Task::batch(tasks)
 }
@@ -411,6 +427,7 @@ pub(crate) fn complete_navigation(
 ) -> Task<Message> {
     let window_id = win.id;
     let depth = shared.config.prefetch_depth;
+    let prefetch_vram = shared.config.resource.prefetch_vram;
     let zoom_mode = shared.config.zoom_mode;
     let viewport = win.viewport_size;
     let window_w = win.window_size.width;
@@ -486,18 +503,28 @@ pub(crate) fn complete_navigation(
         show_placeholder_or_clear(viewer, &current, zoom_mode, viewport);
         tasks.push(anim_task.map(Message::Anim));
     } else if let Some(cached) = viewer.cache.get(&current).cloned() {
-        // Instant display, the common case within the prefetch window.
-        let view_res = !cached.gpu_full;
-        show_loaded(viewer, &current, cached, zoom_mode, viewport);
-        // A prefetched neighbor displays at view resolution; once navigation
-        // settles here, promote it to full-res so zoom is crisp. Debounced by
-        // the displayed path, so rapid navigation past it never promotes.
-        if view_res {
-            let p = current.clone();
-            tasks.push(Task::future(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                Message::Media(MediaMessage::PromoteCurrent(p))
-            }));
+        if cached.keepalive.is_some() {
+            // Instant display, the common case within the prefetch window.
+            let view_res = !cached.gpu_full;
+            show_loaded(viewer, &current, cached, zoom_mode, viewport);
+            // A prefetched neighbor displays at view resolution; once navigation
+            // settles here, promote it to full-res so zoom is crisp. Debounced by
+            // the displayed path, so rapid navigation past it never promotes.
+            if view_res {
+                let p = current.clone();
+                tasks.push(Task::future(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    Message::Media(MediaMessage::PromoteCurrent(p))
+                }));
+            }
+        } else {
+            // Decoded to RAM but never uploaded (prefetch_vram = none): the blur
+            // stands in while we upload from the surviving RAM source, no disk
+            // read. Reuploaded swaps the sharp image in once its texture lands.
+            viewer.pending_since = Some(Instant::now());
+            show_placeholder_or_clear(viewer, &current, zoom_mode, viewport);
+            let zoom = viewer.zoom;
+            tasks.push(fire_reupload_res(viewer, &current, zoom, true));
         }
     } else {
         // Navigation only lands on displayable targets, so the blur is
@@ -510,6 +537,7 @@ pub(crate) fn complete_navigation(
             current,
             Lane::Current,
             viewport,
+            prefetch_vram,
         ));
     }
 
@@ -542,7 +570,13 @@ pub(crate) fn complete_navigation(
         window_w,
         show_filmstrip,
     ));
-    tasks.extend(fire_prefetch(&pipeline, viewer, depth, viewport));
+    tasks.extend(fire_prefetch(
+        &pipeline,
+        viewer,
+        depth,
+        viewport,
+        prefetch_vram,
+    ));
 
     if shared.config.show_info {
         tasks.push(fire_exif(win, shared));

@@ -181,7 +181,9 @@ mod tests {
         {
             let v = app.viewer_mut().unwrap();
             v.filmstrip_scroll_x = 3000.0;
-            v.filmstrip_scrolled_at = iced::time::Instant::now();
+            // A future timestamp makes `elapsed()` saturate to zero, so the
+            // settle is provably unmet whatever the test's runtime: deterministic.
+            v.filmstrip_scrolled_at = iced::time::Instant::now() + Duration::from_secs(3600);
             v.visible_settle_pending = true;
         }
         let gen_before = app.shared.pipeline.thumb_generation();
