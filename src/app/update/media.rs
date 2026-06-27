@@ -76,6 +76,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                             path.clone(),
                             image.handle.clone(),
                             image.original_size,
+                            image.gpu_full,
                             keepalive,
                         );
                     }
@@ -319,6 +320,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                         path.clone(),
                         image.handle.clone(),
                         image.original_size,
+                        image.gpu_full,
                         keepalive,
                     );
                 }

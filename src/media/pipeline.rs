@@ -77,11 +77,15 @@ impl Source {
     }
 }
 
-/// A resident decode keyed for cross-window reuse: the shared handle, its
-/// pixel size, and a weak ref to the keepalive holding its texture alive.
+/// A resident decode keyed for cross-window reuse: the shared handle, its pixel
+/// size, whether its GPU texture is full-res, and a weak ref to the keepalive
+/// holding that texture alive. The resolution lets a reusing window skip a
+/// redundant re-upload (which would fork the shared texture and leave the other
+/// window drawing a copy it no longer keeps alive).
 type DedupEntry = (
     Handle,
     (u32, u32),
+    bool,
     Weak<crate::ui::image_surface::ResidentImage>,
 );
 
@@ -136,17 +140,22 @@ impl Pipeline {
         }
     }
 
-    /// Look up a decode of `path` already resident in another window: the
-    /// shared handle, its size, and a strong keepalive clone, or None if no
-    /// window holds it. Drops the entry when its texture has been evicted.
+    /// Look up a decode of `path` already resident in another window: the shared
+    /// handle, its size, whether its texture is full-res, and a strong keepalive
+    /// clone, or None if no window holds it. Drops a stale (evicted) entry.
     pub fn dedup_get(
         &self,
         path: &Path,
-    ) -> Option<(Handle, (u32, u32), crate::ui::image_surface::Keepalive)> {
+    ) -> Option<(
+        Handle,
+        (u32, u32),
+        bool,
+        crate::ui::image_surface::Keepalive,
+    )> {
         let mut map = self.image_dedup.lock().ok()?;
-        let (handle, size, weak) = map.get(path)?;
+        let (handle, size, gpu_full, weak) = map.get(path)?;
         if let Some(strong) = weak.upgrade() {
-            return Some((handle.clone(), *size, strong));
+            return Some((handle.clone(), *size, *gpu_full, strong));
         }
         map.remove(path);
         None
@@ -159,11 +168,12 @@ impl Pipeline {
         path: PathBuf,
         handle: Handle,
         size: (u32, u32),
+        gpu_full: bool,
         keepalive: &crate::ui::image_surface::Keepalive,
     ) {
         if let Ok(mut map) = self.image_dedup.lock() {
-            map.retain(|_, (_, _, weak)| weak.strong_count() > 0);
-            map.insert(path, (handle, size, Arc::downgrade(keepalive)));
+            map.retain(|_, (_, _, _, weak)| weak.strong_count() > 0);
+            map.insert(path, (handle, size, gpu_full, Arc::downgrade(keepalive)));
         }
     }
 
@@ -173,7 +183,7 @@ impl Pipeline {
     /// decay pipeline calls this when it releases or evicts, to free it at once.
     pub fn prune_dedup(&self) {
         if let Ok(mut map) = self.image_dedup.lock() {
-            map.retain(|_, (_, _, weak)| weak.strong_count() > 0);
+            map.retain(|_, (_, _, _, weak)| weak.strong_count() > 0);
         }
     }
 
@@ -531,11 +541,14 @@ mod tests {
         let handle = Handle::from_rgba(2, 2, vec![0u8; 16]);
         let keepalive = crate::ui::image_surface::test_keepalive();
 
-        pipeline.dedup_insert(path.clone(), handle, (2, 2), &keepalive);
+        pipeline.dedup_insert(path.clone(), handle, (2, 2), true, &keepalive);
         let hit = pipeline
             .dedup_get(&path)
             .expect("a resident entry is reused");
         assert_eq!(hit.1, (2, 2));
+        // The texture's resolution is reported, so a reusing window draws the
+        // shared full-res texture instead of re-uploading a forked copy.
+        assert!(hit.2);
 
         // Once every window has dropped the keepalive, the entry is gone.
         drop(keepalive);
@@ -544,12 +557,27 @@ mod tests {
     }
 
     #[test]
+    fn dedup_reports_the_shared_textures_resolution() {
+        let pipeline = Pipeline::new(None);
+        let path = PathBuf::from("/img/a.png");
+        let handle = Handle::from_rgba(2, 2, vec![0u8; 16]);
+        let keepalive = crate::ui::image_surface::test_keepalive();
+
+        // A window holding the image at view-res reports it so a reuser knows to
+        // promote; one holding it full-res reports that so a reuser does not.
+        pipeline.dedup_insert(path.clone(), handle.clone(), (2, 2), false, &keepalive);
+        assert!(!pipeline.dedup_get(&path).unwrap().2);
+        pipeline.dedup_insert(path.clone(), handle, (2, 2), true, &keepalive);
+        assert!(pipeline.dedup_get(&path).unwrap().2);
+    }
+
+    #[test]
     fn prune_dedup_releases_evicted_entries_without_a_lookup() {
         let pipeline = Pipeline::new(None);
         let path = PathBuf::from("/img/a.png");
         let handle = Handle::from_rgba(2, 2, vec![0u8; 16]);
         let keepalive = crate::ui::image_surface::test_keepalive();
-        pipeline.dedup_insert(path.clone(), handle, (2, 2), &keepalive);
+        pipeline.dedup_insert(path.clone(), handle, (2, 2), true, &keepalive);
 
         // A still-resident texture survives a prune.
         pipeline.prune_dedup();

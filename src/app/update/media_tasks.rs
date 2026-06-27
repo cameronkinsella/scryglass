@@ -363,7 +363,7 @@ pub(crate) fn fire_load(
     // Reuse another window's resident decode of this file, sharing its one GPU
     // texture instead of decoding and uploading again.
     if matches!(viewer.source, Source::Fs)
-        && let Some((handle, original_size, keepalive)) = pipeline.dedup_get(&path)
+        && let Some((handle, original_size, gpu_full, keepalive)) = pipeline.dedup_get(&path)
     {
         return Task::done(Message::Media(MediaMessage::Loaded {
             path: path.clone(),
@@ -372,9 +372,11 @@ pub(crate) fn fire_load(
                     handle,
                     original_size,
                     keepalive: Some(keepalive),
-                    // The shared texture is whatever the holder uploaded; the
-                    // display path promotes it to full-res if it isn't.
-                    gpu_full: false,
+                    // Reuse the shared texture at its real resolution. Reporting
+                    // it as not-full would make the display path re-upload, which
+                    // forks the shared texture and leaves the other window drawing
+                    // a copy it no longer keeps alive.
+                    gpu_full,
                     // Reused, not decoded here, so the cost is unknown: never
                     // evict this on a guess.
                     decode_time: None,
@@ -480,7 +482,7 @@ pub(crate) fn fire_restore_textures(
             let pipeline = pipeline.clone();
             Task::future(async move {
                 let keepalive = match pipeline.dedup_get(&path) {
-                    Some((_, _, keep)) => Some(keep),
+                    Some((_, _, _, keep)) => Some(keep),
                     None => {
                         // Restore each texture at the fit zoom it is shown at when
                         // navigated to; full-res entries ignore the zoom.
