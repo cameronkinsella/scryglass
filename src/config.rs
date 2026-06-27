@@ -408,6 +408,18 @@ impl Default for AppConfig {
     }
 }
 
+/// The outcome of loading the persisted config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigLoad {
+    /// Parsed cleanly (missing keys took their defaults).
+    Ok,
+    /// No config file yet (first run).
+    Missing,
+    /// The file exists but is not valid TOML; defaults are used and the original
+    /// is preserved.
+    Malformed,
+}
+
 impl AppConfig {
     /// Returns true if `ext` (without leading dot) is a supported image format.
     pub fn is_supported_extension(ext: &str) -> bool {
@@ -424,19 +436,51 @@ impl AppConfig {
         dirs::config_dir().map(|d| d.join("scryglass").join("config.toml"))
     }
 
-    /// Load the persisted config, falling back to defaults if the file is
-    /// missing or unreadable.
-    pub fn load() -> Self {
-        Self::path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .map(|s| Self::from_toml(&s))
-            .unwrap_or_default()
+    /// Load the persisted config, reporting the outcome so a malformed file is
+    /// preserved and the user warned, rather than silently reset to defaults
+    /// (which the next save would then overwrite, losing their edits).
+    pub fn load_reporting() -> (Self, ConfigLoad) {
+        let Some(path) = Self::path() else {
+            return (Self::default(), ConfigLoad::Missing);
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(text) => Self::parse_reporting(&text),
+            Err(_) => (Self::default(), ConfigLoad::Missing),
+        }
     }
 
-    /// Parse a TOML document. Unknown keys are ignored, missing keys take
-    /// their defaults, and a malformed document yields the full defaults.
+    /// Classify config text: cleanly parsed (missing keys default) versus
+    /// malformed (defaults used). The pure half of [`load_reporting`].
+    fn parse_reporting(text: &str) -> (Self, ConfigLoad) {
+        match Self::try_from_toml(text) {
+            Ok(cfg) => (cfg, ConfigLoad::Ok),
+            Err(_) => (Self::default(), ConfigLoad::Malformed),
+        }
+    }
+
+    /// Copy a malformed config aside to `config.toml.bak`, so a hand-edit typo
+    /// never costs the user their settings. Best-effort: a failure to back up
+    /// must not block startup.
+    pub fn backup_malformed() {
+        if let Some(path) = Self::path() {
+            let _ = std::fs::copy(&path, path.with_extension("toml.bak"));
+        }
+    }
+
+    /// Parse a TOML document leniently: unknown keys are ignored, missing keys
+    /// take their defaults, and a malformed document yields the full defaults.
+    /// A test helper for exercising the parse behavior; production loads report
+    /// the outcome via [`load_reporting`].
+    #[cfg(test)]
     pub fn from_toml(s: &str) -> Self {
-        toml::from_str(s).unwrap_or_default()
+        Self::try_from_toml(s).unwrap_or_default()
+    }
+
+    /// Parse a TOML document, surfacing a syntax error instead of falling back
+    /// to defaults. Used for reload and validation, where a silent reset would
+    /// discard the user's settings. Missing keys still take their defaults.
+    pub fn try_from_toml(s: &str) -> Result<Self, toml::de::Error> {
+        toml::from_str(s)
     }
 
     /// Serialize to a TOML document.
@@ -444,8 +488,12 @@ impl AppConfig {
         toml::to_string_pretty(self).unwrap_or_default()
     }
 
-    /// Write the config to disk. Errors are deliberately swallowed,
-    /// failing to persist settings must never disturb the viewer.
+    /// Write the config to disk atomically: write a unique temp file, then
+    /// rename it over the target. A rename is atomic, so a reader (or a second
+    /// window saving at the same time) never sees a half-written file, which a
+    /// plain write would produce when two windows close at once. Errors are
+    /// deliberately swallowed: failing to persist settings must never disturb
+    /// the viewer.
     pub async fn save(self) {
         let Some(path) = Self::path() else {
             return;
@@ -453,9 +501,26 @@ impl AppConfig {
         if let Some(parent) = path.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
-        let _ = tokio::fs::write(&path, self.to_toml()).await;
+        let seq = SAVE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = path.with_extension(format!("toml.{seq}.tmp"));
+        // Sync before the rename: without it a crash right after can swap the
+        // name to a file whose data never reached the disk.
+        let written = async {
+            use tokio::io::AsyncWriteExt as _;
+            let mut file = tokio::fs::File::create(&tmp).await?;
+            file.write_all(self.to_toml().as_bytes()).await?;
+            file.sync_all().await
+        }
+        .await;
+        if written.is_ok() && tokio::fs::rename(&tmp, &path).await.is_err() {
+            let _ = tokio::fs::remove_file(&tmp).await;
+        }
     }
 }
+
+/// Disambiguates concurrent saves' temp files (window closes race in one
+/// process), so each writes its own temp before the atomic rename.
+static SAVE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(test)]
 mod tests {
@@ -474,6 +539,29 @@ mod tests {
         assert!(cfg.show_filmstrip);
         assert!(cfg.show_slider);
         assert!(cfg.show_footer);
+    }
+
+    #[test]
+    fn parse_reporting_flags_malformed_but_keeps_valid() {
+        let (cfg, status) = AppConfig::parse_reporting("prefetch_depth = 9");
+        assert_eq!(status, ConfigLoad::Ok);
+        assert_eq!(cfg.prefetch_depth, 9);
+
+        let (cfg, status) = AppConfig::parse_reporting("prefetch_depth = = bad");
+        assert_eq!(status, ConfigLoad::Malformed);
+        assert_eq!(cfg.prefetch_depth, 5); // untouched defaults
+    }
+
+    #[test]
+    fn try_from_toml_surfaces_errors_where_from_toml_defaults() {
+        let bad = "prefetch_depth = = nonsense";
+        // The strict parse surfaces the error; the lenient one falls back.
+        assert!(AppConfig::try_from_toml(bad).is_err());
+        assert_eq!(AppConfig::from_toml(bad).prefetch_depth, 5);
+        // A valid partial document parses, with missing keys defaulted.
+        let cfg = AppConfig::try_from_toml("prefetch_depth = 9").unwrap();
+        assert_eq!(cfg.prefetch_depth, 9);
+        assert_eq!(cfg.cache_budget_mb, 512);
     }
 
     #[test]

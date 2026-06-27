@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use iced::{Point, Size, Task, window};
 
-use crate::config::AppConfig;
+use crate::components::toasts::ToastKind;
+use crate::config::{AppConfig, ConfigLoad};
 use crate::media::disk_thumbs::DiskThumbs;
 use crate::media::pipeline::Pipeline;
 
@@ -18,7 +19,7 @@ use super::{App, Envelope, Shared, Window, recalc_viewport, update};
 /// If a file or directory path was passed on the command line (e.g. via
 /// "Open with…" in a file manager), opening it starts immediately.
 pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Envelope>) {
-    let config = AppConfig::load();
+    let (config, config_load) = AppConfig::load_reporting();
     let disk_thumbs = DiskThumbs::create(config.disk_thumbs);
 
     // Startup housekeeping for the persistent thumbnail store: expire
@@ -37,7 +38,7 @@ pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Envelope>) {
     })
     .discard();
 
-    let shared = Shared {
+    let mut shared = Shared {
         config,
         pipeline: Pipeline::new(disk_thumbs),
         disk_cache_size: None,
@@ -49,6 +50,26 @@ pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Envelope>) {
     let (id, opened) = window::open(window_settings(&shared.config));
     let mut win = new_window(id, &shared.config);
     recalc_viewport(&mut win, &shared);
+
+    // A malformed config is kept aside and the app runs on defaults, with a
+    // warning, instead of silently overwriting the user's edits on next save.
+    let config_toast = match config_load {
+        ConfigLoad::Malformed => {
+            AppConfig::backup_malformed();
+            Envelope::wrap(
+                id,
+                update::push_toast(
+                    &mut win,
+                    &mut shared,
+                    ToastKind::Error,
+                    "config.toml couldn't be parsed. Running on defaults; \
+                     your file was kept as config.toml.bak."
+                        .into(),
+                ),
+            )
+        }
+        ConfigLoad::Ok | ConfigLoad::Missing => Task::none(),
+    };
 
     let open = match initial_open_path(initial_path) {
         Some(path) => {
@@ -68,6 +89,7 @@ pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Envelope>) {
             video_cleanup,
             opened.map(Envelope::Opened),
             open,
+            config_toast,
         ]),
     )
 }
