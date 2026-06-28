@@ -114,6 +114,24 @@ pub struct VideoSession {
     pub temp: Option<std::sync::Arc<TempFileGuard>>,
 }
 
+/// A backgrounded video's released decode session: the state needed to re-open it
+/// once the window returns. Capturing this and dropping the `VideoSession` frees the
+/// heavy resources (decode threads, hardware decoder, audio sink, GPU plane textures)
+/// while the last frame stays frozen on screen. The `temp` Arc keeps an extracted
+/// archive entry's file alive while the session is gone, so a restore re-uses it
+/// rather than re-extracting.
+pub struct SuspendedVideo {
+    path: PathBuf,
+    position: Duration,
+    playing: bool,
+    looping: bool,
+    volume: f32,
+    muted: bool,
+    hardware: bool,
+    duration_us: u64,
+    temp: Option<Arc<TempFileGuard>>,
+}
+
 impl VideoSession {
     /// Start playback of `path` at `start`, spawning the decode threads.
     pub fn open(
@@ -212,6 +230,45 @@ impl VideoSession {
         session.temp = self.temp.clone();
         // A seek from a paused video stays paused, showing the new frame.
         if !self.playing {
+            session.pause();
+        }
+        session
+    }
+
+    /// Capture the state to re-open this session later, for a backgrounded window
+    /// releasing its decoder. The caller then drops the session (stopping the decode
+    /// threads). `playing` is the state to resume in, resolved by the caller, since a
+    /// minimize-pause may have already cleared `self.playing`.
+    pub fn suspend(&self, playing: bool) -> SuspendedVideo {
+        SuspendedVideo {
+            path: self.path.clone(),
+            position: self.position(),
+            playing,
+            looping: self.looping(),
+            volume: self.volume,
+            muted: self.muted,
+            hardware: self.hardware,
+            duration_us: self.duration_us.load(Ordering::Relaxed),
+            temp: self.temp.clone(),
+        }
+    }
+
+    /// Re-open a suspended session at its saved position, carrying its archive temp
+    /// guard, known duration, and pause state forward, the same way `reopen_at` does.
+    pub fn resume(saved: &SuspendedVideo) -> Self {
+        let mut session = Self::open(
+            saved.path.clone(),
+            saved.position,
+            saved.volume,
+            saved.muted,
+            saved.looping,
+            saved.hardware,
+        );
+        session
+            .duration_us
+            .store(saved.duration_us, Ordering::Relaxed);
+        session.temp = saved.temp.clone();
+        if !saved.playing {
             session.pause();
         }
         session

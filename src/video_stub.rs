@@ -81,6 +81,16 @@ pub struct VideoSession {
     pub temp: Option<std::sync::Arc<TempFileGuard>>,
 }
 
+/// Mirrors the real module's released-session memo so shared code compiles.
+pub struct SuspendedVideo {
+    pub path: PathBuf,
+    pub playing: bool,
+    pub looping: bool,
+    pub volume: f32,
+    pub muted: bool,
+    pub temp: Option<std::sync::Arc<TempFileGuard>>,
+}
+
 impl VideoSession {
     pub fn open(
         path: PathBuf,
@@ -109,6 +119,31 @@ impl VideoSession {
             path: self.path.clone(),
             temp: None,
         }
+    }
+
+    pub fn suspend(&self, playing: bool) -> SuspendedVideo {
+        SuspendedVideo {
+            path: self.path.clone(),
+            playing,
+            looping: self.looping,
+            volume: self.volume,
+            muted: self.muted,
+            temp: self.temp.clone(),
+        }
+    }
+
+    pub fn resume(saved: &SuspendedVideo) -> Self {
+        let mut session = Self::open(
+            saved.path.clone(),
+            Duration::ZERO,
+            saved.volume,
+            saved.muted,
+            saved.looping,
+            false,
+        );
+        session.playing = saved.playing;
+        session.temp = saved.temp.clone();
+        session
     }
 
     pub fn looping(&self) -> bool {
@@ -146,4 +181,54 @@ impl VideoSession {
     pub fn set_volume(&mut self, _volume: f32) {}
 
     pub fn toggle_mute(&mut self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn session() -> VideoSession {
+        let mut s = VideoSession::open(
+            PathBuf::from("a.mp4"),
+            Duration::ZERO,
+            0.8,
+            true,
+            true,
+            false,
+        );
+        s.temp = Some(TempFileGuard::new(
+            std::env::temp_dir().join("scry-stub-test.mp4"),
+        ));
+        s.playing = true;
+        s
+    }
+
+    #[test]
+    fn suspend_captures_state_and_keeps_the_temp_file() {
+        let s = session();
+        let temp_before = s.temp.clone().unwrap();
+        // The resolved playing state is what the caller passes, not the session's.
+        let memo = s.suspend(false);
+        assert!(!memo.playing);
+        assert_eq!(memo.volume, 0.8);
+        assert!(memo.muted);
+        assert!(memo.looping);
+        // The archive temp guard is cloned, so the file survives the session drop.
+        assert!(Arc::ptr_eq(memo.temp.as_ref().unwrap(), &temp_before));
+        drop(s);
+        assert_eq!(Arc::strong_count(&temp_before), 2); // temp_before + the memo
+    }
+
+    #[test]
+    fn resume_reconstructs_the_session() {
+        let memo = session().suspend(true);
+        let r = VideoSession::resume(&memo);
+        assert!(r.playing);
+        assert_eq!(r.volume, 0.8);
+        assert!(r.muted);
+        assert!(r.looping());
+        assert_eq!(r.path, PathBuf::from("a.mp4"));
+        assert!(r.temp.is_some());
+    }
 }

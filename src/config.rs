@@ -265,10 +265,24 @@ pub struct DecayPipeline {
     pub evict: EvictConfig,
 }
 
-/// A backgrounded state's decay timers, split by media kind. Stills and
-/// animations decay independently: only the evict stage applies to an animation
-/// (it has no governed VRAM tier), and re-decoding one is costly, so animations
-/// are usually kept in RAM longer than stills.
+/// Decay timing for an open video. A video has no governed VRAM tier to demote or
+/// drop; the heavy resource is its whole decode session (the decode threads, the
+/// hardware decoder, the audio sink, and the GPU plane textures). After this delay a
+/// backgrounded window releases that session, freezing the last frame on screen, and
+/// re-opens it at the saved position when the window returns. A `None` timer keeps the
+/// session alive (a minimized window still pauses it via [`MinimizedConfig::pause_video`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct VideoDecay {
+    /// Release the decode session this long after the window is backgrounded.
+    #[serde(with = "humantime_opt")]
+    pub evict_session_after: Option<Duration>,
+}
+
+/// A backgrounded state's decay timers, split by media kind. Stills, animations, and
+/// video decay independently: only the evict stage applies to an animation (it has no
+/// governed VRAM tier), and re-decoding one is costly, so animations are usually kept
+/// in RAM longer than stills; a video has only the session-release timer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct StateDecay {
@@ -277,6 +291,8 @@ pub struct StateDecay {
     /// Eviction timing for an animation (GIF, APNG, animated WebP). Only eviction
     /// applies, so demote/drop are not configurable for it.
     pub animated: EvictConfig,
+    /// When to release an open video's decode session.
+    pub video: VideoDecay,
 }
 
 /// The minimized state's decay timers plus its video-pause toggle.
@@ -289,6 +305,8 @@ pub struct MinimizedConfig {
     pub still: DecayPipeline,
     /// Eviction timing for an animation.
     pub animated: EvictConfig,
+    /// When to release an open video's decode session.
+    pub video: VideoDecay,
 }
 
 impl Default for MinimizedConfig {
@@ -297,6 +315,7 @@ impl Default for MinimizedConfig {
             pause_video: true,
             still: DecayPipeline::default(),
             animated: EvictConfig::default(),
+            video: VideoDecay::default(),
         }
     }
 }
@@ -332,6 +351,11 @@ impl Default for ResourceConfig {
                 // Unfocused animations stay in RAM: re-decoding every frame is
                 // costly and a refocus should be instant.
                 animated: EvictConfig::default(),
+                // An unfocused video is still visible, so keep it playing: only a
+                // hidden (minimized) window releases the decode session.
+                video: VideoDecay {
+                    evict_session_after: None,
+                },
             },
             minimized: MinimizedConfig {
                 pause_video: true,
@@ -350,6 +374,11 @@ impl Default for ResourceConfig {
                 animated: EvictConfig {
                     evict_ram: EvictPolicy::Fixed(Duration::from_secs(30)),
                     ..EvictConfig::default()
+                },
+                // A minimized window is hidden, so release the whole decode session
+                // after a short grace; a restore re-opens it at the saved position.
+                video: VideoDecay {
+                    evict_session_after: Some(Duration::from_secs(5)),
                 },
             },
         }
@@ -701,6 +730,9 @@ mod tests {
                         evict_ram: EvictPolicy::Fixed(Duration::from_secs(45)),
                         ..EvictConfig::default()
                     },
+                    video: VideoDecay {
+                        evict_session_after: None,
+                    },
                 },
                 minimized: MinimizedConfig {
                     pause_video: false,
@@ -717,6 +749,9 @@ mod tests {
                     animated: EvictConfig {
                         evict_ram: EvictPolicy::Dynamic,
                         ..EvictConfig::default()
+                    },
+                    video: VideoDecay {
+                        evict_session_after: Some(Duration::from_secs(8)),
                     },
                 },
             },
@@ -757,6 +792,28 @@ mod tests {
             Some(Duration::from_millis(500))
         );
         assert_eq!(cfg.resource.unfocused.still.drop_vram_after, None);
+    }
+
+    #[test]
+    fn video_session_eviction_parses_and_defaults() {
+        // Default: an unfocused (visible) video keeps its session, a minimized
+        // (hidden) one releases it after a short grace.
+        let d = ResourceConfig::default();
+        assert_eq!(d.unfocused.video.evict_session_after, None);
+        assert_eq!(
+            d.minimized.video.evict_session_after,
+            Some(Duration::from_secs(5))
+        );
+        // Parses a duration and "never".
+        let cfg = AppConfig::from_toml(
+            "[resource.unfocused.video]\nevict_session_after = \"10s\"\n\
+             [resource.minimized.video]\nevict_session_after = \"never\"\n",
+        );
+        assert_eq!(
+            cfg.resource.unfocused.video.evict_session_after,
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(cfg.resource.minimized.video.evict_session_after, None);
     }
 
     #[test]

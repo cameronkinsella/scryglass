@@ -93,16 +93,17 @@ use the same controls, with different defaults.
 |---|---|---|---|
 | `prefetch_vram` | `"full-res"` \| `"view-res"` \| `"none"` | `"view-res"` | What resolution a focused window's prefetched neighbors keep in VRAM. `full-res` is instant-crisp on navigation but heavy; `none` keeps them in RAM only. |
 
-### `[resource.unfocused.still]` / `[resource.unfocused.animated]` and `[resource.minimized.still]` / `[resource.minimized.animated]`
+### `[resource.unfocused.{still,animated,video}]` and `[resource.minimized.{still,animated,video}]`
 
-Each backgrounded state (**unfocused**, **minimized**) decays stills and animations
-independently, so it has a `still` and an `animated` sub-table. The `still` table
-takes all the keys below. An **animation** has no governed VRAM tier, so its
-`animated` table takes **only** the eviction keys (`evict_ram`, `evict_ram_min`,
-`evict_ram_max`, `max_decode_latency`) — `demote_vram_after` and `drop_vram_after`
-are not valid there. Re-decoding an animation is costly, so the `animated` defaults
+Each backgrounded state (**unfocused**, **minimized**) decays stills, animations, and
+video independently, so it has a `still`, an `animated`, and a `video` sub-table. The
+`still` table takes all the keys below. An **animation** has no governed VRAM tier, so
+its `animated` table takes **only** the eviction keys (`evict_ram`, `evict_ram_min`,
+`evict_ram_max`, `max_decode_latency`), not `demote_vram_after` or `drop_vram_after`. Re-decoding an animation is costly, so the `animated` defaults
 keep frames in RAM longer than stills: `evict_ram = "never"` when unfocused,
-`evict_ram = "30s"` when minimized.
+`evict_ram = "30s"` when minimized. A **video** is a continuous stream with no tier at
+all, so its `video` table takes a single timer for when to release the whole decode
+session (see below).
 
 | Key | Type | Default (still: unfocused / minimized) | Effect |
 |---|---|---|---|
@@ -112,6 +113,12 @@ keep frames in RAM longer than stills: `evict_ram = "never"` when unfocused,
 | `evict_ram_min` | duration | `"30s"` / `"15s"` | `dynamic` only: the evict delay for an image that decodes instantly. |
 | `evict_ram_max` | duration | `"10m"` / `"5m"` | `dynamic` only: the evict delay for an image right at the latency ceiling. |
 | `max_decode_latency` | duration | `"200ms"` / `"200ms"` | `dynamic` only: an image that took longer than this to decode (read + decode) is never evicted, so slow storage (a NAS) stays resident. |
+
+The `video` sub-table has a single key:
+
+| Key | Type | Default (unfocused / minimized) | Effect |
+|---|---|---|---|
+| `evict_session_after` | duration \| `"never"` | `"never"` / `"5s"` | When to release an open video's whole decode session (its decode threads, hardware decoder, audio sink, and GPU textures). The last frame stays frozen on screen and the video re-opens at the saved position when you return. `never` keeps the session alive (a minimized window still pauses it, see `pause_video`). |
 
 `[resource.minimized]` additionally has, at the state level (not per media kind):
 
@@ -125,3 +132,16 @@ one waits up to `evict_ram_max`, and anything past `max_decode_latency` is kept
 indefinitely. Evicted images re-decode from disk when you return to the window
 (showing the thumbnail meanwhile), so this trades a little restore latency for less
 RAM on local storage while never punishing slow network drives.
+
+**Video session release** frees the heaviest resource a video holds: its whole
+decode pipeline (decode threads, the hardware decoder, the audio sink, and the GPU
+plane textures). So memory scales with the videos you can actually see, not with
+every window left open. A released video that is still visible (an unfocused window)
+keeps its last frame frozen on screen, so it looks paused rather than blank; a
+minimized window is hidden, so it drops the frame too and repaints when you restore
+it. Either way it re-opens at the saved position and play state. Re-opening pays a
+brief decoder warm-up (a demux seek plus the first frame), which is why a quick
+alt-tab back within the grace period keeps the session. An archive video re-uses the file it was already extracted to, so it never
+re-extracts. While a video is released its transport controls disappear and keyboard
+playback keys do nothing until it returns, so unfocused (still visible) videos
+default to never releasing; only minimized (hidden) ones do.

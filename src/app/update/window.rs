@@ -31,8 +31,9 @@ pub enum Message {
 
 /// One stage of a backgrounded window's decay pipeline, run in this order
 /// and each at its own delay from when the window entered the state. The same
-/// three stages serve both the unfocused and minimized states; only their
-/// configured timers differ.
+/// stages serve both the unfocused and minimized states; only their configured
+/// timers differ. Which stages apply depends on the on-screen media: a still runs
+/// demote/drop/evict, an animation only evict, a video only its session release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecayStage {
     /// Demote the on-screen image to view-res and drop the prefetch look-ahead.
@@ -41,6 +42,9 @@ pub enum DecayStage {
     DropVram,
     /// Evict this window's RAM sources, so they re-decode from disk on return.
     EvictRam,
+    /// Release an open video's whole decode session, freezing the last frame; a
+    /// restore re-opens it at the saved position.
+    EvictVideo,
 }
 use std::time::Duration;
 
@@ -50,7 +54,7 @@ use super::{fire_load, fire_prefetch, run_jobs, try_start_shared_anim};
 use crate::app::state::{DisplayedImage, Viewer};
 use crate::app::viewer_math::{clamp_pan, compute_zoom};
 use crate::app::{Message as AppMessage, Shared, Window, recalc_viewport};
-use crate::config::{EvictConfig, PrefetchVram};
+use crate::config::{EvictConfig, PrefetchVram, VideoDecay};
 use crate::media::pipeline::{Lane, Pipeline};
 use crate::media::store::{ImageKey, Tier};
 
@@ -223,6 +227,39 @@ fn run_decay_stage(
     if generation != win.decay_generation {
         return Task::none();
     }
+    // Releasing a video session touches both the viewer and the window's resume flag,
+    // so handle it before borrowing the viewer for the store-backed (still) stages.
+    if stage == DecayStage::EvictVideo {
+        let resume = win.video_resumes_on_restore;
+        let minimized = win.minimized;
+        if let Some(viewer) = win.viewer_mut() {
+            // Capture the session into a memo (which keeps the archive temp file alive)
+            // and drop it, freeing the decode threads, hardware decoder, audio sink,
+            // and GPU textures. The last `frame` stays on screen, so the video looks
+            // paused, not gone, until the window returns. `playing` resolves through
+            // the minimize-pause flag, which may have already cleared `session.playing`.
+            let memo = viewer
+                .video
+                .session
+                .as_ref()
+                .map(|s| s.suspend(s.playing || resume));
+            if memo.is_some() {
+                viewer.video.suspended = memo;
+                viewer.video.session = None;
+                // A minimized window shows nothing, so also drop the frozen frame: its
+                // RAM and the GPU surface it pins are pure waste while hidden, and a
+                // restore re-opens the session and repaints. A visible (unfocused)
+                // release keeps the frame on screen instead.
+                if minimized {
+                    viewer.video.frame = None;
+                }
+                // TODO: compact the process heap here (Windows) so the freed decoder
+                // RAM returns to the OS instead of staying mapped until idle.
+            }
+        }
+        win.video_resumes_on_restore = false;
+        return Task::none();
+    }
     let view = win.viewport_size;
     let pipeline = shared.pipeline.clone();
     let Some(viewer) = win.viewer_mut() else {
@@ -269,6 +306,7 @@ fn run_decay_stage(
                 retarget_displayed(viewer, shared, Tier::Evicted, &pipeline, view)
             }
         }
+        DecayStage::EvictVideo => unreachable!("handled before the viewer borrow above"),
     }
 }
 
@@ -309,12 +347,18 @@ fn restart_decay(win: &mut Window, shared: &mut Shared) -> Task<AppMessage> {
     if win.focused && !win.minimized {
         return Task::batch(tasks);
     }
+    // A video on screen owns the window's decay (it is keyed off the session, alive
+    // or suspended, since a video minimized during warmup never latches `displayed`).
+    let displayed_is_video = win
+        .viewer()
+        .is_some_and(|v| v.video.session.is_some() || v.video.suspended.is_some());
     let displayed_is_anim = win
         .viewer()
         .is_some_and(|v| matches!(v.displayed, DisplayedImage::Animated { .. }));
 
     // The eviction delay scales with the on-screen image's decode time, measured at
-    // decode by whichever store owns it (the animation store for a GIF).
+    // decode by whichever store owns it (the animation store for a GIF). A video has
+    // no decode-time-scaled timer, so this is unused for it.
     let decode = win.viewer().and_then(|v| {
         let path = v.displayed_path.as_deref()?;
         let key = ImageKey::new(&v.source, path);
@@ -325,10 +369,18 @@ fn restart_decay(win: &mut Window, shared: &mut Shared) -> Task<AppMessage> {
         }
     });
 
-    // An animation has no governed VRAM tier, so it runs only the evict stage from
-    // its `.animated` config; a still runs the full demote/drop/evict pipeline.
+    // Each media kind decays differently and they are mutually exclusive on screen: a
+    // video releases its whole decode session, an animation evicts its RAM frames, a
+    // still runs the full demote/drop/evict pipeline.
     let res = &shared.config.resource;
-    let stages = if displayed_is_anim {
+    let stages = if displayed_is_video {
+        let cfg = if win.minimized {
+            &res.minimized.video
+        } else {
+            &res.unfocused.video
+        };
+        video_decay_schedule(cfg)
+    } else if displayed_is_anim {
         let cfg = if win.minimized {
             &res.minimized.animated
         } else {
@@ -355,6 +407,16 @@ fn restart_decay(win: &mut Window, shared: &mut Shared) -> Task<AppMessage> {
 fn anim_decay_schedule(cfg: &EvictConfig, decode: Option<Duration>) -> Vec<(DecayStage, Duration)> {
     cfg.evict_delay(decode)
         .map(|d| (DecayStage::EvictRam, d))
+        .into_iter()
+        .collect()
+}
+
+/// The session-release stage and its delay for a video, given its `.video` config.
+/// A video has no VRAM or RAM tier the store governs, so releasing the whole decode
+/// session is the only stage it can ever run.
+fn video_decay_schedule(cfg: &VideoDecay) -> Vec<(DecayStage, Duration)> {
+    cfg.evict_session_after
+        .map(|d| (DecayStage::EvictVideo, d))
         .into_iter()
         .collect()
 }
@@ -404,6 +466,13 @@ fn restore_display(
         return Vec::new();
     };
     let mut tasks = Vec::new();
+    // A video released while backgrounded re-opens at its saved position now that the
+    // window has returned. The frozen frame is already on screen, so the next frame
+    // tick (re-armed once the session exists) paints the fresh one over it; the first
+    // poll delivers it even while paused, so a paused video shows the right frame.
+    if let Some(memo) = viewer.video.suspended.take() {
+        viewer.video.session = Some(crate::video::VideoSession::resume(&memo));
+    }
     if let Some(displayed) = viewer.displayed_path.clone() {
         let is_anim = matches!(viewer.displayed, DisplayedImage::Animated { .. });
         if is_anim {
@@ -769,6 +838,147 @@ mod tests {
             ..Default::default()
         };
         assert!(anim_decay_schedule(&cfg, None).is_empty());
+    }
+
+    #[test]
+    fn video_decay_schedule_arms_only_the_session_release() {
+        use crate::config::VideoDecay;
+        let s = Duration::from_secs;
+        // A video has no tier, so its schedule is at most one session-release stage.
+        assert_eq!(
+            video_decay_schedule(&VideoDecay {
+                evict_session_after: Some(s(5)),
+            }),
+            vec![(DecayStage::EvictVideo, s(5))]
+        );
+        // "never" arms nothing, so a backgrounded video keeps its decode session.
+        assert!(
+            video_decay_schedule(&VideoDecay {
+                evict_session_after: None,
+            })
+            .is_empty()
+        );
+    }
+
+    // The video session lifecycle is exercised on the stub (the real `open` spawns
+    // FFmpeg threads); the wiring it tests is identical in both builds.
+    #[cfg(not(feature = "video"))]
+    mod video {
+        use super::*;
+        use crate::app::test_support::{TestApp, viewing_app};
+        use std::sync::Arc;
+
+        fn stub_frame() -> crate::video::VideoFrame {
+            crate::video::VideoFrame {
+                id: 1,
+                width: 2,
+                height: 2,
+                chroma_width: 1,
+                chroma_height: 1,
+                format: crate::video::YuvFormat::I420,
+                y: vec![0; 4],
+                u: vec![0; 1],
+                v: vec![0; 1],
+                matrix: crate::video::YuvMatrix::Bt601,
+                range: crate::video::YuvRange::Limited,
+                timestamp: Duration::ZERO,
+            }
+        }
+
+        fn app_with_video() -> TestApp {
+            let mut app = viewing_app(&["a.mp4"], 0);
+            let viewer = app.viewer_mut().unwrap();
+            viewer.displayed_path = Some("a.mp4".into());
+            let mut session = crate::video::VideoSession::open(
+                "a.mp4".into(),
+                Duration::ZERO,
+                1.0,
+                false,
+                false,
+                false,
+            );
+            session.playing = true;
+            viewer.video.session = Some(session);
+            viewer.video.frame = Some(Arc::new(stub_frame()));
+            app
+        }
+
+        #[test]
+        fn minimizing_then_evicting_releases_the_session_and_frame() {
+            let mut app = app_with_video();
+            let _ = update(&mut app.window, &mut app.shared, Message::Minimized(true));
+            let generation = app.window.decay_generation;
+            let _ = update(
+                &mut app.window,
+                &mut app.shared,
+                Message::Decay {
+                    generation,
+                    stage: DecayStage::EvictVideo,
+                },
+            );
+            let v = app.viewer().unwrap();
+            assert!(v.video.session.is_none()); // decoder released
+            assert!(v.video.suspended.is_some()); // memo kept for restore
+            // A minimized window is hidden, so the frozen frame is dropped too.
+            assert!(v.video.frame.is_none());
+        }
+
+        #[test]
+        fn a_stale_evict_video_keeps_the_session() {
+            let mut app = app_with_video();
+            let _ = update(&mut app.window, &mut app.shared, Message::Minimized(true));
+            // Generation 0 predates the minimize bump, so the timer is stale.
+            let _ = update(
+                &mut app.window,
+                &mut app.shared,
+                Message::Decay {
+                    generation: 0,
+                    stage: DecayStage::EvictVideo,
+                },
+            );
+            assert!(app.viewer().unwrap().video.session.is_some());
+        }
+
+        #[test]
+        fn restoring_re_opens_a_suspended_video() {
+            let mut app = app_with_video();
+            let _ = update(&mut app.window, &mut app.shared, Message::Minimized(true));
+            let generation = app.window.decay_generation;
+            let _ = update(
+                &mut app.window,
+                &mut app.shared,
+                Message::Decay {
+                    generation,
+                    stage: DecayStage::EvictVideo,
+                },
+            );
+            assert!(app.viewer().unwrap().video.suspended.is_some());
+
+            // Un-minimize: restore_display re-opens the session at the saved position.
+            let _ = update(&mut app.window, &mut app.shared, Message::Minimized(false));
+            let v = app.viewer().unwrap();
+            assert!(v.video.session.is_some());
+            assert!(v.video.suspended.is_none());
+        }
+
+        #[test]
+        fn reset_clears_a_suspended_video() {
+            let mut app = app_with_video();
+            let _ = update(&mut app.window, &mut app.shared, Message::Minimized(true));
+            let generation = app.window.decay_generation;
+            let _ = update(
+                &mut app.window,
+                &mut app.shared,
+                Message::Decay {
+                    generation,
+                    stage: DecayStage::EvictVideo,
+                },
+            );
+            assert!(app.viewer().unwrap().video.suspended.is_some());
+            // Navigating away (reset) releases the memo and its archive temp guard.
+            app.viewer_mut().unwrap().video.reset();
+            assert!(app.viewer().unwrap().video.suspended.is_none());
+        }
     }
 
     #[test]

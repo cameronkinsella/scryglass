@@ -19,7 +19,9 @@ mod frame;
 mod hw;
 mod session;
 pub use frame::{VideoFrame, YuvFormat, YuvMatrix, YuvRange};
-pub use session::{TempFileGuard, VideoSession, clean_extraction_dir, extraction_dir};
+pub use session::{
+    SuspendedVideo, TempFileGuard, VideoSession, clean_extraction_dir, extraction_dir,
+};
 
 /// Video container extensions offered in the file list.
 pub const EXTENSIONS: &[&str] = &["mp4", "mkv", "webm", "mov", "avi", "m4v"];

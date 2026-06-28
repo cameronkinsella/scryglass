@@ -95,6 +95,9 @@ pub struct VideoState {
     /// Active playback session (feature `video`). Dropping it stops the decode
     /// threads.
     pub session: Option<crate::video::VideoSession>,
+    /// A released session a backgrounded window can re-open (decode decay). The
+    /// `frame` stays on screen while this is set, so the video looks paused, not gone.
+    pub suspended: Option<crate::video::SuspendedVideo>,
     /// Latest decoded frame, drawn by the GPU YUV surface.
     pub frame: Option<std::sync::Arc<crate::video::VideoFrame>>,
     /// Mid-drag value of the seek slider (seconds), committed on release.
@@ -113,6 +116,9 @@ impl VideoState {
     /// out on its own, since it only renders while a session exists.
     pub fn reset(&mut self) {
         self.session = None;
+        // Clearing the suspended memo drops its archive temp guard, so navigating
+        // away from a video that was released while backgrounded does not leak it.
+        self.suspended = None;
         self.frame = None;
         self.seek_drag = None;
         self.extracting = None;
