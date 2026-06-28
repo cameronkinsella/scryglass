@@ -1,22 +1,15 @@
-//! Persistent GPU state for the still-image surface: the render pipeline, a
-//! small most-recently-used cache of per-image RGBA textures (so navigating
-//! back is instant and a long session does not grow VRAM unbounded), the
-//! samplers, and the per-draw uniform.
+//! Persistent GPU state for the still-image surface: the render pipeline, the
+//! per-draw uniform, and the dedicated upload thread. Textures themselves are
+//! app-owned `Keepalive`s drawn directly, not held here.
 
-use std::collections::HashMap;
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, OnceLock};
 
-use iced::advanced::image::Id;
 use iced::wgpu;
 use iced::widget::image::Handle;
 use iced::widget::shader;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 const UNIFORM_SIZE: u64 = 48;
-
-/// Images up to this size upload inline on the render thread; larger ones go
-/// only to the upload thread. Matches iced's MAX_SYNC_SIZE.
-const MAX_SYNC_SIZE: usize = 2 * 1024 * 1024;
 
 /// Hands decoded images to the single dedicated upload thread (set up on the
 /// pipeline's first build, the only place wgpu gives us the device). One thread
@@ -32,10 +25,6 @@ struct UploadContext {
 /// render thread stalls the frame (iced drops on its worker for the same reason).
 enum Job {
     Upload {
-        /// The image id this texture is for. View-res and full-res uploads share
-        /// one id (the `handle` carries the pixels), so promoting or demoting an
-        /// image just replaces its texture.
-        id: Id,
         handle: Handle,
         /// Resolved with the keepalive once the texture is resident. The app
         /// holds it for as long as it wants the image; dropping it frees the
@@ -94,26 +83,10 @@ pub fn test_keepalive() -> Keepalive {
 /// Persistent GPU state shared by every still-image draw.
 pub struct ImagePipeline {
     pipeline: wgpu::RenderPipeline,
-    layout: wgpu::BindGroupLayout,
     /// Bound at slot 0; rust-gpu reserves set 0, so the real bindings are set 1.
     empty_bind: wgpu::BindGroup,
     uniforms: wgpu::Buffer,
-    sampler_linear: wgpu::Sampler,
-    sampler_nearest: wgpu::Sampler,
     is_srgb: bool,
-    /// Weak refs to app-owned resident images. The app's keepalive owns the
-    /// texture, so a window dropping its keepalive frees the VRAM at once; the
-    /// pipeline only borrows, drawing while the weak still upgrades.
-    textures: HashMap<Id, Weak<ResidentImage>>,
-    /// Pipeline-owned fallbacks: small images uploaded inline, or the first
-    /// image before the upload thread exists, which have no app keepalive. Held
-    /// to at most the current image, since they are tiny and transient.
-    owned: HashMap<Id, Arc<ResidentImage>>,
-    current: Option<Id>,
-    /// Textures uploaded off the render thread arrive here, drained in prepare.
-    /// Behind a mutex only to satisfy the pipeline's Sync bound, since prepare
-    /// is the sole drainer and never contends.
-    receiver: std::sync::Mutex<UnboundedReceiver<(Id, Weak<ResidentImage>)>>,
 }
 
 struct GpuImage {
@@ -219,7 +192,6 @@ impl shader::Pipeline for ImagePipeline {
         // Capture the device here (the only place wgpu hands it to us) and spawn
         // the dedicated upload thread. It owns the cloned device/queue, drains
         // jobs serially, and feeds finished textures to prepare via `receiver`.
-        let (results, receiver) = unbounded_channel();
         let (jobs, jobs_rx) = unbounded_channel();
         spawn_upload_thread(
             device.clone(),
@@ -230,7 +202,6 @@ impl shader::Pipeline for ImagePipeline {
             sampler_nearest.clone(),
             jobs_rx,
             jobs.clone(),
-            results,
         );
         let _ = UPLOAD_CONTEXT.set(UploadContext {
             jobs,
@@ -239,123 +210,16 @@ impl shader::Pipeline for ImagePipeline {
 
         Self {
             pipeline,
-            layout,
             empty_bind,
             uniforms,
-            sampler_linear,
-            sampler_nearest,
             is_srgb: format.is_srgb(),
-            textures: HashMap::new(),
-            owned: HashMap::new(),
-            current: None,
-            receiver: std::sync::Mutex::new(receiver),
         }
     }
 }
 
 impl ImagePipeline {
-    pub(super) fn prepare(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        handle: &Handle,
-        dst: [f32; 4],
-        src: [f32; 4],
-    ) {
-        // Fold in any textures uploaded off the render thread (collect first so
-        // the lock is released before touching the maps), and drop weak refs to
-        // images the app has since released.
-        let drained: Vec<(Id, Weak<ResidentImage>)> = {
-            let mut rx = self.receiver.lock().expect("image upload receiver");
-            std::iter::from_fn(|| rx.try_recv().ok()).collect()
-        };
-        for (id, weak) in drained {
-            self.textures.insert(id, weak);
-            // A worker upload supersedes any inline fallback for the same image.
-            self.owned.remove(&id);
-        }
-        self.textures.retain(|_, weak| weak.strong_count() > 0);
-
-        // The cache only ever holds Rgba handles (the load pipeline decodes to
-        // raw pixels), so anything else has nothing to upload.
-        let Handle::Rgba {
-            id,
-            width,
-            height,
-            pixels,
-        } = handle
-        else {
-            self.current = None;
-            return;
-        };
-        let id = *id;
-        let resident = self.owned.contains_key(&id)
-            || self.textures.get(&id).is_some_and(|w| w.strong_count() > 0);
-        if !resident {
-            // A large texture is never uploaded here (that write is what stalled
-            // navigation): draw nothing this frame and wait for the worker, so a
-            // not-yet-resident window never borrows another window's texture.
-            // Small ones upload inline, like iced, and the pipeline owns them.
-            let bytes = (*width as usize) * (*height as usize) * 4;
-            if bytes > MAX_SYNC_SIZE {
-                self.current = None;
-                return;
-            }
-            let image = self.upload(device, queue, *width, *height, pixels.as_ref());
-            let drop_tx = UPLOAD_CONTEXT.get().map(|ctx| ctx.jobs.clone());
-            self.owned.insert(
-                id,
-                Arc::new(ResidentImage {
-                    image: Some(image),
-                    drop_tx,
-                }),
-            );
-        }
-        self.current = Some(id);
-        // Inline fallbacks are tiny and transient; keep only the current one.
-        self.owned.retain(|k, _| *k == id);
-
-        queue.write_buffer(&self.uniforms, 0, &build_uniforms(dst, src, self.is_srgb));
-    }
-
-    /// On-render-thread fallback upload, for an image not pre-uploaded off-thread.
-    fn upload(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        width: u32,
-        height: u32,
-        pixels: &[u8],
-    ) -> GpuImage {
-        make_image(
-            device,
-            queue,
-            &self.layout,
-            &self.uniforms,
-            &self.sampler_linear,
-            &self.sampler_nearest,
-            width,
-            height,
-            pixels,
-        )
-    }
-
-    pub(super) fn draw(&self, render_pass: &mut wgpu::RenderPass<'_>, nearest: bool) {
-        let Some(id) = self.current else {
-            return;
-        };
-        // A pipeline-owned fallback, else the app-owned texture while its
-        // keepalive still upgrades. The upgraded Arc must outlive the draw call.
-        if let Some(resident) = self.owned.get(&id) {
-            self.draw_resident(render_pass, resident, nearest);
-        } else if let Some(resident) = self.textures.get(&id).and_then(Weak::upgrade) {
-            self.draw_resident(render_pass, &resident, nearest);
-        }
-    }
-
-    /// Write the per-draw uniforms (the dst/src rects) without touching the
-    /// texture maps. Used by the texture-owning render path, which carries its
-    /// own resident image rather than looking one up by id.
+    /// Write the per-draw uniforms (the dst/src rects) for the resident-texture
+    /// draw path.
     pub(super) fn write_uniforms(&self, queue: &wgpu::Queue, dst: [f32; 4], src: [f32; 4]) {
         queue.write_buffer(&self.uniforms, 0, &build_uniforms(dst, src, self.is_srgb));
     }
@@ -440,67 +304,10 @@ fn bind_texture(
     }
 }
 
-/// Build a texture and its bind groups via a direct `write_texture`. Used only
-/// by the small-image fallback; the worker uses the staging belt instead.
-#[allow(clippy::too_many_arguments)]
-fn make_image(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    layout: &wgpu::BindGroupLayout,
-    uniforms: &wgpu::Buffer,
-    sampler_linear: &wgpu::Sampler,
-    sampler_nearest: &wgpu::Sampler,
-    width: u32,
-    height: u32,
-    pixels: &[u8],
-) -> GpuImage {
-    let texture = create_rgba_texture(device, width, height);
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        pixels,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(width * 4),
-            rows_per_image: Some(height),
-        },
-        wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-    );
-    bind_texture(
-        device,
-        layout,
-        uniforms,
-        sampler_linear,
-        sampler_nearest,
-        &texture,
-    )
-}
-
-/// Queue an image for the upload thread at its full resolution. Returns false
-/// when the pipeline is not built yet (the first image) or the image is oversize
-/// for the device, in which case `ready` is dropped and prepare's on-thread
-/// fallback covers the display.
+/// Queue an image for the upload thread. Returns false when the pipeline is not
+/// built yet (the first image) or the image is oversize for the device, in which
+/// case `ready` is dropped and the display falls back to its thumbnail.
 pub fn submit_upload(handle: Handle, ready: tokio::sync::oneshot::Sender<Keepalive>) -> bool {
-    submit_upload_at(handle.id(), handle, ready)
-}
-
-/// Queue `handle`'s pixels as the texture for image `id`, which may differ from
-/// `handle`'s own id. A view-res and a full-res upload for the same image share
-/// one `id`, so promoting or demoting an image is just another upload that
-/// replaces its texture.
-pub fn submit_upload_at(
-    id: Id,
-    handle: Handle,
-    ready: tokio::sync::oneshot::Sender<Keepalive>,
-) -> bool {
     let Some(ctx) = UPLOAD_CONTEXT.get() else {
         return false;
     };
@@ -510,7 +317,7 @@ pub fn submit_upload_at(
     if *width == 0 || *height == 0 || *width > ctx.max_dim || *height > ctx.max_dim {
         return false;
     }
-    ctx.jobs.send(Job::Upload { id, handle, ready }).is_ok()
+    ctx.jobs.send(Job::Upload { handle, ready }).is_ok()
 }
 
 /// The dedicated upload thread, modeled on iced's image worker. It drains jobs
@@ -527,7 +334,6 @@ fn spawn_upload_thread(
     sampler_nearest: wgpu::Sampler,
     mut jobs: UnboundedReceiver<Job>,
     drop_tx: UnboundedSender<Job>,
-    results: UnboundedSender<(Id, Weak<ResidentImage>)>,
 ) {
     std::thread::Builder::new()
         .name("scryglass-image-upload".into())
@@ -540,7 +346,7 @@ fn spawn_upload_thread(
             let mut staging_cap: u64 = 0;
             while let Some(job) = jobs.blocking_recv() {
                 match job {
-                    Job::Upload { id, handle, ready } => {
+                    Job::Upload { handle, ready } => {
                         let Handle::Rgba {
                             width,
                             height,
@@ -624,13 +430,11 @@ fn spawn_upload_thread(
                             timeout: None,
                         });
                         // The app holds this Arc (keeping the texture resident);
-                        // the pipeline holds the Weak and draws while it upgrades.
-                        // Dropping the last Arc frees the texture via `drop_tx`.
+                        // dropping the last Arc frees the texture via `drop_tx`.
                         let resident = Arc::new(ResidentImage {
                             image: Some(image),
                             drop_tx: Some(drop_tx.clone()),
                         });
-                        let _ = results.send((id, Arc::downgrade(&resident)));
                         let _ = ready.send(resident);
                     }
                     Job::Drop(image) => {

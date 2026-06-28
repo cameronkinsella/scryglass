@@ -175,7 +175,6 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
             let viewport = (win.viewport_size.width, win.viewport_size.height);
             match texture {
                 Some(texture) => ui::image_surface::view(
-                    None,
                     Some(texture),
                     *original_size,
                     viewer.zoom,
@@ -208,7 +207,6 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
             original_size,
             ..
         } => ui::image_surface::view(
-            None,
             Some(texture.clone()),
             *original_size,
             viewer.zoom,

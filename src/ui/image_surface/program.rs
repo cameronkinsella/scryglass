@@ -1,9 +1,8 @@
-//! The iced shader-widget glue for stills: a `Program` that places the current
-//! image and a `Primitive` that hands the per-draw work to the pipeline. Zoom,
-//! pan, and fit reuse the shared display geometry, so stills and video share
-//! one path and never diverge.
+//! The iced shader-widget glue for stills and animations: a `Program` that
+//! places the current frame and a `Primitive` that hands the per-draw work to the
+//! pipeline. Zoom, pan, and fit reuse the shared display geometry, so stills,
+//! animations, and video share one path and never diverge.
 
-use iced::widget::image::Handle;
 use iced::widget::shader;
 use iced::{Element, Length, Rectangle, mouse, wgpu};
 
@@ -11,15 +10,12 @@ use super::pipeline::{ImagePipeline, Keepalive};
 use crate::app::Message;
 use crate::ui::image_display::display_geometry;
 
-/// Build the still-image surface element at the given zoom/pan. Fills the image
-/// area like the placeholder and video paths do.
-///
-/// When `texture` is `Some`, the surface renders that resident texture directly
-/// (read live from the store's shared cell, so a black screen is impossible) and
-/// `handle` is unused. `None` falls back to the id→texture map for the
-/// animation/bootstrap paths, which pass their frame `handle`.
+/// Build the image surface element at the given zoom/pan, drawing the resident
+/// `texture` directly (read live from the store's shared cell for stills, or the
+/// current frame's keepalive for animations, so a black screen is impossible).
+/// `None` is the degenerate warmup case that draws nothing. Fills the image area
+/// like the placeholder and video paths do.
 pub fn view(
-    handle: Option<Handle>,
     texture: Option<Keepalive>,
     original: (u32, u32),
     zoom: f32,
@@ -28,7 +24,7 @@ pub fn view(
     pixelated: bool,
 ) -> Element<'static, Message> {
     shader::Shader::new(ImageSurface::new(
-        handle, texture, original, zoom, pan, viewport, pixelated,
+        texture, original, zoom, pan, viewport, pixelated,
     ))
     .width(Length::Fill)
     .height(Length::Fill)
@@ -44,12 +40,9 @@ pub fn warmup() -> Element<'static, Message> {
         .into()
 }
 
-/// The shader program: the image to show and where to place it.
+/// The shader program: the texture to show and where to place it.
 struct ImageSurface {
-    /// The RGBA source for the id→texture fallback (animation/bootstrap). `None`
-    /// for a store-backed still, which draws its resident `texture` directly.
-    handle: Option<Handle>,
-    /// The resident texture, drawn directly when present.
+    /// The resident texture to draw, or `None` for the warmup surface.
     texture: Option<Keepalive>,
     valid: bool,
     /// Destination rect in normalized widget space: x0, y0, x1, y1.
@@ -62,7 +55,6 @@ struct ImageSurface {
 
 impl ImageSurface {
     fn new(
-        handle: Option<Handle>,
         texture: Option<Keepalive>,
         original: (u32, u32),
         zoom: f32,
@@ -73,7 +65,6 @@ impl ImageSurface {
         let nearest = pixelated && zoom > 1.0;
         match display_geometry(zoom, pan, viewport, original) {
             Some((dst, src)) => Self {
-                handle,
                 texture,
                 valid: true,
                 dst,
@@ -81,7 +72,6 @@ impl ImageSurface {
                 nearest,
             },
             None => Self {
-                handle,
                 texture,
                 valid: false,
                 dst: [0.0; 4],
@@ -94,7 +84,6 @@ impl ImageSurface {
     /// A degenerate surface that builds the pipeline but draws nothing.
     fn warmup() -> Self {
         Self {
-            handle: None,
             texture: None,
             valid: false,
             dst: [0.0; 4],
@@ -115,7 +104,6 @@ impl<T> shader::Program<T> for ImageSurface {
         _bounds: Rectangle,
     ) -> ImagePrimitive {
         ImagePrimitive {
-            handle: self.handle.clone(),
             texture: self.texture.clone(),
             valid: self.valid,
             dst: self.dst,
@@ -125,13 +113,9 @@ impl<T> shader::Program<T> for ImageSurface {
     }
 }
 
-/// One still's worth of work handed to the renderer.
+/// One frame's worth of work handed to the renderer.
 pub struct ImagePrimitive {
-    /// The RGBA source for the id→texture fallback, or `None` for a store-backed
-    /// still that draws its resident `texture` directly.
-    handle: Option<Handle>,
-    /// The resident texture to draw, owned for the whole frame. `None` falls back
-    /// to the id→texture map (animation/bootstrap).
+    /// The resident texture to draw, owned for the whole frame.
     texture: Option<Keepalive>,
     valid: bool,
     dst: [f32; 4],
@@ -142,7 +126,6 @@ pub struct ImagePrimitive {
 impl std::fmt::Debug for ImagePrimitive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ImagePrimitive")
-            .field("id", &self.handle.as_ref().map(Handle::id))
             .field("valid", &self.valid)
             .finish()
     }
@@ -154,29 +137,21 @@ impl shader::Primitive for ImagePrimitive {
     fn prepare(
         &self,
         pipeline: &mut ImagePipeline,
-        device: &wgpu::Device,
+        _device: &wgpu::Device,
         queue: &wgpu::Queue,
         _bounds: &Rectangle,
         _viewport: &shader::Viewport,
     ) {
-        if !self.valid {
-            return;
-        }
-        // A held texture only needs the uniforms written; the id→texture map (and
-        // its inline upload) is the fallback for the keepalive-less paths.
-        match (&self.texture, &self.handle) {
-            (Some(_), _) => pipeline.write_uniforms(queue, self.dst, self.src),
-            (None, Some(handle)) => pipeline.prepare(device, queue, handle, self.dst, self.src),
-            (None, None) => {}
+        if self.valid {
+            pipeline.write_uniforms(queue, self.dst, self.src);
         }
     }
 
     fn draw(&self, pipeline: &ImagePipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
-        if self.valid {
-            match &self.texture {
-                Some(texture) => pipeline.draw_resident(render_pass, texture, self.nearest),
-                None => pipeline.draw(render_pass, self.nearest),
-            }
+        if self.valid
+            && let Some(texture) = &self.texture
+        {
+            pipeline.draw_resident(render_pass, texture, self.nearest);
         }
         true
     }

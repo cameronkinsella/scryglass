@@ -509,7 +509,7 @@ async fn upload_at_res(
             .unwrap_or_else(|_| handle.clone())
     };
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-    if crate::ui::image_surface::submit_upload_at(handle.id(), gpu_handle, ready_tx) {
+    if crate::ui::image_surface::submit_upload(gpu_handle, ready_tx) {
         ready_rx.await.ok()
     } else {
         None

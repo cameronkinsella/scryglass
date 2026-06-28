@@ -8,5 +8,5 @@ mod program;
 
 #[cfg(test)]
 pub use pipeline::test_keepalive;
-pub use pipeline::{Keepalive, ResidentImage, submit_upload, submit_upload_at};
+pub use pipeline::{Keepalive, ResidentImage, submit_upload};
 pub use program::{view, warmup};
