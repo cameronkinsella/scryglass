@@ -8,7 +8,7 @@ use iced::{Element, Length, Rectangle, mouse, wgpu};
 
 use super::pipeline::{ImagePipeline, Keepalive};
 use crate::app::Message;
-use crate::ui::image_display::display_geometry;
+use crate::ui::image_display::SurfacePlacement;
 
 /// Build the image surface element at the given zoom/pan, drawing the resident
 /// `texture` directly (read live from the store's shared cell for stills, or the
@@ -44,13 +44,7 @@ pub fn warmup() -> Element<'static, Message> {
 struct ImageSurface {
     /// The resident texture to draw, or `None` for the warmup surface.
     texture: Option<Keepalive>,
-    valid: bool,
-    /// Destination rect in normalized widget space: x0, y0, x1, y1.
-    dst: [f32; 4],
-    /// Source rect in texture UV space: u0, v0, u1, v1.
-    src: [f32; 4],
-    /// Nearest sampling when zoomed past 100% with crisp pixels on.
-    nearest: bool,
+    placement: SurfacePlacement,
 }
 
 impl ImageSurface {
@@ -62,22 +56,9 @@ impl ImageSurface {
         viewport: (f32, f32),
         pixelated: bool,
     ) -> Self {
-        let nearest = pixelated && zoom > 1.0;
-        match display_geometry(zoom, pan, viewport, original) {
-            Some((dst, src)) => Self {
-                texture,
-                valid: true,
-                dst,
-                src,
-                nearest,
-            },
-            None => Self {
-                texture,
-                valid: false,
-                dst: [0.0; 4],
-                src: [0.0; 4],
-                nearest,
-            },
+        Self {
+            texture,
+            placement: SurfacePlacement::new(zoom, pan, viewport, original, pixelated),
         }
     }
 
@@ -85,10 +66,7 @@ impl ImageSurface {
     fn warmup() -> Self {
         Self {
             texture: None,
-            valid: false,
-            dst: [0.0; 4],
-            src: [0.0; 4],
-            nearest: false,
+            placement: SurfacePlacement::empty(),
         }
     }
 }
@@ -105,10 +83,7 @@ impl<T> shader::Program<T> for ImageSurface {
     ) -> ImagePrimitive {
         ImagePrimitive {
             texture: self.texture.clone(),
-            valid: self.valid,
-            dst: self.dst,
-            src: self.src,
-            nearest: self.nearest,
+            placement: self.placement,
         }
     }
 }
@@ -117,16 +92,13 @@ impl<T> shader::Program<T> for ImageSurface {
 pub struct ImagePrimitive {
     /// The resident texture to draw, owned for the whole frame.
     texture: Option<Keepalive>,
-    valid: bool,
-    dst: [f32; 4],
-    src: [f32; 4],
-    nearest: bool,
+    placement: SurfacePlacement,
 }
 
 impl std::fmt::Debug for ImagePrimitive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ImagePrimitive")
-            .field("valid", &self.valid)
+            .field("valid", &self.placement.valid)
             .finish()
     }
 }
@@ -142,16 +114,16 @@ impl shader::Primitive for ImagePrimitive {
         _bounds: &Rectangle,
         _viewport: &shader::Viewport,
     ) {
-        if self.valid {
-            pipeline.write_uniforms(queue, self.dst, self.src);
+        if self.placement.valid {
+            pipeline.write_uniforms(queue, self.placement.dst, self.placement.src);
         }
     }
 
     fn draw(&self, pipeline: &ImagePipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
-        if self.valid
+        if self.placement.valid
             && let Some(texture) = &self.texture
         {
-            pipeline.draw_resident(render_pass, texture, self.nearest);
+            pipeline.draw_resident(render_pass, texture, self.placement.nearest);
         }
         true
     }

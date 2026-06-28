@@ -10,7 +10,7 @@ use iced::{Element, Length, Rectangle, mouse, wgpu};
 
 use super::pipeline::VideoPipeline;
 use crate::app::Message;
-use crate::ui::image_display::display_geometry;
+use crate::ui::image_display::SurfacePlacement;
 use crate::video::VideoFrame;
 
 /// Build the video surface element for the current frame at the given
@@ -31,13 +31,7 @@ pub fn view(
 /// The shader program: holds the frame to show and where to put it.
 struct VideoSurface {
     frame: Arc<VideoFrame>,
-    valid: bool,
-    /// Destination rect in normalized widget space: x0, y0, x1, y1.
-    dst: [f32; 4],
-    /// Source rect in texture UV space: u0, v0, u1, v1.
-    src: [f32; 4],
-    /// Nearest sampling when zoomed past 100% with crisp pixels on.
-    nearest: bool,
+    placement: SurfacePlacement,
 }
 
 impl VideoSurface {
@@ -49,22 +43,9 @@ impl VideoSurface {
         pixelated: bool,
     ) -> Self {
         let original = (frame.width, frame.height);
-        let nearest = pixelated && zoom > 1.0;
-        match display_geometry(zoom, pan, viewport, original) {
-            Some((dst, src)) => Self {
-                frame,
-                valid: true,
-                dst,
-                src,
-                nearest,
-            },
-            None => Self {
-                frame,
-                valid: false,
-                dst: [0.0; 4],
-                src: [0.0; 4],
-                nearest,
-            },
+        Self {
+            frame,
+            placement: SurfacePlacement::new(zoom, pan, viewport, original, pixelated),
         }
     }
 }
@@ -81,10 +62,7 @@ impl<T> shader::Program<T> for VideoSurface {
     ) -> VideoPrimitive {
         VideoPrimitive {
             frame: self.frame.clone(),
-            valid: self.valid,
-            dst: self.dst,
-            src: self.src,
-            nearest: self.nearest,
+            placement: self.placement,
         }
     }
 }
@@ -92,17 +70,14 @@ impl<T> shader::Program<T> for VideoSurface {
 /// A single frame's worth of work handed to the renderer.
 pub struct VideoPrimitive {
     frame: Arc<VideoFrame>,
-    valid: bool,
-    dst: [f32; 4],
-    src: [f32; 4],
-    nearest: bool,
+    placement: SurfacePlacement,
 }
 
 impl std::fmt::Debug for VideoPrimitive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VideoPrimitive")
             .field("frame_id", &self.frame.id)
-            .field("valid", &self.valid)
+            .field("valid", &self.placement.valid)
             .finish()
     }
 }
@@ -118,14 +93,20 @@ impl shader::Primitive for VideoPrimitive {
         _bounds: &Rectangle,
         _viewport: &shader::Viewport,
     ) {
-        if self.valid {
-            pipeline.prepare(device, queue, &self.frame, self.dst, self.src);
+        if self.placement.valid {
+            pipeline.prepare(
+                device,
+                queue,
+                &self.frame,
+                self.placement.dst,
+                self.placement.src,
+            );
         }
     }
 
     fn draw(&self, pipeline: &VideoPipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
-        if self.valid {
-            pipeline.draw(render_pass, self.nearest);
+        if self.placement.valid {
+            pipeline.draw(render_pass, self.placement.nearest);
         }
         true
     }

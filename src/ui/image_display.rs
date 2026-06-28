@@ -143,16 +143,68 @@ pub(crate) fn display_geometry(
     }
 }
 
-/// Render an image texture at the given zoom/pan.
+/// Where a shader surface draws its content this frame: the destination and
+/// source-UV rects plus the sampling mode, resolved from the display geometry.
+/// `valid` is false for the degenerate case that draws nothing. The still and video
+/// surfaces both carry this, so their placement stays identical.
+#[derive(Clone, Copy)]
+pub(crate) struct SurfacePlacement {
+    pub valid: bool,
+    /// Destination rect in normalized widget space: x0, y0, x1, y1.
+    pub dst: [f32; 4],
+    /// Source rect in texture UV space: u0, v0, u1, v1.
+    pub src: [f32; 4],
+    /// Nearest sampling when zoomed past 100% with crisp pixels on.
+    pub nearest: bool,
+}
+
+impl SurfacePlacement {
+    pub(crate) fn new(
+        zoom: f32,
+        pan: (f32, f32),
+        viewport: (f32, f32),
+        original: (u32, u32),
+        pixelated: bool,
+    ) -> Self {
+        let nearest = pixelated && zoom > 1.0;
+        match display_geometry(zoom, pan, viewport, original) {
+            Some((dst, src)) => Self {
+                valid: true,
+                dst,
+                src,
+                nearest,
+            },
+            // `nearest` is unread while `valid` is false, so the empty placement stands.
+            None => Self::empty(),
+        }
+    }
+
+    /// The degenerate placement that draws nothing (the still warmup surface).
+    pub(crate) fn empty() -> Self {
+        Self {
+            valid: false,
+            dst: [0.0; 4],
+            src: [0.0; 4],
+            nearest: false,
+        }
+    }
+}
+
+/// Render a thumbnail blur into exactly the rect the resident content will occupy.
 ///
-/// * `handle`: the GPU texture (possibly a downscaled version).
-/// * `texture_size`: dimensions of that texture.
+/// The destination rect and the source window come from the same [`display_geometry`]
+/// the still and video shaders use, so the blur lands pixel-for-pixel where the image
+/// will, with no resize when the full content swaps in. The thumbnail is then
+/// `ContentFit::Fill`-stretched into that rect, so its own (rounded) aspect is ignored,
+/// which is imperceptible on a blur.
+///
+/// * `handle`: the thumbnail texture.
+/// * `texture_size`: its dimensions, for mapping the source window into it.
 /// * `original_size`: the image's true dimensions, the zoom/pan space.
 /// * `zoom`: zoom factor (1.0 = 100% of original pixel size).
 /// * `pan`: pan offset in logical pixels `(dx, dy)`.
 /// * `viewport`: size of the display area in logical pixels `(w, h)`.
-/// * `pixelated`: nearest-neighbor sampling when zoomed past 100%
-///   (crisp pixel art). Downscales always use linear filtering.
+/// * `pixelated`: nearest sampling when zoomed past 100% (crisp pixel art).
 pub fn image_display(
     handle: &Handle,
     texture_size: (u32, u32),
@@ -162,35 +214,32 @@ pub fn image_display(
     viewport: (f32, f32),
     pixelated: bool,
 ) -> Element<'_, Message> {
+    let (vp_w, vp_h) = viewport;
+    let Some((dst, src)) = display_geometry(zoom, pan, viewport, original_size) else {
+        return empty_viewport();
+    };
     let filter = if pixelated && zoom > 1.0 {
         FilterMethod::Nearest
     } else {
         FilterMethod::Linear
     };
-
-    let widget: Element<'_, Message> =
-        match display_math(zoom, pan, viewport, original_size, texture_size) {
-            DisplayMath::Empty => text("").into(),
-            DisplayMath::Fit { scale_factor } => image(handle.clone())
-                .content_fit(ContentFit::Contain)
-                .filter_method(filter)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .scale(scale_factor)
-                .into(),
-            DisplayMath::Crop { rect } => image(handle.clone())
-                .content_fit(ContentFit::Contain)
-                .filter_method(filter)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .crop(rect)
-                .into(),
-        };
-
-    container(widget)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    // The source window in thumbnail pixels (UV from `display_geometry` times its size).
+    let (tw, th) = (texture_size.0 as f32, texture_size.1 as f32);
+    let crop = Rectangle {
+        x: (src[0] * tw).round() as u32,
+        y: (src[1] * th).round() as u32,
+        width: (((src[2] - src[0]) * tw).round() as u32).max(1),
+        height: (((src[3] - src[1]) * th).round() as u32).max(1),
+    };
+    center(
+        image(handle.clone())
+            .content_fit(ContentFit::Fill)
+            .filter_method(filter)
+            .crop(crop)
+            .width(Length::Fixed((dst[2] - dst[0]) * vp_w))
+            .height(Length::Fixed((dst[3] - dst[1]) * vp_h)),
+    )
+    .into()
 }
 
 /// Render the empty/waiting state drop prompt.
