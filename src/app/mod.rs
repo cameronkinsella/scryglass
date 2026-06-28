@@ -56,7 +56,7 @@ use crate::components::toasts::Toast;
 use crate::components::toolbar::OpenMenu;
 use crate::config::AppConfig;
 use crate::media::pipeline::Pipeline;
-use crate::media::store::Store;
+use crate::media::store::{Anim, Store};
 use crate::ui;
 
 use state::{Session, Viewer};
@@ -109,6 +109,11 @@ pub struct Shared {
     /// identity and shared across all windows. Windows hold leases into it. It
     /// decides each image's tier from their aggregate demand.
     pub(crate) store: Store,
+    /// The same store machinery for animations: the one owner of every GIF's decoded
+    /// frames in RAM, keyed by image identity and shared across all windows. An
+    /// animation has no GPU tier (each window composites its own frames), so this
+    /// governs only the shared decoded RAM and its decay.
+    pub(crate) anim_store: Store<Anim>,
     /// In-memory thumbnails (the filmstrip previews and the placeholder blur),
     /// shared across all windows and keyed by [`crate::media::pipeline::thumb_key`]
     /// so each image is thumbnailed once and every window reads the same copy.

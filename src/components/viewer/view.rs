@@ -202,18 +202,37 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
                 },
             }
         }
-        DisplayedImage::Animated {
-            texture,
-            original_size,
-            ..
-        } => ui::image_surface::view(
-            Some(texture.clone()),
-            *original_size,
-            viewer.zoom,
-            viewer.pan,
-            (win.viewport_size.width, win.viewport_size.height),
-            shared.config.crisp_pixels,
-        ),
+        DisplayedImage::Animated { original_size } => {
+            // Like a still, the frame is derived at render time from its resource
+            // owner (the player's current frame texture), else the thumbnail blur.
+            let viewport = (win.viewport_size.width, win.viewport_size.height);
+            match viewer.anim_player.current_texture() {
+                Some(texture) => ui::image_surface::view(
+                    Some(texture),
+                    *original_size,
+                    viewer.zoom,
+                    viewer.pan,
+                    viewport,
+                    shared.config.crisp_pixels,
+                ),
+                None => match viewer.displayed_path.as_deref().and_then(|p| {
+                    shared
+                        .thumbs
+                        .peek(&crate::media::pipeline::thumb_key(&viewer.source, p))
+                }) {
+                    Some(thumb) => ui::image_display::image_display(
+                        &thumb.handle,
+                        thumb.size,
+                        thumb.original_size,
+                        viewer.zoom,
+                        viewer.pan,
+                        viewport,
+                        false,
+                    ),
+                    None => ui::image_display::empty_viewport(),
+                },
+            }
+        }
         DisplayedImage::Placeholder(thumb) => {
             // Placeholders always smooth: the bilinear upscale IS the blur.
             ui::image_display::image_display(

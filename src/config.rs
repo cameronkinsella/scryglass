@@ -190,19 +190,14 @@ mod humantime_opt {
     }
 }
 
-/// The decay pipeline a backgrounded window runs: full-res VRAM, then
-/// (after each timer) demote to view-res, drop the VRAM, and evict the RAM
-/// source. A `None` timer skips that stage. Shared by the unfocused and
-/// minimized states so their logic and labels are identical.
+/// When (and how) a backgrounded window evicts a decoded source from RAM, which
+/// is re-decoded from disk on return. Shared by the still pipeline, where it is
+/// the last of three stages, and the animated one, where it is the *only* stage:
+/// an animation has no governed VRAM tier, so demote/drop simply do not exist for
+/// it (this type is the whole animated decay config).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct DecayPipeline {
-    /// Demote the on-screen image full-res -> view-res after this delay.
-    #[serde(with = "humantime_opt")]
-    pub demote_vram_after: Option<Duration>,
-    /// Drop the on-screen image's VRAM entirely after this delay.
-    #[serde(with = "humantime_opt")]
-    pub drop_vram_after: Option<Duration>,
+pub struct EvictConfig {
     /// When to evict the RAM source.
     pub evict_ram: EvictPolicy,
     /// Dynamic eviction: delay for an instant-decode image.
@@ -216,13 +211,11 @@ pub struct DecayPipeline {
     pub max_decode_latency: Duration,
 }
 
-impl Default for DecayPipeline {
-    /// Conservative fallback for a deleted key: do nothing aggressive. The real
-    /// per-state defaults are set in [`ResourceConfig::default`].
+impl Default for EvictConfig {
+    /// Conservative fallback for a deleted key: never evict. The real per-state
+    /// defaults are set in [`ResourceConfig::default`].
     fn default() -> Self {
         Self {
-            demote_vram_after: None,
-            drop_vram_after: None,
             evict_ram: EvictPolicy::Never,
             evict_ram_min: Duration::from_secs(30),
             evict_ram_max: Duration::from_secs(600),
@@ -231,7 +224,7 @@ impl Default for DecayPipeline {
     }
 }
 
-impl DecayPipeline {
+impl EvictConfig {
     /// The RAM-eviction delay for an image given its decode time, or `None` to
     /// never evict. Dynamic mode interpolates linearly between `evict_ram_min`
     /// (instant decode) and `evict_ram_max` (at the latency ceiling); an image
@@ -254,21 +247,56 @@ impl DecayPipeline {
     }
 }
 
-/// The minimized state's pipeline plus its video-pause toggle.
+/// The decay pipeline a backgrounded window runs for a still: full-res VRAM, then
+/// (after each timer) demote to view-res, drop the VRAM, and evict the RAM source.
+/// A `None` timer skips that stage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct DecayPipeline {
+    /// Demote the on-screen image full-res -> view-res after this delay.
+    #[serde(with = "humantime_opt")]
+    pub demote_vram_after: Option<Duration>,
+    /// Drop the on-screen image's VRAM entirely after this delay.
+    #[serde(with = "humantime_opt")]
+    pub drop_vram_after: Option<Duration>,
+    /// The RAM-eviction stage, flattened so its keys sit alongside the demote and
+    /// drop timers in `[resource.*.still]`.
+    #[serde(flatten)]
+    pub evict: EvictConfig,
+}
+
+/// A backgrounded state's decay timers, split by media kind. Stills and
+/// animations decay independently: only the evict stage applies to an animation
+/// (it has no governed VRAM tier), and re-decoding one is costly, so animations
+/// are usually kept in RAM longer than stills.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct StateDecay {
+    /// Decay timers for a still image.
+    pub still: DecayPipeline,
+    /// Eviction timing for an animation (GIF, APNG, animated WebP). Only eviction
+    /// applies, so demote/drop are not configurable for it.
+    pub animated: EvictConfig,
+}
+
+/// The minimized state's decay timers plus its video-pause toggle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MinimizedConfig {
     /// Pause an open video while the window is minimized.
     pub pause_video: bool,
-    #[serde(flatten)]
-    pub pipeline: DecayPipeline,
+    /// Decay timers for a still image.
+    pub still: DecayPipeline,
+    /// Eviction timing for an animation.
+    pub animated: EvictConfig,
 }
 
 impl Default for MinimizedConfig {
     fn default() -> Self {
         Self {
             pause_video: true,
-            pipeline: DecayPipeline::default(),
+            still: DecayPipeline::default(),
+            animated: EvictConfig::default(),
         }
     }
 }
@@ -280,9 +308,9 @@ impl Default for MinimizedConfig {
 pub struct ResourceConfig {
     /// What resolution a focused window's prefetch neighbors upload at.
     pub prefetch_vram: PrefetchVram,
-    /// Decay pipeline for an unfocused window.
-    pub unfocused: DecayPipeline,
-    /// Decay pipeline for a minimized window.
+    /// Decay timers for an unfocused window, by media kind.
+    pub unfocused: StateDecay,
+    /// Decay timers for a minimized window, by media kind.
     pub minimized: MinimizedConfig,
 }
 
@@ -290,23 +318,38 @@ impl Default for ResourceConfig {
     fn default() -> Self {
         Self {
             prefetch_vram: PrefetchVram::ViewRes,
-            unfocused: DecayPipeline {
-                demote_vram_after: Some(Duration::from_secs(15)),
-                drop_vram_after: None,
-                evict_ram: EvictPolicy::Dynamic,
-                evict_ram_min: Duration::from_secs(30),
-                evict_ram_max: Duration::from_secs(600),
-                max_decode_latency: Duration::from_millis(200),
+            unfocused: StateDecay {
+                still: DecayPipeline {
+                    demote_vram_after: Some(Duration::from_secs(15)),
+                    drop_vram_after: None,
+                    evict: EvictConfig {
+                        evict_ram: EvictPolicy::Dynamic,
+                        evict_ram_min: Duration::from_secs(30),
+                        evict_ram_max: Duration::from_secs(600),
+                        max_decode_latency: Duration::from_millis(200),
+                    },
+                },
+                // Unfocused animations stay in RAM: re-decoding every frame is
+                // costly and a refocus should be instant.
+                animated: EvictConfig::default(),
             },
             minimized: MinimizedConfig {
                 pause_video: true,
-                pipeline: DecayPipeline {
+                still: DecayPipeline {
                     demote_vram_after: None,
                     drop_vram_after: Some(Duration::ZERO),
-                    evict_ram: EvictPolicy::Dynamic,
-                    evict_ram_min: Duration::from_secs(15),
-                    evict_ram_max: Duration::from_secs(300),
-                    max_decode_latency: Duration::from_millis(200),
+                    evict: EvictConfig {
+                        evict_ram: EvictPolicy::Dynamic,
+                        evict_ram_min: Duration::from_secs(15),
+                        evict_ram_max: Duration::from_secs(300),
+                        max_decode_latency: Duration::from_millis(200),
+                    },
+                },
+                // Minimized animations free their RAM frames after a delay; a
+                // restore re-decodes them.
+                animated: EvictConfig {
+                    evict_ram: EvictPolicy::Fixed(Duration::from_secs(30)),
+                    ..EvictConfig::default()
                 },
             },
         }
@@ -643,23 +686,37 @@ mod tests {
             show_checkerboard: true,
             resource: ResourceConfig {
                 prefetch_vram: PrefetchVram::FullRes,
-                unfocused: DecayPipeline {
-                    demote_vram_after: Some(Duration::from_secs(20)),
-                    drop_vram_after: None,
-                    evict_ram: EvictPolicy::Fixed(Duration::from_secs(90)),
-                    evict_ram_min: Duration::from_secs(25),
-                    evict_ram_max: Duration::from_secs(500),
-                    max_decode_latency: Duration::from_millis(150),
+                unfocused: StateDecay {
+                    still: DecayPipeline {
+                        demote_vram_after: Some(Duration::from_secs(20)),
+                        drop_vram_after: None,
+                        evict: EvictConfig {
+                            evict_ram: EvictPolicy::Fixed(Duration::from_secs(90)),
+                            evict_ram_min: Duration::from_secs(25),
+                            evict_ram_max: Duration::from_secs(500),
+                            max_decode_latency: Duration::from_millis(150),
+                        },
+                    },
+                    animated: EvictConfig {
+                        evict_ram: EvictPolicy::Fixed(Duration::from_secs(45)),
+                        ..EvictConfig::default()
+                    },
                 },
                 minimized: MinimizedConfig {
                     pause_video: false,
-                    pipeline: DecayPipeline {
+                    still: DecayPipeline {
                         demote_vram_after: Some(Duration::from_secs(5)),
                         drop_vram_after: Some(Duration::from_secs(10)),
-                        evict_ram: EvictPolicy::Never,
-                        evict_ram_min: Duration::from_secs(10),
-                        evict_ram_max: Duration::from_secs(120),
-                        max_decode_latency: Duration::from_millis(250),
+                        evict: EvictConfig {
+                            evict_ram: EvictPolicy::Never,
+                            evict_ram_min: Duration::from_secs(10),
+                            evict_ram_max: Duration::from_secs(120),
+                            max_decode_latency: Duration::from_millis(250),
+                        },
+                    },
+                    animated: EvictConfig {
+                        evict_ram: EvictPolicy::Dynamic,
+                        ..EvictConfig::default()
                     },
                 },
             },
@@ -693,22 +750,26 @@ mod tests {
     #[test]
     fn timers_parse_human_durations_and_never() {
         let cfg = AppConfig::from_toml(
-            "[resource.unfocused]\ndemote_vram_after = \"500ms\"\ndrop_vram_after = \"never\"\n",
+            "[resource.unfocused.still]\ndemote_vram_after = \"500ms\"\ndrop_vram_after = \"never\"\n",
         );
         assert_eq!(
-            cfg.resource.unfocused.demote_vram_after,
+            cfg.resource.unfocused.still.demote_vram_after,
             Some(Duration::from_millis(500))
         );
-        assert_eq!(cfg.resource.unfocused.drop_vram_after, None);
+        assert_eq!(cfg.resource.unfocused.still.drop_vram_after, None);
     }
 
     #[test]
     fn evict_policy_parses_never_dynamic_and_a_duration() {
         let parse = |s: &str| {
-            AppConfig::from_toml(&format!("[resource.unfocused]\nevict_ram = \"{s}\"\n"))
-                .resource
-                .unfocused
-                .evict_ram
+            AppConfig::from_toml(&format!(
+                "[resource.unfocused.still]\nevict_ram = \"{s}\"\n"
+            ))
+            .resource
+            .unfocused
+            .still
+            .evict
+            .evict_ram
         };
         assert_eq!(parse("never"), EvictPolicy::Never);
         assert_eq!(parse("dynamic"), EvictPolicy::Dynamic);
@@ -717,7 +778,7 @@ mod tests {
 
     #[test]
     fn evict_delay_never_and_fixed() {
-        let mut p = DecayPipeline::default();
+        let mut p = EvictConfig::default();
         assert_eq!(p.evict_delay(Some(Duration::from_millis(10))), None);
         p.evict_ram = EvictPolicy::Fixed(Duration::from_secs(60));
         assert_eq!(
@@ -730,12 +791,11 @@ mod tests {
 
     #[test]
     fn evict_delay_dynamic_interpolates_and_keeps_slow_or_unknown() {
-        let p = DecayPipeline {
+        let p = EvictConfig {
             evict_ram: EvictPolicy::Dynamic,
             evict_ram_min: Duration::from_secs(30),
             evict_ram_max: Duration::from_secs(630),
             max_decode_latency: Duration::from_millis(200),
-            ..DecayPipeline::default()
         };
         // Instant decode -> min; halfway -> midpoint; at/over ceiling -> never.
         assert_eq!(

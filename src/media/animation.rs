@@ -15,8 +15,11 @@ use std::time::Duration;
 
 use super::{MediaError, THUMB_DIM, ThumbData};
 
-/// A fully decoded animation: all frames with their raw sub-rect data.
-#[derive(Debug, Clone)]
+/// A fully decoded animation: all frames with their raw sub-rect data. Deliberately
+/// not `Clone`: the decoded frames are heavy and always shared by `Arc`, never deep
+/// copied, so dropping `Clone` makes an accidental duplicate a compile error and
+/// leaves `Arc` refcount bumps the only way to share one decode across windows.
+#[derive(Debug)]
 pub struct AnimatedImage {
     /// Full canvas dimensions.
     pub width: u32,

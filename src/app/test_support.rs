@@ -43,6 +43,7 @@ pub(crate) fn empty_app() -> TestApp {
             config: AppConfig::default(),
             pipeline: Pipeline::new(None),
             store: crate::media::store::Store::default(),
+            anim_store: crate::media::store::Store::default(),
             thumbs: crate::media::cache::ImageCache::new(crate::app::state::THUMB_BUDGET_BYTES),
             disk_cache_size: None,
             associations_registered: false,

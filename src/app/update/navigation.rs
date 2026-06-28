@@ -16,7 +16,7 @@ use crate::nav::{self, Nav};
 use super::NavTarget;
 use super::media_tasks::{
     fire_exif, fire_load, fire_prefetch, fire_thumb, fire_thumbnailer, probe_size, show_loaded,
-    show_placeholder_or_clear,
+    show_placeholder_or_clear, try_start_shared_anim,
 };
 use super::video_flow::start_video;
 
@@ -518,8 +518,10 @@ pub(crate) fn complete_navigation(
             video_loop,
             hardware,
         ));
-    } else if let Some(anim_task) = viewer.anim_player.try_start_from_cache(&current) {
-        // Cached animation: blur stands in until frame 0 allocates.
+    } else if let Some(anim_task) = try_start_shared_anim(&mut shared.anim_store, viewer, &current)
+    {
+        // Animation resident in the shared store (this window or another): play it
+        // with no decode. The blur stands in until frame 0 allocates.
         viewer.pending_since = Some(Instant::now());
         show_placeholder_or_clear(viewer, &shared.thumbs, &current, zoom_mode, viewport);
         tasks.push(anim_task.map(Message::Anim));

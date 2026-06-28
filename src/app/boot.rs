@@ -42,6 +42,7 @@ pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Envelope>) {
         config,
         pipeline: Pipeline::new(disk_thumbs),
         store: crate::media::store::Store::default(),
+        anim_store: crate::media::store::Store::default(),
         thumbs: crate::media::cache::ImageCache::new(crate::app::state::THUMB_BUDGET_BYTES),
         disk_cache_size: None,
         associations_registered: crate::platform::file_associations_registered(),

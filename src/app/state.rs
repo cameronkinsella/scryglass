@@ -60,15 +60,11 @@ pub enum DisplayedImage {
         original_size: (u32, u32),
         rotated: Option<crate::ui::image_surface::Keepalive>,
     },
-    /// An animation frame. Like a still it draws a resident `texture` directly;
-    /// `handle` is kept only for clipboard copy. Animations are not store-backed
-    /// (their frames are transient, re-uploaded each tick), so the texture is
-    /// carried here rather than read from a store lease cell.
-    Animated {
-        handle: Handle,
-        texture: crate::ui::image_surface::Keepalive,
-        original_size: (u32, u32),
-    },
+    /// An animation. Like a still, its on-screen pixels are derived at render time
+    /// from the resource owner (here `anim_player`'s current frame texture, else
+    /// the thumbnail blur), so the display owns nothing and never blanks: eviction
+    /// just frees the frames and the view falls back to the thumbnail.
+    Animated { original_size: (u32, u32) },
     /// Live video, drawn by the GPU YUV surface. Carries dimensions for
     /// zoom and the info panel. The frame planes live on the viewer.
     Video { original_size: (u32, u32) },

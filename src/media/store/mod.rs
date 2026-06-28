@@ -21,6 +21,7 @@
 
 use std::cell::Cell as StdCell;
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -29,6 +30,7 @@ use std::time::Duration;
 
 use iced::widget::image::Handle;
 
+use crate::media::animation::AnimatedImage;
 use crate::media::pipeline::{Source, cache_key};
 use crate::ui::image_surface::{Keepalive, ResidentImage};
 
@@ -62,6 +64,44 @@ pub enum Tier {
 
 impl Tier {
     const ALL: [Tier; 4] = [Tier::Evicted, Tier::InRam, Tier::View, Tier::Full];
+}
+
+/// A kind of resident media the [`Store`] can own, dedup across windows, and decay.
+///
+/// The store provides the machinery generically: cross-window dedup by [`ImageKey`],
+/// refcounted demand, decode-on-demand, and free-when-unwanted. A medium provides
+/// only the resident data and the per-tier transitions that machinery drives. Each
+/// medium declares the highest tier it uses; the store clamps to it, so a tier a
+/// medium never reaches is statically unreachable rather than a runtime special case.
+pub trait Medium {
+    /// The resident state at rest, including its tier (`Default` is the evicted state).
+    type State: Default;
+    /// The shared resource a holder reads from the cell each frame to display it.
+    type Shared;
+    /// The decoded RAM form a decode job produces.
+    type Ram: Clone;
+    /// The GPU resource an upload job produces; an uninhabited type for a medium that
+    /// never uploads (it then has no tier above `InRam`, so a mint cannot occur).
+    type Minted;
+
+    /// The highest tier this medium uses. A request above it is clamped down.
+    const MAX_TIER: Tier;
+
+    /// The tier of a resident state.
+    fn tier(state: &Self::State) -> Tier;
+    /// The resource a holder displays, if the state currently holds one.
+    fn shared(state: &Self::State) -> Option<Arc<Self::Shared>>;
+    /// The RAM source, if resident above eviction (a clone is a refcount bump).
+    fn ram(state: &Self::State) -> Option<Self::Ram>;
+    /// Free a state down to `target`, never producing a tier above its input.
+    fn demote(state: Self::State, target: Tier) -> Self::State;
+    /// The state a fresh decode lands in: RAM resident, no GPU resource yet.
+    fn from_ram(ram: Self::Ram) -> Self::State;
+    /// Install an uploaded resource at `tier`, returning the new state. Unreachable
+    /// when `Minted` is uninhabited.
+    fn mint(state: Self::State, tier: Tier, minted: Self::Minted) -> Self::State;
+    /// The measured decode time of the resident RAM, for the dynamic evict delay.
+    fn decode_time(state: &Self::State) -> Option<Duration>;
 }
 
 // --- typestate tier values: forward-release transitions consume self; the
@@ -124,7 +164,9 @@ impl RamImage {
 /// type, so the typestate is erased into this enum between transitions; the
 /// consuming-`self` safety still lives on the values above, where the transitions
 /// are written.
+#[derive(Default)]
 pub enum CellState {
+    #[default]
     Evicted,
     InRam(RamImage),
     View(ViewTexture),
@@ -162,25 +204,166 @@ impl CellState {
     }
 }
 
-/// One swappable texture slot per image, shared (`Arc`) by every holder. The store
-/// swaps it once per tier change — O(1), with no fan-out over holders — and every
-/// holder reads it at render time. Empty while the image is still decoding, so the
-/// display falls back to its thumbnail blur (never a black frame).
-#[derive(Default)]
-pub struct TextureCell {
-    texture: arc_swap::ArcSwapOption<ResidentImage>,
-}
+/// The still-image medium: a single decoded raster uploaded to a tiered GPU texture.
+/// It uses all four tiers (`Evicted → InRam → View → Full`); demote drops the texture
+/// back to RAM, evict frees the RAM. Its decode time feeds the dynamic evict delay.
+pub struct Still;
 
-impl TextureCell {
-    /// The current shared texture, or `None` while pending / not resident.
-    pub fn load(&self) -> Option<Keepalive> {
-        self.texture.load_full()
+impl Medium for Still {
+    type State = CellState;
+    type Shared = ResidentImage;
+    type Ram = RamImage;
+    type Minted = Keepalive;
+
+    const MAX_TIER: Tier = Tier::Full;
+
+    fn tier(state: &CellState) -> Tier {
+        state.tier()
     }
 
-    /// Install (or clear) the shared texture. The previous one frees once its last
+    fn shared(state: &CellState) -> Option<Keepalive> {
+        state.texture()
+    }
+
+    fn ram(state: &CellState) -> Option<RamImage> {
+        state.ram()
+    }
+
+    fn demote(state: CellState, target: Tier) -> CellState {
+        demote_to(state, target)
+    }
+
+    fn from_ram(ram: RamImage) -> CellState {
+        CellState::InRam(ram)
+    }
+
+    fn mint(state: CellState, tier: Tier, texture: Keepalive) -> CellState {
+        // The RAM must still be resident to upload from; if it was evicted between
+        // the decode and this mint, keep the state as-is and a later request re-decodes.
+        match state.ram() {
+            Some(ram) if tier == Tier::Full => CellState::Full(FullTexture { ram, texture }),
+            Some(ram) => CellState::View(ViewTexture { ram, texture }),
+            None => state,
+        }
+    }
+
+    fn decode_time(state: &CellState) -> Option<Duration> {
+        match state {
+            CellState::Full(f) => f.ram.decode_time,
+            CellState::View(v) => v.ram.decode_time,
+            CellState::InRam(r) => r.decode_time,
+            CellState::Evicted => None,
+        }
+    }
+}
+
+/// The decoded frames of an animation in RAM, plus how long the decode took (for
+/// the dynamic evict delay). A clone is a refcount bump on the shared frames, so a
+/// second window displays the same decode with no work of its own.
+#[derive(Clone)]
+pub struct AnimRam {
+    pub frames: Arc<AnimatedImage>,
+    pub decode_time: Option<Duration>,
+}
+
+/// An animation's resident state at rest. Unlike a still it has no GPU tier: every
+/// window composites and uploads its own frames at its own rate, so the store owns
+/// only the shared decoded RAM, which is present (`InRam`) or evicted.
+#[derive(Default)]
+pub enum AnimState {
+    #[default]
+    Evicted,
+    InRam(AnimRam),
+}
+
+/// The animated-image medium: decoded frames shared in RAM across windows and
+/// evicted as a unit, with no GPU tier. It lives in the `Evicted`/`InRam` band, so
+/// `Minted = Infallible` makes an upload (and any tier above `InRam`) unrepresentable.
+pub struct Anim;
+
+impl Medium for Anim {
+    type State = AnimState;
+    type Shared = AnimatedImage;
+    type Ram = AnimRam;
+    type Minted = Infallible;
+
+    const MAX_TIER: Tier = Tier::InRam;
+
+    fn tier(state: &AnimState) -> Tier {
+        match state {
+            AnimState::Evicted => Tier::Evicted,
+            AnimState::InRam(_) => Tier::InRam,
+        }
+    }
+
+    fn shared(state: &AnimState) -> Option<Arc<AnimatedImage>> {
+        match state {
+            AnimState::InRam(r) => Some(r.frames.clone()),
+            AnimState::Evicted => None,
+        }
+    }
+
+    fn ram(state: &AnimState) -> Option<AnimRam> {
+        match state {
+            AnimState::InRam(r) => Some(r.clone()),
+            AnimState::Evicted => None,
+        }
+    }
+
+    fn demote(state: AnimState, target: Tier) -> AnimState {
+        // The only tier below InRam is Evicted, so a demote either keeps the frames
+        // or frees them; there is no GPU tier in between to drop to.
+        if target < Tier::InRam {
+            AnimState::Evicted
+        } else {
+            state
+        }
+    }
+
+    fn from_ram(ram: AnimRam) -> AnimState {
+        AnimState::InRam(ram)
+    }
+
+    fn mint(_state: AnimState, _tier: Tier, minted: Infallible) -> AnimState {
+        // An animation never uploads through the store, so the store never mints
+        // it: `Infallible` is uninhabited, so this match has no arms to write.
+        match minted {}
+    }
+
+    fn decode_time(state: &AnimState) -> Option<Duration> {
+        match state {
+            AnimState::InRam(r) => r.decode_time,
+            AnimState::Evicted => None,
+        }
+    }
+}
+
+/// One swappable texture slot per image, shared (`Arc`) by every holder. The store
+/// swaps it once per tier change (O(1), with no fan-out over holders), and every
+/// holder reads it at render time. Empty while the image is still decoding, so the
+/// display falls back to its thumbnail blur (never a black frame).
+pub struct Cell<T> {
+    slot: arc_swap::ArcSwapOption<T>,
+}
+
+impl<T> Default for Cell<T> {
+    fn default() -> Self {
+        Self {
+            slot: arc_swap::ArcSwapOption::default(),
+        }
+    }
+}
+
+impl<T> Cell<T> {
+    /// The current shared resource, or `None` while pending / not resident.
+    pub fn load(&self) -> Option<Arc<T>> {
+        self.slot.load_full()
+    }
+
+    /// Install (or clear) the shared resource. The previous one frees once its last
     /// clone drops.
-    pub fn store(&self, texture: Option<Keepalive>) {
-        self.texture.store(texture);
+    pub fn store(&self, value: Option<Arc<T>>) {
+        self.slot.store(value);
     }
 }
 
@@ -215,25 +398,29 @@ impl TierCounters {
 /// Async work the store needs the app to run; the result returns via
 /// [`Store::on_decoded`]/[`Store::on_minted`]. The store itself does no I/O or GPU
 /// work, so its decisions stay pure and unit-testable.
-pub enum Job {
+pub enum Job<M: Medium = Still> {
     /// Decode `path` from `source` to RAM, then call [`Store::on_decoded`].
     Decode {
         key: ImageKey,
         path: PathBuf,
         source: Source,
     },
-    /// Upload the held `ram` for `key` at `tier` (full, or downscaled to view),
-    /// then call [`Store::on_minted`].
+    /// Upload the held `ram` for `key` at `tier`, then call [`Store::on_minted`].
     Upload {
         key: ImageKey,
         tier: Tier,
-        ram: RamImage,
+        ram: M::Ram,
     },
 }
 
-#[derive(Default)]
-pub struct StoreOutcome {
-    pub jobs: Vec<Job>,
+pub struct StoreOutcome<M: Medium = Still> {
+    pub jobs: Vec<Job<M>>,
+}
+
+impl<M: Medium> Default for StoreOutcome<M> {
+    fn default() -> Self {
+        Self { jobs: Vec::new() }
+    }
 }
 
 /// Keys whose demand changed via a `Lease` drop, drained by [`Store::pump`]. A drop
@@ -243,17 +430,17 @@ type Dirty = Arc<Mutex<Vec<ImageKey>>>;
 
 /// A holder's claim on an image at a tier. Held in window state (a display slot or a
 /// prefetch slot). Dropping it lowers the demand by one, RAII, with no store call.
-pub struct Lease {
+pub struct Lease<M: Medium = Still> {
     key: ImageKey,
     want: StdCell<Tier>,
     counters: Arc<TierCounters>,
-    cell: Arc<TextureCell>,
+    cell: Arc<Cell<M::Shared>>,
     dirty: Dirty,
 }
 
-impl Lease {
-    /// The shared texture slot to read at render time (or `None` while pending).
-    pub fn texture(&self) -> Option<Keepalive> {
+impl<M: Medium> Lease<M> {
+    /// The shared resource to read at render time (or `None` while pending).
+    pub fn texture(&self) -> Option<Arc<M::Shared>> {
         self.cell.load()
     }
 
@@ -263,7 +450,7 @@ impl Lease {
     }
 }
 
-impl Drop for Lease {
+impl<M: Medium> Drop for Lease<M> {
     fn drop(&mut self) {
         self.counters.dec(self.want.get());
         if let Ok(mut dirty) = self.dirty.lock() {
@@ -272,12 +459,12 @@ impl Drop for Lease {
     }
 }
 
-struct Entry {
+struct Entry<M: Medium> {
     counters: Arc<TierCounters>,
-    /// Holders own the strong `Arc<TextureCell>`; the entry only borrows it. A dead
+    /// Holders own the strong `Arc<Cell<_>>`; the entry only borrows it. A dead
     /// weak therefore means no holder is leasing this image right now.
-    cell: Weak<TextureCell>,
-    state: CellState,
+    cell: Weak<Cell<M::Shared>>,
+    state: M::State,
     /// How to re-decode this image, kept so any window's request can drive it.
     path: PathBuf,
     source: Source,
@@ -286,22 +473,22 @@ struct Entry {
     pending: Option<Tier>,
 }
 
-impl Entry {
+impl<M: Medium> Entry<M> {
     fn is_leased(&self) -> bool {
         self.cell.strong_count() > 0
     }
 }
 
-/// The single texture-lifecycle store: the one owner of every still image's tier,
+/// The single resource-lifecycle store: the one owner of every resident image's tier,
 /// keyed by [`ImageKey`]. Holders talk to it through [`Lease`]s; it answers with the
 /// async [`Job`]s the app should run. All decisions are O(1) (a hash lookup and the
 /// fixed four-slot `max_wanted`); nothing iterates windows or holders.
-pub struct Store {
-    entries: HashMap<ImageKey, Entry>,
+pub struct Store<M: Medium = Still> {
+    entries: HashMap<ImageKey, Entry<M>>,
     dirty: Dirty,
 }
 
-impl Default for Store {
+impl<M: Medium> Default for Store<M> {
     fn default() -> Self {
         Self {
             entries: HashMap::new(),
@@ -310,21 +497,23 @@ impl Default for Store {
     }
 }
 
-impl Store {
+impl<M: Medium> Store<M> {
     /// A holder claims `key` at `want`. Returns a [`Lease`] (its `texture()` is
-    /// `None` until the tier is resident) and any work to start. O(1).
+    /// `None` until the tier is resident) and any work to start. O(1). A `want`
+    /// above the medium's `MAX_TIER` is clamped down to it.
     pub fn request(
         &mut self,
         key: ImageKey,
         path: PathBuf,
         source: Source,
         want: Tier,
-    ) -> (Lease, StoreOutcome) {
+    ) -> (Lease<M>, StoreOutcome<M>) {
+        let want = want.min(M::MAX_TIER);
         let dirty = self.dirty.clone();
         let entry = self.entries.entry(key.clone()).or_insert_with(|| Entry {
             counters: Arc::new(TierCounters::default()),
             cell: Weak::new(),
-            state: CellState::Evicted,
+            state: M::State::default(),
             path,
             source,
             pending: None,
@@ -332,8 +521,8 @@ impl Store {
         entry.counters.inc(want);
         // Reuse the live shared cell, or seed a fresh one with whatever is resident.
         let cell = entry.cell.upgrade().unwrap_or_else(|| {
-            let cell = Arc::new(TextureCell::default());
-            cell.store(entry.state.texture());
+            let cell = Arc::new(Cell::default());
+            cell.store(M::shared(&entry.state));
             entry.cell = Arc::downgrade(&cell);
             cell
         });
@@ -348,8 +537,10 @@ impl Store {
         (lease, outcome)
     }
 
-    /// Lower (or raise) a holder's demand in place, e.g. a decay step. O(1).
-    pub fn retarget(&mut self, lease: &Lease, to: Tier) -> StoreOutcome {
+    /// Lower (or raise) a holder's demand in place, e.g. a decay step. O(1). A `to`
+    /// above the medium's `MAX_TIER` is clamped down to it.
+    pub fn retarget(&mut self, lease: &Lease<M>, to: Tier) -> StoreOutcome<M> {
+        let to = to.min(M::MAX_TIER);
         lease.counters.dec(lease.want.get());
         lease.counters.inc(to);
         lease.want.set(to);
@@ -357,11 +548,18 @@ impl Store {
     }
 
     /// A decode finished: the image is now in RAM. Drive it on toward demand.
-    pub fn on_decoded(&mut self, key: ImageKey, ram: RamImage) -> StoreOutcome {
+    pub fn on_decoded(&mut self, key: ImageKey, ram: M::Ram) -> StoreOutcome<M> {
         if let Some(entry) = self.entries.get_mut(&key) {
             entry.pending = None;
-            if matches!(entry.state, CellState::Evicted) {
-                entry.state = CellState::InRam(ram);
+            if M::tier(&entry.state) == Tier::Evicted {
+                entry.state = M::from_ram(ram);
+                // Refresh the shared cell: a medium whose resident RAM is itself the
+                // displayed resource (no upload tier) becomes visible right here. For
+                // a medium that displays an uploaded texture this is `None` until the
+                // upload lands, so the store is a no-op for it.
+                if let Some(cell) = entry.cell.upgrade() {
+                    cell.store(M::shared(&entry.state));
+                }
             }
         }
         self.reconcile(&key)
@@ -371,7 +569,7 @@ impl Store {
     /// (`retry` = keep the entry and re-emit a decode if still wanted) or it
     /// failed / turned out to be an animation (`retry` false = forget it). Clears
     /// the in-flight marker either way so the store is not stuck pending.
-    pub fn on_decode_failed(&mut self, key: &ImageKey, retry: bool) -> StoreOutcome {
+    pub fn on_decode_failed(&mut self, key: &ImageKey, retry: bool) -> StoreOutcome<M> {
         if let Some(entry) = self.entries.get_mut(key) {
             entry.pending = None;
         }
@@ -383,19 +581,13 @@ impl Store {
         }
     }
 
-    /// An upload finished: install the texture at `tier` and swap the shared cell.
-    pub fn on_minted(&mut self, key: ImageKey, tier: Tier, texture: Keepalive) -> StoreOutcome {
+    /// An upload finished: install the resource at `tier` and swap the shared cell.
+    pub fn on_minted(&mut self, key: ImageKey, tier: Tier, minted: M::Minted) -> StoreOutcome<M> {
         if let Some(entry) = self.entries.get_mut(&key) {
             entry.pending = None;
-            let ram = entry.state.ram();
-            if let Some(ram) = ram {
-                entry.state = match tier {
-                    Tier::Full => CellState::Full(FullTexture { ram, texture }),
-                    _ => CellState::View(ViewTexture { ram, texture }),
-                };
-                if let Some(cell) = entry.cell.upgrade() {
-                    cell.store(entry.state.texture());
-                }
+            entry.state = M::mint(std::mem::take(&mut entry.state), tier, minted);
+            if let Some(cell) = entry.cell.upgrade() {
+                cell.store(M::shared(&entry.state));
             }
         }
         self.reconcile(&key)
@@ -413,8 +605,8 @@ impl Store {
     /// A clone is a refcount bump on the handle. The display reads its `handle`
     /// and `original_size` from here (the texture comes from the lease's cell),
     /// so a second window can show a resident image with no decode of its own.
-    pub fn ram(&self, key: &ImageKey) -> Option<RamImage> {
-        self.entries.get(key).and_then(|e| e.state.ram())
+    pub fn ram(&self, key: &ImageKey) -> Option<M::Ram> {
+        self.entries.get(key).and_then(|e| M::ram(&e.state))
     }
 
     /// The image's current resident tier, or `Evicted` if the store is not
@@ -422,7 +614,7 @@ impl Store {
     pub fn tier(&self, key: &ImageKey) -> Tier {
         self.entries
             .get(key)
-            .map_or(Tier::Evicted, |e| e.state.tier())
+            .map_or(Tier::Evicted, |e| M::tier(&e.state))
     }
 
     /// The measured read + decode time for this image, feeding the dynamic
@@ -430,18 +622,13 @@ impl Store {
     /// (e.g. reused from another window's decode).
     pub fn decode_time(&self, key: &ImageKey) -> Option<Duration> {
         let entry = self.entries.get(key)?;
-        match &entry.state {
-            CellState::Full(f) => f.ram.decode_time,
-            CellState::View(v) => v.ram.decode_time,
-            CellState::InRam(r) => r.decode_time,
-            CellState::Evicted => None,
-        }
+        M::decode_time(&entry.state)
     }
 
     /// An upload could not reach the GPU (the upload thread was not ready). Clear
     /// the in-flight marker and reconcile, so the next pass re-attempts the mint
     /// if the tier is still wanted.
-    pub fn on_mint_failed(&mut self, key: &ImageKey) -> StoreOutcome {
+    pub fn on_mint_failed(&mut self, key: &ImageKey) -> StoreOutcome<M> {
         if let Some(entry) = self.entries.get_mut(key) {
             entry.pending = None;
         }
@@ -449,7 +636,7 @@ impl Store {
     }
 
     /// Reconcile every image whose demand changed via a dropped lease. O(keys dirty).
-    pub fn pump(&mut self) -> StoreOutcome {
+    pub fn pump(&mut self) -> StoreOutcome<M> {
         let keys = match self.dirty.lock() {
             Ok(mut d) => std::mem::take(&mut *d),
             Err(_) => return StoreOutcome::default(),
@@ -464,14 +651,19 @@ impl Store {
     /// Bring one image's tier in line with `max_wanted`: free downward right away
     /// (synchronous typestate transitions), or emit the one job to acquire upward.
     /// The whole "which tier" decision is this `max_wanted` compare.
-    fn reconcile(&mut self, key: &ImageKey) -> StoreOutcome {
+    fn reconcile(&mut self, key: &ImageKey) -> StoreOutcome<M> {
         let Some(entry) = self.entries.get_mut(key) else {
             return StoreOutcome::default();
         };
         let want = entry.counters.max_wanted();
-        let have = entry.state.tier();
+        let have = M::tier(&entry.state);
 
         if want == have {
+            // A decode cancelled after its last lease dropped leaves an unleased
+            // evicted entry that the demote path below never sees. Reap it here.
+            if have == Tier::Evicted && entry.pending.is_none() && !entry.is_leased() {
+                self.entries.remove(key);
+            }
             return StoreOutcome::default();
         }
 
@@ -482,13 +674,13 @@ impl Store {
             if want == Tier::View && have == Tier::Full {
                 return self.acquire(key, Tier::View);
             }
-            let state = std::mem::replace(&mut entry.state, CellState::Evicted);
-            entry.state = demote_to(state, want);
+            let state = std::mem::take(&mut entry.state);
+            entry.state = M::demote(state, want);
             if let Some(cell) = entry.cell.upgrade() {
-                cell.store(entry.state.texture());
+                cell.store(M::shared(&entry.state));
             }
             // A fully-evicted, unleased image is forgotten (a later request re-decodes).
-            if matches!(entry.state, CellState::Evicted) && !entry.is_leased() {
+            if M::tier(&entry.state) == Tier::Evicted && !entry.is_leased() {
                 self.entries.remove(key);
             }
             return StoreOutcome::default();
@@ -500,14 +692,17 @@ impl Store {
 
     /// Emit the single job to move an image up to `target` (decode if evicted, else
     /// upload from the RAM it already holds), unless one is already in flight.
-    fn acquire(&mut self, key: &ImageKey, target: Tier) -> StoreOutcome {
+    fn acquire(&mut self, key: &ImageKey, target: Tier) -> StoreOutcome<M> {
         let Some(entry) = self.entries.get_mut(key) else {
             return StoreOutcome::default();
         };
-        if entry.pending.is_some_and(|p| p >= target) {
+        // One job per image at a time. A decode fills RAM whatever tier asked for
+        // it, and every completion reconciles again, so demand that rose mid-flight
+        // is picked up by the completion instead of a duplicate job here.
+        if entry.pending.is_some() {
             return StoreOutcome::default();
         }
-        let job = match entry.state.ram() {
+        let job = match M::ram(&entry.state) {
             None => Job::Decode {
                 key: key.clone(),
                 path: entry.path.clone(),
@@ -571,7 +766,7 @@ mod tests {
         counters.inc(Tier::View);
         assert_eq!(counters.max_wanted(), Tier::Full);
 
-        // The focused window leaves: it falls to the next demand, not below it —
+        // The focused window leaves: it falls to the next demand, not below it,
         // "demote only once every holder permits", straight from the counts.
         counters.dec(Tier::Full);
         assert_eq!(counters.max_wanted(), Tier::View);
@@ -610,7 +805,7 @@ mod tests {
 
     #[test]
     fn texture_cell_starts_empty_and_swaps_in_place() {
-        let cell = TextureCell::default();
+        let cell = Cell::<ResidentImage>::default();
         assert!(cell.load().is_none()); // pending -> the display shows its thumb
 
         cell.store(Some(crate::ui::image_surface::test_keepalive()));
@@ -659,7 +854,7 @@ mod tests {
 
     #[test]
     fn an_image_demotes_only_after_every_holder_releases_it() {
-        let mut store = Store::default();
+        let mut store: Store = Store::default();
         let (a, _) = store.request(key(), "a.png".into(), Source::Fs, Tier::Full);
         let (b, _) = store.request(key(), "a.png".into(), Source::Fs, Tier::Full);
         store.on_decoded(key(), ram());
@@ -673,7 +868,7 @@ mod tests {
         assert!(b.texture().is_some());
 
         // The last holder lets go: now nobody wants it, so it is evicted and a fresh
-        // request has to decode again — proving the texture was actually released.
+        // request has to decode again, proving the texture was actually released.
         drop(b);
         let _ = store.pump();
         let (_c, out) = store.request(key(), "a.png".into(), Source::Fs, Tier::Full);
@@ -699,9 +894,179 @@ mod tests {
     fn a_second_window_on_a_resident_image_needs_no_decode() {
         let (mut store, _held) = resident_full();
         // A second window requesting the same key shares the resident texture with
-        // no new work — the keyed entry is the cross-window dedup.
+        // no new work, the keyed entry is the cross-window dedup.
         let (lease, out) = store.request(key(), "a.png".into(), Source::Fs, Tier::Full);
         assert!(out.jobs.is_empty());
         assert!(lease.texture().is_some());
+    }
+
+    // --- The Anim medium runs through the very same machinery as Still, proving an
+    // animation's decoded RAM and decay are shared and refcounted across windows. ---
+
+    fn anim_key() -> ImageKey {
+        ImageKey::new(&Source::Fs, Path::new("a.gif"))
+    }
+
+    fn anim_ram() -> AnimRam {
+        AnimRam {
+            frames: Arc::new(AnimatedImage {
+                width: 2,
+                height: 2,
+                frames: Vec::new(),
+                thumbnail: None,
+            }),
+            decode_time: None,
+        }
+    }
+
+    #[test]
+    fn an_animation_decodes_into_shared_ram_then_evicts() {
+        let mut store: Store<Anim> = Store::default();
+        let (lease, out) = store.request(anim_key(), "a.gif".into(), Source::Fs, Tier::InRam);
+        assert!(matches!(out.jobs.as_slice(), [Job::Decode { .. }]));
+        assert!(lease.texture().is_none()); // decoding -> the view shows its thumb
+
+        // InRam is the medium's top tier, so the decode resolves the demand outright:
+        // no upload follows, and the shared frames are immediately what the view reads.
+        let out = store.on_decoded(anim_key(), anim_ram());
+        assert!(out.jobs.is_empty());
+        assert!(lease.texture().is_some());
+
+        // A decay evict frees the frames while the holder lives on, so the view falls
+        // back to its thumbnail, the same shape a still takes when its cell empties.
+        let out = store.retarget(&lease, Tier::Evicted);
+        assert!(out.jobs.is_empty());
+        assert!(lease.texture().is_none());
+    }
+
+    #[test]
+    fn an_animation_request_is_clamped_below_the_gpu_tiers() {
+        // A holder asking for Full is clamped to the medium's InRam ceiling: the store
+        // decodes to RAM and stops, never emitting an upload (it has no GPU tier).
+        let mut store: Store<Anim> = Store::default();
+        let (lease, _) = store.request(anim_key(), "a.gif".into(), Source::Fs, Tier::Full);
+        let out = store.on_decoded(anim_key(), anim_ram());
+        assert!(out.jobs.is_empty());
+        assert_eq!(store.tier(&anim_key()), Tier::InRam);
+        assert!(lease.texture().is_some());
+    }
+
+    #[test]
+    fn a_second_window_shares_one_animation_decode() {
+        let mut store: Store<Anim> = Store::default();
+        let (a, _) = store.request(anim_key(), "a.gif".into(), Source::Fs, Tier::InRam);
+        store.on_decoded(anim_key(), anim_ram());
+
+        // The second window reuses the decode with no new work and reads the very same
+        // frames in RAM: one decode, shared by pointer, not copied per window.
+        let (b, out) = store.request(anim_key(), "a.gif".into(), Source::Fs, Tier::InRam);
+        assert!(out.jobs.is_empty());
+        let frames_a = a.texture().unwrap();
+        let frames_b = b.texture().unwrap();
+        assert!(Arc::ptr_eq(&frames_a, &frames_b));
+    }
+
+    #[test]
+    fn dropping_every_holder_frees_the_animation() {
+        let mut store: Store<Anim> = Store::default();
+        let (a, _) = store.request(anim_key(), "a.gif".into(), Source::Fs, Tier::InRam);
+        store.on_decoded(anim_key(), anim_ram());
+        assert!(store.ram(&anim_key()).is_some());
+
+        // The last holder lets go: nobody wants the frames, so they are evicted and a
+        // fresh request has to decode again (RAII, the same as a still).
+        drop(a);
+        let _ = store.pump();
+        let (_b, out) = store.request(anim_key(), "a.gif".into(), Source::Fs, Tier::InRam);
+        assert!(matches!(out.jobs.as_slice(), [Job::Decode { .. }]));
+    }
+
+    #[test]
+    fn a_redundant_decode_is_discarded_not_duplicated() {
+        let mut store: Store<Anim> = Store::default();
+        let (lease, _) = store.request(anim_key(), "a.gif".into(), Source::Fs, Tier::InRam);
+
+        // The first decode lands and becomes the one resident allocation.
+        let first = anim_ram();
+        let first_frames = first.frames.clone();
+        store.on_decoded(anim_key(), first);
+
+        // A second decode of the same image produces a genuinely distinct allocation
+        // (a re-decode, or a concurrent first-open race). It must not be installed.
+        let second = anim_ram();
+        let second_frames = second.frames.clone();
+        assert!(!Arc::ptr_eq(&first_frames, &second_frames));
+        store.on_decoded(anim_key(), second);
+
+        // The store kept the original and threw the duplicate away: the resident frames
+        // and the holder's lease both still point at the first allocation, not a copy.
+        let resident = store.ram(&anim_key()).unwrap().frames;
+        assert!(Arc::ptr_eq(&resident, &first_frames));
+        assert!(!Arc::ptr_eq(&resident, &second_frames));
+        assert!(Arc::ptr_eq(&lease.texture().unwrap(), &first_frames));
+    }
+
+    #[test]
+    fn escalating_a_pending_decode_fires_no_second_decode() {
+        let mut store: Store = Store::default();
+        let (lease, out) = store.request(key(), "a.png".into(), Source::Fs, Tier::View);
+        assert!(matches!(out.jobs.as_slice(), [Job::Decode { .. }]));
+
+        // Stepping onto a prefetched neighbor raises demand mid-decode. The
+        // in-flight decode already yields full RAM, so no second read starts.
+        let out = store.retarget(&lease, Tier::Full);
+        assert!(out.jobs.is_empty());
+
+        // The one decode lands and its completion drives straight to the
+        // escalated tier.
+        let out = store.on_decoded(key(), ram());
+        assert!(matches!(
+            out.jobs.as_slice(),
+            [Job::Upload {
+                tier: Tier::Full,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn escalating_a_pending_upload_defers_to_its_completion() {
+        let mut store: Store = Store::default();
+        let (lease, _) = store.request(key(), "a.png".into(), Source::Fs, Tier::View);
+        let out = store.on_decoded(key(), ram());
+        assert!(matches!(
+            out.jobs.as_slice(),
+            [Job::Upload {
+                tier: Tier::View,
+                ..
+            }]
+        ));
+
+        // Demand rises while the view upload is in flight: nothing new fires.
+        let out = store.retarget(&lease, Tier::Full);
+        assert!(out.jobs.is_empty());
+
+        // The view mint lands, and its reconcile emits the one full upload.
+        let out = store.on_minted(key(), Tier::View, keep());
+        assert!(matches!(
+            out.jobs.as_slice(),
+            [Job::Upload {
+                tier: Tier::Full,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn a_cancelled_decode_reaps_the_unleased_entry() {
+        let mut store: Store = Store::default();
+        let (lease, _) = store.request(key(), "a.png".into(), Source::Fs, Tier::Full);
+
+        // Navigation sheds the lease and cancels the decode before it lands.
+        drop(lease);
+        let _ = store.pump();
+        let out = store.on_decode_failed(&key(), true);
+        assert!(out.jobs.is_empty());
+        assert!(store.entries.is_empty());
     }
 }

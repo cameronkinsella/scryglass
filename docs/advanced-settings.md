@@ -93,18 +93,27 @@ use the same controls, with different defaults.
 |---|---|---|---|
 | `prefetch_vram` | `"full-res"` \| `"view-res"` \| `"none"` | `"view-res"` | What resolution a focused window's prefetched neighbors keep in VRAM. `full-res` is instant-crisp on navigation but heavy; `none` keeps them in RAM only. |
 
-### `[resource.unfocused]` and `[resource.minimized]`
+### `[resource.unfocused.still]` / `[resource.unfocused.animated]` and `[resource.minimized.still]` / `[resource.minimized.animated]`
 
-| Key | Type | Default (unfocused / minimized) | Effect |
+Each backgrounded state (**unfocused**, **minimized**) decays stills and animations
+independently, so it has a `still` and an `animated` sub-table. The `still` table
+takes all the keys below. An **animation** has no governed VRAM tier, so its
+`animated` table takes **only** the eviction keys (`evict_ram`, `evict_ram_min`,
+`evict_ram_max`, `max_decode_latency`) — `demote_vram_after` and `drop_vram_after`
+are not valid there. Re-decoding an animation is costly, so the `animated` defaults
+keep frames in RAM longer than stills: `evict_ram = "never"` when unfocused,
+`evict_ram = "30s"` when minimized.
+
+| Key | Type | Default (still: unfocused / minimized) | Effect |
 |---|---|---|---|
-| `demote_vram_after` | duration \| `"never"` | `"15s"` / `"never"` | Demote the on-screen image from full-res to view-res VRAM (and drop the prefetch look-ahead). |
-| `drop_vram_after` | duration \| `"never"` | `"never"` / `"0s"` | Drop the on-screen image's VRAM entirely (it falls back to its thumbnail until you return). |
+| `demote_vram_after` | duration \| `"never"` | `"15s"` / `"never"` | **(still only)** Demote the on-screen image from full-res to view-res VRAM (and drop the prefetch look-ahead). |
+| `drop_vram_after` | duration \| `"never"` | `"never"` / `"0s"` | **(still only)** Drop the on-screen image's VRAM entirely (it falls back to its thumbnail until you return). |
 | `evict_ram` | `"never"` \| duration \| `"dynamic"` | `"dynamic"` / `"dynamic"` | When to evict the full-resolution copy from RAM (re-decoded from disk on return). A duration is a fixed delay; `dynamic` decides per image from how long it took to decode (see below); `never` always keeps it. |
 | `evict_ram_min` | duration | `"30s"` / `"15s"` | `dynamic` only: the evict delay for an image that decodes instantly. |
 | `evict_ram_max` | duration | `"10m"` / `"5m"` | `dynamic` only: the evict delay for an image right at the latency ceiling. |
 | `max_decode_latency` | duration | `"200ms"` / `"200ms"` | `dynamic` only: an image that took longer than this to decode (read + decode) is never evicted, so slow storage (a NAS) stays resident. |
 
-`[resource.minimized]` additionally has:
+`[resource.minimized]` additionally has, at the state level (not per media kind):
 
 | Key | Type | Default | Effect |
 |---|---|---|---|

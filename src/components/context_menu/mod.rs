@@ -73,10 +73,10 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                         .ram(&key)
                         .map(|ram| tokio::task::spawn_blocking(move || copy_bitmap(&ram.handle)))
                 }
-                DisplayedImage::Animated { handle, .. } => {
-                    let handle = handle.clone();
-                    Some(tokio::task::spawn_blocking(move || copy_bitmap(&handle)))
-                }
+                DisplayedImage::Animated { .. } => viewer
+                    .anim_player
+                    .current_handle()
+                    .map(|handle| tokio::task::spawn_blocking(move || copy_bitmap(&handle))),
                 DisplayedImage::Video { .. } => viewer.video.frame.clone().map(|frame| {
                     tokio::task::spawn_blocking(move || {
                         let (w, h, rgba) = frame.to_rgba();

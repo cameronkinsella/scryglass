@@ -46,11 +46,11 @@ use std::time::Duration;
 
 use iced::{Size, Task};
 
-use super::{fire_load, fire_prefetch, run_jobs};
-use crate::app::state::Viewer;
+use super::{fire_load, fire_prefetch, run_jobs, try_start_shared_anim};
+use crate::app::state::{DisplayedImage, Viewer};
 use crate::app::viewer_math::{clamp_pan, compute_zoom};
 use crate::app::{Message as AppMessage, Shared, Window, recalc_viewport};
-use crate::config::PrefetchVram;
+use crate::config::{EvictConfig, PrefetchVram};
 use crate::media::pipeline::{Lane, Pipeline};
 use crate::media::store::{ImageKey, Tier};
 
@@ -244,14 +244,30 @@ fn run_decay_stage(
             retarget_displayed(viewer, shared, Tier::InRam, &pipeline, view)
         }
         DecayStage::EvictRam => {
-            // Free the RAM too. Shed any remaining look-ahead, then lower the
-            // on-screen image's demand to evicted: the store frees its RAM once no
-            // window wants it higher. The display keeps its lease, so it still
-            // reads the shared cell. While another window holds the image it stays
-            // sharp; once the last holder lets go the cell empties and the view
-            // falls back to the blur. A return re-decodes.
+            let is_anim = matches!(viewer.displayed, DisplayedImage::Animated { .. });
+            // Free the RAM too. Shed any remaining look-ahead first.
             viewer.drop_prefetch();
-            retarget_displayed(viewer, shared, Tier::Evicted, &pipeline, view)
+            if is_anim {
+                // Lower this window's demand on the shared frames to evicted, exactly
+                // like a still lowering its tier, and nothing more. The lease and the
+                // (now dormant) playback are kept, so the store's aggregate demand
+                // alone decides residency: the frames free only once every window has
+                // dropped to evicted, and they all evict together. When any window
+                // brings them back, every window's dormant playback resumes from where
+                // it was. That makes decay state shared across windows, like stills.
+                if let Some(path) = viewer.displayed_path.clone()
+                    && let Some(lease) = viewer.anim_player.lease(&path)
+                {
+                    shared.anim_store.retarget(lease, Tier::Evicted);
+                }
+                Task::none()
+            } else {
+                // A still lowers its demand to evicted: the store frees its RAM once
+                // no window wants it higher. While another window holds the image it
+                // stays sharp; once the last holder releases it the cell empties and
+                // the view falls back to the blur. A return re-decodes.
+                retarget_displayed(viewer, shared, Tier::Evicted, &pipeline, view)
+            }
         }
     }
 }
@@ -289,27 +305,58 @@ fn restart_decay(win: &mut Window, shared: &mut Shared) -> Task<AppMessage> {
 
     let mut tasks = restore_display(win, shared, depth, view, prefetch_vram);
 
-    // A focused window rests at full-res and reclaims nothing; a minimized window
-    // takes precedence over focus.
-    let cfg = if win.minimized {
-        &shared.config.resource.minimized.pipeline
-    } else if win.focused {
+    // A focused, non-minimized window rests at full-res and reclaims nothing.
+    if win.focused && !win.minimized {
         return Task::batch(tasks);
-    } else {
-        &shared.config.resource.unfocused
-    };
+    }
+    let displayed_is_anim = win
+        .viewer()
+        .is_some_and(|v| matches!(v.displayed, DisplayedImage::Animated { .. }));
 
-    // The eviction delay scales with the on-screen image's decode time, which the
-    // store measured at decode.
+    // The eviction delay scales with the on-screen image's decode time, measured at
+    // decode by whichever store owns it (the animation store for a GIF).
     let decode = win.viewer().and_then(|v| {
         let path = v.displayed_path.as_deref()?;
         let key = ImageKey::new(&v.source, path);
-        shared.store.decode_time(&key)
+        if displayed_is_anim {
+            shared.anim_store.decode_time(&key)
+        } else {
+            shared.store.decode_time(&key)
+        }
     });
-    for (stage, delay) in decay_schedule(cfg, decode) {
+
+    // An animation has no governed VRAM tier, so it runs only the evict stage from
+    // its `.animated` config; a still runs the full demote/drop/evict pipeline.
+    let res = &shared.config.resource;
+    let stages = if displayed_is_anim {
+        let cfg = if win.minimized {
+            &res.minimized.animated
+        } else {
+            &res.unfocused.animated
+        };
+        anim_decay_schedule(cfg, decode)
+    } else {
+        let cfg = if win.minimized {
+            &res.minimized.still
+        } else {
+            &res.unfocused.still
+        };
+        decay_schedule(cfg, decode)
+    };
+    for (stage, delay) in stages {
         tasks.push(arm_decay(generation, stage, delay));
     }
     Task::batch(tasks)
+}
+
+/// The evict stage and its delay for an animation, given its `.animated` config.
+/// An animation has no VRAM tier, so eviction is the only stage it can ever run;
+/// `EvictConfig` makes demote/drop unrepresentable, so there is nothing to clamp.
+fn anim_decay_schedule(cfg: &EvictConfig, decode: Option<Duration>) -> Vec<(DecayStage, Duration)> {
+    cfg.evict_delay(decode)
+        .map(|d| (DecayStage::EvictRam, d))
+        .into_iter()
+        .collect()
 }
 
 /// The enabled decay stages and their delays from state-entry, given a pipeline
@@ -324,7 +371,7 @@ fn decay_schedule(
     let (demote, drop_vram, evict) = clamp_decay(
         cfg.demote_vram_after,
         cfg.drop_vram_after,
-        cfg.evict_delay(decode),
+        cfg.evict.evict_delay(decode),
     );
     [
         (DecayStage::Demote, demote),
@@ -358,14 +405,35 @@ fn restore_display(
     };
     let mut tasks = Vec::new();
     if let Some(displayed) = viewer.displayed_path.clone() {
-        tasks.push(fire_load(
-            &mut shared.store,
-            &pipeline,
-            viewer,
-            displayed,
-            Tier::Full,
-            view,
-        ));
+        let is_anim = matches!(viewer.displayed, DisplayedImage::Animated { .. });
+        if is_anim {
+            // Re-lease the shared frames if any window still has them resident (no
+            // decode); otherwise re-decode through the still path, which re-discovers
+            // the animation and re-registers it in the shared store.
+            if let Some(anim_task) =
+                try_start_shared_anim(&mut shared.anim_store, viewer, &displayed)
+            {
+                tasks.push(anim_task.map(AppMessage::Anim));
+            } else {
+                tasks.push(fire_load(
+                    &mut shared.store,
+                    &pipeline,
+                    viewer,
+                    displayed,
+                    Tier::Full,
+                    view,
+                ));
+            }
+        } else {
+            tasks.push(fire_load(
+                &mut shared.store,
+                &pipeline,
+                viewer,
+                displayed,
+                Tier::Full,
+                view,
+            ));
+        }
     }
     // A focused window re-warms its look-ahead; a window only reactivated by a
     // scroll restores just the visible image.
@@ -637,65 +705,70 @@ mod tests {
 
     #[test]
     fn decay_schedule_maps_config_to_enabled_clamped_stages() {
-        use crate::config::{DecayPipeline, EvictPolicy};
+        use crate::config::{DecayPipeline, EvictConfig, EvictPolicy};
         let s = Duration::from_secs;
+        let pipe = |demote, drop_vram, evict_ram| DecayPipeline {
+            demote_vram_after: demote,
+            drop_vram_after: drop_vram,
+            evict: EvictConfig {
+                evict_ram,
+                ..Default::default()
+            },
+        };
 
         // Demote plus a fixed evict; the disabled ("never") drop is skipped, and
         // the evict is clamped to land no earlier than the demote.
-        let cfg = DecayPipeline {
-            demote_vram_after: Some(s(15)),
-            drop_vram_after: None,
-            evict_ram: EvictPolicy::Fixed(s(60)),
-            ..Default::default()
-        };
         assert_eq!(
-            decay_schedule(&cfg, None),
+            decay_schedule(&pipe(Some(s(15)), None, EvictPolicy::Fixed(s(60))), None),
             vec![(DecayStage::Demote, s(15)), (DecayStage::EvictRam, s(60))]
         );
 
         // evict_ram = "never" drops the evict stage entirely.
-        let cfg = DecayPipeline {
-            evict_ram: EvictPolicy::Never,
-            ..cfg
-        };
         assert_eq!(
-            decay_schedule(&cfg, None),
+            decay_schedule(&pipe(Some(s(15)), None, EvictPolicy::Never), None),
             vec![(DecayStage::Demote, s(15))]
         );
 
         // A drop configured before the demote is clamped up to it, order kept.
-        let cfg = DecayPipeline {
-            demote_vram_after: Some(s(15)),
-            drop_vram_after: Some(s(5)),
-            evict_ram: EvictPolicy::Never,
-            ..Default::default()
-        };
         assert_eq!(
-            decay_schedule(&cfg, None),
+            decay_schedule(&pipe(Some(s(15)), Some(s(5)), EvictPolicy::Never), None),
             vec![(DecayStage::Demote, s(15)), (DecayStage::DropVram, s(15))]
         );
 
         // Everything disabled: nothing decays.
-        let cfg = DecayPipeline {
-            demote_vram_after: None,
-            drop_vram_after: None,
-            evict_ram: EvictPolicy::Never,
-            ..Default::default()
-        };
-        assert!(decay_schedule(&cfg, None).is_empty());
+        assert!(decay_schedule(&pipe(None, None, EvictPolicy::Never), None).is_empty());
 
         // Dynamic eviction needs a measured decode time; without one it never
         // evicts (conservative), and with one it schedules a single evict stage.
-        let cfg = DecayPipeline {
-            demote_vram_after: None,
-            drop_vram_after: None,
-            evict_ram: EvictPolicy::Dynamic,
-            ..Default::default()
-        };
-        assert!(decay_schedule(&cfg, None).is_empty());
-        let sched = decay_schedule(&cfg, Some(std::time::Duration::from_millis(20)));
+        let dynamic = pipe(None, None, EvictPolicy::Dynamic);
+        assert!(decay_schedule(&dynamic, None).is_empty());
+        let sched = decay_schedule(&dynamic, Some(Duration::from_millis(20)));
         assert_eq!(sched.len(), 1);
         assert_eq!(sched[0].0, DecayStage::EvictRam);
+    }
+
+    #[test]
+    fn anim_decay_schedule_arms_only_the_evict_stage() {
+        use crate::config::EvictPolicy;
+        let s = Duration::from_secs;
+
+        // An animation's `.animated` config is an `EvictConfig`: it has no demote or
+        // drop to represent, so the schedule is only ever a single evict stage.
+        let cfg = EvictConfig {
+            evict_ram: EvictPolicy::Fixed(s(30)),
+            ..Default::default()
+        };
+        assert_eq!(
+            anim_decay_schedule(&cfg, None),
+            vec![(DecayStage::EvictRam, s(30))]
+        );
+
+        // "never" arms nothing, so a backgrounded animation just keeps its frames.
+        let cfg = EvictConfig {
+            evict_ram: EvictPolicy::Never,
+            ..Default::default()
+        };
+        assert!(anim_decay_schedule(&cfg, None).is_empty());
     }
 
     #[test]

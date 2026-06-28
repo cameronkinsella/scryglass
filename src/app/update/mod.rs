@@ -26,7 +26,7 @@ pub(crate) use file_ops::{
 };
 pub(crate) use media_tasks::{
     fire_exif, fire_load, fire_prefetch, fire_rotate, fire_thumbnailer, run_jobs, show_loaded,
-    show_placeholder,
+    show_placeholder, try_start_shared_anim,
 };
 pub(crate) use navigation::open_path;
 pub(crate) use navigation::{
@@ -137,6 +137,10 @@ fn config_invalid_toast(app: &mut App) -> Task<Envelope> {
 /// fires only the async re-mints, which touch the shared cell, not any window's
 /// display, so they route through any live window. O(keys dirtied), never a scan.
 fn pump_store(app: &mut App) -> Task<Envelope> {
+    // Reconcile dropped animation leases: free a GIF's shared frames once its last
+    // holder let go. This pump only ever frees (demand falls on a drop, never rises),
+    // so it yields no jobs to run; draining it is enough.
+    let _ = app.shared.anim_store.pump();
     let outcome = app.shared.store.pump();
     if outcome.jobs.is_empty() {
         return Task::none();

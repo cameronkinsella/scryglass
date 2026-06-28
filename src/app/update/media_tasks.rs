@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use iced::widget::image::Handle;
@@ -12,7 +12,7 @@ use crate::config::{PrefetchVram, ZoomMode};
 use crate::media::cache::ImageCache;
 use crate::media::pipeline::{Lane, Pipeline, Source, ThumbUrgency, thumb_key};
 use crate::media::registry::DecodeOpts;
-use crate::media::store::{ImageKey, Job, RamImage, Store, Tier};
+use crate::media::store::{Anim, ImageKey, Job, RamImage, Store, Tier};
 use crate::media::{DecodedMedia, MediaError, ThumbData};
 
 /// Rotate the displayed image to the desired view rotation, off-thread. Rotating
@@ -394,6 +394,42 @@ pub(crate) fn fire_load(
     run_jobs(outcome.jobs, pipeline, lane, view)
 }
 
+/// If `path`'s decoded frames are resident in the shared animation store (this
+/// window's own lease, or another window's), lease them into this window and start
+/// playback, with no decode. This is the animation counterpart to `fire_load`
+/// reusing a still already resident in the store. `None` means the frames are not
+/// resident anywhere, so the caller decodes through the still path, which
+/// re-discovers the animation and registers it.
+pub(crate) fn try_start_shared_anim(
+    anim_store: &mut Store<Anim>,
+    viewer: &mut Viewer,
+    path: &Path,
+) -> Option<Task<crate::anim::AnimMessage>> {
+    if viewer.anim_player.has_cached(path) {
+        // Frames resident (this window's lease, or shared from another window):
+        // re-assert full demand so a restore after decay re-pins them.
+        if let Some(lease) = viewer.anim_player.lease(path) {
+            anim_store.retarget(lease, Tier::InRam);
+        }
+    } else {
+        // No resident lease here, or a stale one whose frames were evicted: drop it,
+        // then reuse another window's resident frames if there are any, else give up
+        // so the caller decodes through the still path.
+        viewer.anim_player.remove(path);
+        let key = ImageKey::new(&viewer.source, path);
+        anim_store.ram(&key)?;
+        let (lease, _) =
+            anim_store.request(key, path.to_path_buf(), viewer.source.clone(), Tier::InRam);
+        viewer.anim_player.insert(path.to_path_buf(), lease);
+    }
+    // A dormant (or running) playback for this GIF resumes from where it is on its
+    // own once the frames are pinned; do not restart it from the first frame.
+    if viewer.anim_player.is_active_on(path) {
+        return Some(Task::none());
+    }
+    viewer.anim_player.try_start_from_cache(path)
+}
+
 /// Turn the store's pending [`Job`]s into async tasks. A decode reads and decodes
 /// from disk (or finds an animation); an upload pushes RAM to the GPU. Each
 /// reports back so the store can install the result and swap the shared cell.
@@ -458,6 +494,7 @@ fn run_job(job: Job, pipeline: &Pipeline, lane: Lane, view: Size) -> Task<Messag
                         key: key.clone(),
                         path: path.clone(),
                         anim,
+                        decode_time,
                         thumb,
                     })
                 }
@@ -621,6 +658,89 @@ mod tests {
             panic!("expected rgba");
         };
         assert_eq!((width, height), (4, 4));
+    }
+
+    #[test]
+    fn two_windows_share_one_gif_decode_and_its_decay() {
+        use crate::anim::AnimPlayer;
+        use crate::app::state::Viewer;
+        use crate::media::animation::{AnimatedImage, RawFrame};
+        use crate::media::store::{Anim, AnimRam};
+        use crate::nav::Nav;
+        use std::sync::Arc;
+
+        fn frames() -> Arc<AnimatedImage> {
+            Arc::new(AnimatedImage {
+                width: 2,
+                height: 2,
+                frames: vec![RawFrame {
+                    left: 0,
+                    top: 0,
+                    width: 2,
+                    height: 2,
+                    pixels: vec![0u8; 16],
+                    dispose: gif::DisposalMethod::Keep,
+                    delay: std::time::Duration::from_millis(100),
+                }],
+                thumbnail: None,
+            })
+        }
+
+        fn viewer_on(path: &str) -> Viewer {
+            let p = PathBuf::from(path);
+            let nav = Nav::new(vec![p.clone()], &p).unwrap();
+            Viewer::new(nav, Source::Fs, AnimPlayer::new())
+        }
+
+        let mut anim_store: Store<Anim> = Store::default();
+        let path = Path::new("a.gif");
+        let key = ImageKey::new(&Source::Fs, path);
+
+        // Window A decodes the GIF and holds the lease, as the AnimDecoded handler does.
+        let mut a = viewer_on("a.gif");
+        let (lease_a, _) =
+            anim_store.request(key.clone(), path.to_path_buf(), Source::Fs, Tier::InRam);
+        anim_store.on_decoded(
+            key.clone(),
+            AnimRam {
+                frames: frames(),
+                decode_time: None,
+            },
+        );
+        a.anim_player.insert(path.to_path_buf(), lease_a);
+        assert!(anim_store.ram(&key).is_some());
+
+        // Window B opens the same GIF: it reuses A's resident frames with no decode.
+        let mut b = viewer_on("a.gif");
+        assert!(try_start_shared_anim(&mut anim_store, &mut b, path).is_some());
+        assert!(b.anim_player.has_cached(path));
+
+        // One allocation, not two: through the real wiring both windows' leases read
+        // the very same frames by pointer, so opening the GIF twice did not duplicate
+        // it in memory.
+        let frames_a = a.anim_player.lease(path).unwrap().texture().unwrap();
+        let frames_b = b.anim_player.lease(path).unwrap().texture().unwrap();
+        assert!(Arc::ptr_eq(&frames_a, &frames_b));
+
+        // A backgrounds: decay lowers its demand to evicted. The frames survive
+        // because B still holds them, so A keeps showing the GIF (decay state shared).
+        anim_store.retarget(a.anim_player.lease(path).unwrap(), Tier::Evicted);
+        let _ = anim_store.pump();
+        assert!(
+            anim_store.ram(&key).is_some(),
+            "B still holds the GIF, so its frames stay resident"
+        );
+        assert!(a.anim_player.has_cached(path));
+
+        // B backgrounds too: the last demand is gone, so the frames free and both
+        // windows now derive nothing.
+        anim_store.retarget(b.anim_player.lease(path).unwrap(), Tier::Evicted);
+        let _ = anim_store.pump();
+        assert!(
+            anim_store.ram(&key).is_none(),
+            "no window wants the GIF, so its frames free"
+        );
+        assert!(!a.anim_player.has_cached(path));
     }
 
     fn names(n: usize) -> Vec<String> {

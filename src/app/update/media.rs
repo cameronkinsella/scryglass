@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::media::MediaError;
 use crate::media::animation::AnimatedImage;
 use crate::media::pipeline::{ThumbUrgency, thumb_key};
-use crate::media::store::{ImageKey, RamImage, Tier};
+use crate::media::store::{AnimRam, ImageKey, RamImage, Tier};
 use crate::ui::image_surface::Keepalive;
 
 use crate::app::state::{Session, Thumb};
@@ -39,12 +40,14 @@ pub enum Message {
         path: PathBuf,
         err: MediaError,
     },
-    /// A store decode turned out to be an animation, which keeps its own player
-    /// path. The store forgets the key.
+    /// A store decode turned out to be an animation. The still store forgets the
+    /// key; the frames are registered in the shared animation store instead, where
+    /// other windows share them. `decode_time` feeds that store's dynamic evict.
     AnimDecoded {
         key: ImageKey,
         path: PathBuf,
         anim: Arc<AnimatedImage>,
+        decode_time: Duration,
         thumb: Option<Thumb>,
     },
     ThumbLoaded {
@@ -152,9 +155,10 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             key,
             path,
             anim,
+            decode_time,
             thumb,
         } => {
-            // Not a still: the store forgets it, and the leftover lease drops.
+            // Not a still: the still store forgets it, and the leftover still lease drops.
             shared.store.abandon(&key);
             let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
@@ -167,8 +171,30 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                     .thumbs
                     .insert(thumb_key(&viewer.source, &path), thumb, cost);
             }
-            viewer.anim_player.insert(path.clone(), anim);
-            let play = if viewer.nav.current() == path {
+            // Register the frames in the shared animation store and lease them here,
+            // so a second window on this GIF shares the one decode and its decay. The
+            // request emits a decode job we drop: `on_decoded` resolves the demand
+            // from the frames already in hand. If another window decoded it first,
+            // `on_decoded` is a no-op and the lease shares those frames.
+            let (lease, _) = shared.anim_store.request(
+                key.clone(),
+                path.clone(),
+                viewer.source.clone(),
+                Tier::InRam,
+            );
+            shared.anim_store.on_decoded(
+                key,
+                AnimRam {
+                    frames: anim,
+                    decode_time: Some(decode_time),
+                },
+            );
+            viewer.anim_player.insert(path.clone(), lease);
+            // Start playback if this GIF is on screen, unless a dormant playback for it
+            // is already in place (a re-decode after a shared eviction): that resumes
+            // from where it was on its own once the frames are back, rather than
+            // restarting from the first frame.
+            let play = if viewer.nav.current() == path && !viewer.anim_player.is_active_on(&path) {
                 viewer
                     .anim_player
                     .try_start_from_cache(&path)
@@ -423,20 +449,14 @@ pub(crate) fn update_anim(
     let is_first_frame = matches!(viewer.displayed, DisplayedImage::None)
         || (viewer.pending_since.is_some() && matches!(&anim_msg, AnimMessage::FrameAllocated(..)));
 
-    let (task, frame) = viewer.anim_player.update(anim_msg, viewer.nav.current());
+    let (task, ready) = viewer.anim_player.update(anim_msg, viewer.nav.current());
 
-    if let Some((handle, texture)) = frame {
-        let (w, h) = match &handle {
-            iced::widget::image::Handle::Rgba { width, height, .. } => (*width, *height),
-            _ => (0, 0),
-        };
+    if let Some((w, h)) = ready {
         if is_first_frame && (!viewer.manual_zoom || zoom_mode != ZoomMode::LockZoomRatio) {
             viewer.zoom = compute_zoom(zoom_mode, w, h, viewport);
             viewer.pan = (0.0, 0.0);
         }
         viewer.displayed = DisplayedImage::Animated {
-            handle,
-            texture,
             original_size: (w, h),
         };
         viewer.displayed_path = Some(viewer.nav.current().to_path_buf());
