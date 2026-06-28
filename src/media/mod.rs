@@ -17,6 +17,7 @@ pub mod disk_thumbs;
 pub mod info;
 pub mod pipeline;
 pub mod registry;
+pub mod store;
 pub mod thumbs;
 
 /// Longest side of generated thumbnails, in pixels.
