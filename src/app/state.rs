@@ -60,10 +60,13 @@ pub enum DisplayedImage {
         original_size: (u32, u32),
         rotated: Option<crate::ui::image_surface::Keepalive>,
     },
-    /// An animation frame, re-uploaded each tick and drawn through the id→texture
-    /// path (animations are not store-backed; their frames are transient).
+    /// An animation frame. Like a still it draws a resident `texture` directly;
+    /// `handle` is kept only for clipboard copy. Animations are not store-backed
+    /// (their frames are transient, re-uploaded each tick), so the texture is
+    /// carried here rather than read from a store lease cell.
     Animated {
         handle: Handle,
+        texture: crate::ui::image_surface::Keepalive,
         original_size: (u32, u32),
     },
     /// Live video, drawn by the GPU YUV surface. Carries dimensions for

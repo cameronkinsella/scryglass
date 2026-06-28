@@ -62,7 +62,10 @@ impl AnimPlayer {
         &mut self,
         msg: AnimMessage,
         current_path: &Path,
-    ) -> (Task<AnimMessage>, Option<Handle>) {
+    ) -> (
+        Task<AnimMessage>,
+        Option<(Handle, crate::ui::image_surface::Keepalive)>,
+    ) {
         match msg {
             AnimMessage::FrameAllocated(path, Some((handle, keepalive))) => {
                 if current_path != path {
@@ -72,9 +75,10 @@ impl AnimPlayer {
                     return (Task::none(), None);
                 };
                 // The keepalive holds the frame's texture resident, already
-                // uploaded off-thread, so it is ready to draw.
-                active._frame_keepalive = Some(keepalive);
-                (Task::none(), Some(handle))
+                // uploaded off-thread, so it is ready to draw. The display carries
+                // a clone to draw it directly; this copy gates the playback timer.
+                active._frame_keepalive = Some(keepalive.clone());
+                (Task::none(), Some((handle, keepalive)))
             }
 
             AnimMessage::FrameAllocated(_path, None) => (Task::none(), None),

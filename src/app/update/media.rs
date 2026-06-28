@@ -425,7 +425,7 @@ pub(crate) fn update_anim(
 
     let (task, frame) = viewer.anim_player.update(anim_msg, viewer.nav.current());
 
-    if let Some(handle) = frame {
+    if let Some((handle, texture)) = frame {
         let (w, h) = match &handle {
             iced::widget::image::Handle::Rgba { width, height, .. } => (*width, *height),
             _ => (0, 0),
@@ -436,6 +436,7 @@ pub(crate) fn update_anim(
         }
         viewer.displayed = DisplayedImage::Animated {
             handle,
+            texture,
             original_size: (w, h),
         };
         viewer.displayed_path = Some(viewer.nav.current().to_path_buf());

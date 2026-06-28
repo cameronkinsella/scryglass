@@ -204,11 +204,12 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
             }
         }
         DisplayedImage::Animated {
-            handle,
+            texture,
             original_size,
+            ..
         } => ui::image_surface::view(
-            Some(handle.clone()),
             None,
+            Some(texture.clone()),
             *original_size,
             viewer.zoom,
             viewer.pan,
