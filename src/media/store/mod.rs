@@ -18,7 +18,6 @@
 //!   per-tier counters ([`TierCounters`]) shared between the store entry and every
 //!   lease; the image sits at `max_wanted()`, recomputed O(1) on each lease event,
 //!   never by scanning windows.
-#![allow(dead_code)] // wired into the app over the subsequent migration stages
 
 use std::cell::Cell as StdCell;
 use std::collections::HashMap;
@@ -71,7 +70,7 @@ impl Tier {
 /// Full-resolution RGBA in RAM, the substrate every GPU tier is uploaded from.
 /// Arc-backed through iced's `Handle`, so a clone is a refcount bump and the last
 /// drop frees the RAM.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RamImage {
     pub handle: Handle,
     pub original_size: (u32, u32),
@@ -213,14 +212,6 @@ impl TierCounters {
     }
 }
 
-/// Whether a holder's demand is fixed until an event (`Locked`, e.g. a focused
-/// window) or decays over time on the config timers (`Timed`, a backgrounded one).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum HolderKind {
-    Locked,
-    Timed,
-}
-
 /// Async work the store needs the app to run; the result returns via
 /// [`Store::on_decoded`]/[`Store::on_minted`]. The store itself does no I/O or GPU
 /// work, so its decisions stay pure and unit-testable.
@@ -255,7 +246,6 @@ type Dirty = Arc<Mutex<Vec<ImageKey>>>;
 pub struct Lease {
     key: ImageKey,
     want: StdCell<Tier>,
-    kind: StdCell<HolderKind>,
     counters: Arc<TierCounters>,
     cell: Arc<TextureCell>,
     dirty: Dirty,
@@ -270,10 +260,6 @@ impl Lease {
     /// This holder's current demand.
     pub fn want(&self) -> Tier {
         self.want.get()
-    }
-
-    pub fn kind(&self) -> HolderKind {
-        self.kind.get()
     }
 }
 
@@ -333,7 +319,6 @@ impl Store {
         path: PathBuf,
         source: Source,
         want: Tier,
-        kind: HolderKind,
     ) -> (Lease, StoreOutcome) {
         let dirty = self.dirty.clone();
         let entry = self.entries.entry(key.clone()).or_insert_with(|| Entry {
@@ -355,7 +340,6 @@ impl Store {
         let lease = Lease {
             key: key.clone(),
             want: StdCell::new(want),
-            kind: StdCell::new(kind),
             counters: entry.counters.clone(),
             cell,
             dirty,
@@ -383,6 +367,22 @@ impl Store {
         self.reconcile(&key)
     }
 
+    /// A decode never produced a still: it was cancelled by a newer navigation
+    /// (`retry` = keep the entry and re-emit a decode if still wanted) or it
+    /// failed / turned out to be an animation (`retry` false = forget it). Clears
+    /// the in-flight marker either way so the store is not stuck pending.
+    pub fn on_decode_failed(&mut self, key: &ImageKey, retry: bool) -> StoreOutcome {
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.pending = None;
+        }
+        if retry {
+            self.reconcile(key)
+        } else {
+            self.abandon(key);
+            StoreOutcome::default()
+        }
+    }
+
     /// An upload finished: install the texture at `tier` and swap the shared cell.
     pub fn on_minted(&mut self, key: ImageKey, tier: Tier, texture: Keepalive) -> StoreOutcome {
         if let Some(entry) = self.entries.get_mut(&key) {
@@ -399,6 +399,53 @@ impl Store {
             }
         }
         self.reconcile(&key)
+    }
+
+    /// Forget an image entirely: a decode revealed an animation (not a still) or
+    /// failed, so the store should no longer track it. Any outstanding lease goes
+    /// inert (its cell reads `None` forever); a later request re-creates the entry
+    /// and re-decodes. O(1).
+    pub fn abandon(&mut self, key: &ImageKey) {
+        self.entries.remove(key);
+    }
+
+    /// The image's full-res RAM source, if resident at any tier above eviction.
+    /// A clone is a refcount bump on the handle. The display reads its `handle`
+    /// and `original_size` from here (the texture comes from the lease's cell),
+    /// so a second window can show a resident image with no decode of its own.
+    pub fn ram(&self, key: &ImageKey) -> Option<RamImage> {
+        self.entries.get(key).and_then(|e| e.state.ram())
+    }
+
+    /// The image's current resident tier, or `Evicted` if the store is not
+    /// tracking it.
+    pub fn tier(&self, key: &ImageKey) -> Tier {
+        self.entries
+            .get(key)
+            .map_or(Tier::Evicted, |e| e.state.tier())
+    }
+
+    /// The measured read + decode time for this image, feeding the dynamic
+    /// eviction delay. `None` if the image is not resident or was never timed
+    /// (e.g. reused from another window's decode).
+    pub fn decode_time(&self, key: &ImageKey) -> Option<Duration> {
+        let entry = self.entries.get(key)?;
+        match &entry.state {
+            CellState::Full(f) => f.ram.decode_time,
+            CellState::View(v) => v.ram.decode_time,
+            CellState::InRam(r) => r.decode_time,
+            CellState::Evicted => None,
+        }
+    }
+
+    /// An upload could not reach the GPU (the upload thread was not ready). Clear
+    /// the in-flight marker and reconcile, so the next pass re-attempts the mint
+    /// if the tier is still wanted.
+    pub fn on_mint_failed(&mut self, key: &ImageKey) -> StoreOutcome {
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.pending = None;
+        }
+        self.reconcile(key)
     }
 
     /// Reconcile every image whose demand changed via a dropped lease. O(keys dirty).
@@ -586,13 +633,7 @@ mod tests {
     /// its one holder.
     fn resident_full() -> (Store, Lease) {
         let mut store = Store::default();
-        let (lease, out) = store.request(
-            key(),
-            "a.png".into(),
-            Source::Fs,
-            Tier::Full,
-            HolderKind::Locked,
-        );
+        let (lease, out) = store.request(key(), "a.png".into(), Source::Fs, Tier::Full);
         assert!(matches!(out.jobs.as_slice(), [Job::Decode { .. }]));
         assert!(lease.texture().is_none()); // pending -> thumb until resident
 
@@ -619,20 +660,8 @@ mod tests {
     #[test]
     fn an_image_demotes_only_after_every_holder_releases_it() {
         let mut store = Store::default();
-        let (a, _) = store.request(
-            key(),
-            "a.png".into(),
-            Source::Fs,
-            Tier::Full,
-            HolderKind::Locked,
-        );
-        let (b, _) = store.request(
-            key(),
-            "a.png".into(),
-            Source::Fs,
-            Tier::Full,
-            HolderKind::Locked,
-        );
+        let (a, _) = store.request(key(), "a.png".into(), Source::Fs, Tier::Full);
+        let (b, _) = store.request(key(), "a.png".into(), Source::Fs, Tier::Full);
         store.on_decoded(key(), ram());
         store.on_minted(key(), Tier::Full, keep());
         assert!(a.texture().is_some());
@@ -647,13 +676,7 @@ mod tests {
         // request has to decode again — proving the texture was actually released.
         drop(b);
         let _ = store.pump();
-        let (_c, out) = store.request(
-            key(),
-            "a.png".into(),
-            Source::Fs,
-            Tier::Full,
-            HolderKind::Locked,
-        );
+        let (_c, out) = store.request(key(), "a.png".into(), Source::Fs, Tier::Full);
         assert!(matches!(out.jobs.as_slice(), [Job::Decode { .. }]));
     }
 
@@ -677,13 +700,7 @@ mod tests {
         let (mut store, _held) = resident_full();
         // A second window requesting the same key shares the resident texture with
         // no new work — the keyed entry is the cross-window dedup.
-        let (lease, out) = store.request(
-            key(),
-            "a.png".into(),
-            Source::Fs,
-            Tier::Full,
-            HolderKind::Locked,
-        );
+        let (lease, out) = store.request(key(), "a.png".into(), Source::Fs, Tier::Full);
         assert!(out.jobs.is_empty());
         assert!(lease.texture().is_some());
     }

@@ -318,8 +318,6 @@ impl Default for ResourceConfig {
 pub struct AppConfig {
     /// Number of images to pre-fetch in each direction.
     pub prefetch_depth: usize,
-    /// GPU image cache budget in megabytes.
-    pub cache_budget_mb: usize,
     /// Active color theme.
     pub theme: ThemeChoice,
     /// Zoom mode applied when opening/navigating images.
@@ -378,7 +376,6 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             prefetch_depth: 5,
-            cache_budget_mb: 512,
             theme: ThemeChoice::default(),
             zoom_mode: ZoomMode::default(),
             sort_key: SortKey::default(),
@@ -613,14 +610,12 @@ mod tests {
         // A valid partial document parses, with missing keys defaulted.
         let cfg = AppConfig::try_from_toml("prefetch_depth = 9").unwrap();
         assert_eq!(cfg.prefetch_depth, 9);
-        assert_eq!(cfg.cache_budget_mb, 512);
     }
 
     #[test]
     fn toml_roundtrip_preserves_all_fields() {
         let cfg = AppConfig {
             prefetch_depth: 3,
-            cache_budget_mb: 256,
             theme: ThemeChoice::Light,
             zoom_mode: ZoomMode::ScaleToFit,
             sort_key: SortKey::DateModified,

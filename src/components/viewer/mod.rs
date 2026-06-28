@@ -364,7 +364,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 return Task::none();
             }
             viewer.rotation = (viewer.rotation + turns) % 4;
-            fire_rotate(viewer)
+            fire_rotate(viewer, &shared.store)
         }
         Message::ToggleCheckerboard => {
             shared.config.show_checkerboard = !shared.config.show_checkerboard;
@@ -401,11 +401,13 @@ fn needs_reactivation(win: &Window) -> bool {
     let Some(path) = viewer.displayed_path.as_deref() else {
         return false;
     };
-    match viewer.cache.peek(path) {
-        // Evicted (or never cached): needs a re-decode.
+    // Reactivate unless this window already holds the on-screen image at a
+    // full-res texture. A lower demand (decayed to view-res) or a missing texture
+    // (dropped, or evicted with no lease at all) means a wheel zoom should restore
+    // it. Reads the lease directly, so it never lags a deferred reconcile.
+    match viewer.cache.get(path) {
         None => true,
-        // Demoted to view-res, or its texture was released.
-        Some(cached) => !cached.gpu_full || cached.keepalive.is_none(),
+        Some(lease) => lease.want() < crate::media::store::Tier::Full || lease.texture().is_none(),
     }
 }
 
@@ -516,18 +518,35 @@ mod tests {
     }
 
     fn show_cached(app: &mut TestApp, path: &str, gpu_full: bool, resident: bool) {
-        use crate::app::state::CachedImage;
-        let image = CachedImage {
-            handle: iced::widget::image::Handle::from_rgba(2, 2, vec![0u8; 16]),
-            original_size: (2, 2),
-            keepalive: resident.then(crate::ui::image_surface::test_keepalive),
-            gpu_full,
-            decode_time: None,
+        use crate::media::pipeline::Source;
+        use crate::media::store::{ImageKey, RamImage, Tier};
+        let p = std::path::PathBuf::from(path);
+        let key = ImageKey::new(&Source::Fs, &p);
+        let tier = match (resident, gpu_full) {
+            (true, true) => Tier::Full,
+            (true, false) => Tier::View,
+            (false, _) => Tier::InRam,
         };
-        let cost = image.byte_cost();
+        let (lease, _) = app
+            .shared
+            .store
+            .request(key.clone(), p.clone(), Source::Fs, tier);
+        app.shared.store.on_decoded(
+            key.clone(),
+            RamImage {
+                handle: iced::widget::image::Handle::from_rgba(2, 2, vec![0u8; 16]),
+                original_size: (2, 2),
+                decode_time: None,
+            },
+        );
+        if resident {
+            app.shared
+                .store
+                .on_minted(key, tier, crate::ui::image_surface::test_keepalive());
+        }
         let v = app.viewer_mut().unwrap();
         v.displayed_path = Some(path.into());
-        v.cache.insert(path.into(), image, cost);
+        v.cache.insert(p, lease);
     }
 
     #[test]

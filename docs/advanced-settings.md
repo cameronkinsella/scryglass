@@ -17,7 +17,6 @@ Durations are written as readable strings: `"15s"`, `"200ms"`, `"1m30s"`, or
 | Key | Type | Default | Effect |
 |---|---|---|---|
 | `prefetch_depth` | integer | `5` | How many images to decode ahead/behind the current one in each direction, so navigation is instant. |
-| `cache_budget_mb` | integer | `512` | Image cache budget in megabytes, split across open windows. |
 | `disk_thumbs` | bool | `true` | Persist thumbnails to disk so the filmstrip is instant on re-open. |
 
 ## Display

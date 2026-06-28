@@ -1,5 +1,3 @@
-use iced::Size;
-
 #[derive(Debug, Clone)]
 pub enum Message {
     Resized(Size),
@@ -46,12 +44,15 @@ pub enum DecayStage {
 }
 use std::time::Duration;
 
-use iced::Task;
+use iced::{Size, Task};
 
-use super::{fire_load, fire_prefetch, fire_restore_textures, fire_reupload_res};
+use super::{fire_load, fire_prefetch, run_jobs};
+use crate::app::state::Viewer;
 use crate::app::viewer_math::{clamp_pan, compute_zoom};
 use crate::app::{Message as AppMessage, Shared, Window, recalc_viewport};
+use crate::config::PrefetchVram;
 use crate::media::pipeline::{Lane, Pipeline};
+use crate::media::store::{ImageKey, Tier};
 
 pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) -> Task<AppMessage> {
     match message {
@@ -222,43 +223,57 @@ fn run_decay_stage(
     if generation != win.decay_generation {
         return Task::none();
     }
-    let minimized = win.minimized;
+    let view = win.viewport_size;
+    let pipeline = shared.pipeline.clone();
     let Some(viewer) = win.viewer_mut() else {
         return Task::none();
     };
+    // Each stage lowers this window's demand on its leases. The store frees an
+    // image only once no window still wants it higher, so a shared image a
+    // focused window holds never blanks from a background window's decay.
     match stage {
         DecayStage::Demote => {
+            // Shed the prefetch look-ahead and demote the on-screen image to a
+            // smaller view-res texture.
             viewer.drop_prefetch();
-            if let Some(displayed) = viewer.displayed_path.clone() {
-                // Demote to the resolution of the current zoom, so a zoomed-in
-                // background window stays as crisp as what is on screen.
-                let zoom = viewer.zoom;
-                return fire_reupload_res(viewer, &displayed, zoom, false);
-            }
-            Task::none()
+            retarget_displayed(viewer, shared, Tier::View, &pipeline, view)
         }
         DecayStage::DropVram => {
-            // A visible window swaps to its thumbnail first so it does not blank;
-            // a minimized window shows nothing, so it keeps the full display and
-            // re-seats it on restore.
-            if !minimized {
-                viewer.swap_display_to_thumb();
-            }
-            viewer.release_textures();
-            // The shed textures' dedup entries now hold their RAM for nothing.
-            shared.pipeline.prune_dedup();
-            Task::none()
+            // Drop the texture; the view falls back to the thumbnail blur, and a
+            // refocus re-uploads from the RAM source with no disk read.
+            retarget_displayed(viewer, shared, Tier::InRam, &pipeline, view)
         }
         DecayStage::EvictRam => {
-            // Evicting the RAM means the on-screen image must let go of its full
-            // handle too (even minimized, where it is not visible), or its pixels
-            // stay alive. The thumbnail stands in until a return re-decodes.
-            viewer.swap_display_to_thumb();
-            viewer.evict_sources();
-            shared.pipeline.prune_dedup();
-            Task::none()
+            // Free the RAM too. Shed any remaining look-ahead, then lower the
+            // on-screen image's demand to evicted: the store frees its RAM once no
+            // window wants it higher. The display keeps its lease, so it still
+            // reads the shared cell. While another window holds the image it stays
+            // sharp; once the last holder lets go the cell empties and the view
+            // falls back to the blur. A return re-decodes.
+            viewer.drop_prefetch();
+            retarget_displayed(viewer, shared, Tier::Evicted, &pipeline, view)
         }
     }
+}
+
+/// Lower the on-screen image's lease to `tier`, firing any re-mint the store asks
+/// for (a smaller texture when demoting full to view). A no-op when nothing is on
+/// screen or it is not leased by this window.
+fn retarget_displayed(
+    viewer: &mut Viewer,
+    shared: &mut Shared,
+    tier: Tier,
+    pipeline: &Pipeline,
+    view: Size,
+) -> Task<AppMessage> {
+    let Some(path) = viewer.displayed_path.clone() else {
+        return Task::none();
+    };
+    let Some(lease) = viewer.cache.get(&path) else {
+        return Task::none();
+    };
+    let outcome = shared.store.retarget(lease, tier);
+    run_jobs(outcome.jobs, pipeline, Lane::Prefetch, view)
 }
 
 /// Re-evaluate the window's resource state after a focus or minimize change.
@@ -268,12 +283,11 @@ fn run_decay_stage(
 fn restart_decay(win: &mut Window, shared: &mut Shared) -> Task<AppMessage> {
     win.decay_generation = win.decay_generation.wrapping_add(1);
     let generation = win.decay_generation;
-    let pipeline = shared.pipeline.clone();
     let depth = shared.config.prefetch_depth;
     let prefetch_vram = shared.config.resource.prefetch_vram;
     let view = win.viewport_size;
 
-    let mut tasks = restore_display(win, &pipeline, depth, view, prefetch_vram);
+    let mut tasks = restore_display(win, shared, depth, view, prefetch_vram);
 
     // A focused window rests at full-res and reclaims nothing; a minimized window
     // takes precedence over focus.
@@ -285,10 +299,12 @@ fn restart_decay(win: &mut Window, shared: &mut Shared) -> Task<AppMessage> {
         &shared.config.resource.unfocused
     };
 
-    // The eviction delay scales with the on-screen image's decode time.
+    // The eviction delay scales with the on-screen image's decode time, which the
+    // store measured at decode.
     let decode = win.viewer().and_then(|v| {
         let path = v.displayed_path.as_deref()?;
-        v.cache.peek(path)?.decode_time
+        let key = ImageKey::new(&v.source, path);
+        shared.store.decode_time(&key)
     });
     for (stage, delay) in decay_schedule(cfg, decode) {
         tasks.push(arm_decay(generation, stage, delay));
@@ -320,54 +336,48 @@ fn decay_schedule(
     .collect()
 }
 
-/// Restore the on-screen image to what the window's new state needs: re-decode
-/// it if its RAM source was evicted, otherwise re-seat any released textures, and
-/// for a focused window re-warm the prefetch look-ahead and promote the image to
-/// full-res. A minimized window shows nothing, so nothing is restored.
+/// Restore the on-screen image to what the window's new state needs: bring it
+/// back to a full-res texture (re-uploading from RAM, or re-decoding if it was
+/// evicted), and for a focused window re-warm the prefetch look-ahead. The
+/// display stays put; the view re-sharpens once the texture lands. A minimized
+/// window shows nothing, so nothing is restored.
 fn restore_display(
     win: &mut Window,
-    pipeline: &Pipeline,
+    shared: &mut Shared,
     depth: usize,
-    view: iced::Size,
-    prefetch_vram: crate::config::PrefetchVram,
+    view: Size,
+    prefetch_vram: PrefetchVram,
 ) -> Vec<Task<AppMessage>> {
     if win.minimized {
         return Vec::new();
     }
     let focused = win.focused;
+    let pipeline = shared.pipeline.clone();
     let Some(viewer) = win.viewer_mut() else {
         return Vec::new();
     };
-    let displayed = viewer.displayed_path.clone();
-    let evicted = displayed
-        .as_ref()
-        .is_some_and(|p| !viewer.cache.contains(p));
-
     let mut tasks = Vec::new();
-    if evicted {
-        // The thumbnail blur is already on screen; re-decode behind it.
-        if let Some(p) = displayed.clone() {
-            tasks.push(fire_load(
-                pipeline,
-                viewer,
-                p,
-                Lane::Current,
-                view,
-                prefetch_vram,
-            ));
-        }
-    } else {
-        tasks.extend(fire_restore_textures(pipeline, viewer, view));
-        // Promote the on-screen image to full-res whether the window is focused
-        // or just reactivated by a scroll, so the visible image is crisp; only
-        // the prefetch look-ahead is focus-only.
-        if let Some(p) = displayed.clone() {
-            let zoom = viewer.zoom;
-            tasks.push(fire_reupload_res(viewer, &p, zoom, true));
-        }
+    if let Some(displayed) = viewer.displayed_path.clone() {
+        tasks.push(fire_load(
+            &mut shared.store,
+            &pipeline,
+            viewer,
+            displayed,
+            Tier::Full,
+            view,
+        ));
     }
+    // A focused window re-warms its look-ahead; a window only reactivated by a
+    // scroll restores just the visible image.
     if focused {
-        tasks.extend(fire_prefetch(pipeline, viewer, depth, view, prefetch_vram));
+        tasks.extend(fire_prefetch(
+            &mut shared.store,
+            &pipeline,
+            viewer,
+            depth,
+            view,
+            prefetch_vram,
+        ));
     }
     tasks
 }
@@ -403,7 +413,7 @@ fn arm_decay(generation: u64, stage: DecayStage, delay: Duration) -> Task<AppMes
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::test_support::empty_app;
+    use crate::app::test_support::{cache_image, empty_app};
 
     #[test]
     fn resize_updates_the_window_size() {
@@ -437,11 +447,12 @@ mod tests {
     }
 
     #[test]
-    fn minimizing_releases_the_cached_textures() {
+    fn minimizing_drops_the_texture_but_keeps_the_ram() {
         use crate::app::test_support::viewing_app;
 
         let mut app = viewing_app(&["a.png"], 0);
         cache_image(&mut app, "a.png");
+        app.viewer_mut().unwrap().displayed_path = Some("a.png".into());
 
         // Minimizing arms the drop-VRAM stage (at 0s by default); fire it.
         let _ = update(&mut app.window, &mut app.shared, Message::Minimized(true));
@@ -455,32 +466,22 @@ mod tests {
             },
         );
 
-        // The RAM source stays cached; only the GPU keepalive is released.
+        // The image stays leased with its RAM in the store; only the shared
+        // texture is dropped, so the lease now reads no texture.
+        let key = ImageKey::new(
+            &crate::media::pipeline::Source::Fs,
+            std::path::Path::new("a.png"),
+        );
+        assert!(app.shared.store.tier(&key) >= Tier::InRam);
         let v = app.viewer().unwrap();
-        assert!(v.cache.contains(std::path::Path::new("a.png")));
+        assert!(v.cache.contains_key(std::path::Path::new("a.png")));
         assert!(
             v.cache
-                .peek(std::path::Path::new("a.png"))
+                .get(std::path::Path::new("a.png"))
                 .unwrap()
-                .keepalive
+                .texture()
                 .is_none()
         );
-    }
-
-    fn cache_image(app: &mut crate::app::test_support::TestApp, path: &str) {
-        use crate::app::state::CachedImage;
-        let image = CachedImage {
-            handle: iced::widget::image::Handle::from_rgba(2, 2, vec![0u8; 16]),
-            original_size: (2, 2),
-            keepalive: Some(crate::ui::image_surface::test_keepalive()),
-            gpu_full: true,
-            decode_time: None,
-        };
-        let cost = image.byte_cost();
-        app.viewer_mut()
-            .unwrap()
-            .cache
-            .insert(path.into(), image, cost);
     }
 
     #[test]
@@ -518,9 +519,9 @@ mod tests {
         );
 
         let v = app.viewer().unwrap();
-        assert!(v.cache.contains(std::path::Path::new("b.png")));
-        assert!(!v.cache.contains(std::path::Path::new("a.png")));
-        assert!(!v.cache.contains(std::path::Path::new("c.png")));
+        assert!(v.cache.contains_key(std::path::Path::new("b.png")));
+        assert!(!v.cache.contains_key(std::path::Path::new("a.png")));
+        assert!(!v.cache.contains_key(std::path::Path::new("c.png")));
     }
 
     #[test]
@@ -548,7 +549,7 @@ mod tests {
             app.viewer()
                 .unwrap()
                 .cache
-                .contains(std::path::Path::new("b.png"))
+                .contains_key(std::path::Path::new("b.png"))
         );
     }
 
@@ -578,17 +579,16 @@ mod tests {
             app.viewer()
                 .unwrap()
                 .cache
-                .contains(std::path::Path::new("b.png"))
+                .contains_key(std::path::Path::new("b.png"))
         );
     }
 
     #[test]
-    fn the_evict_stage_clears_the_window_cache() {
+    fn the_evict_stage_sheds_prefetch_and_frees_the_displayed_ram() {
         use crate::app::test_support::viewing_app;
         let mut app = viewing_app(&["a.png", "b.png"], 0);
         cache_image(&mut app, "a.png");
         cache_image(&mut app, "b.png");
-        // Minimized, so no thumbnail swap is needed for the on-screen image.
         app.window.minimized = true;
         app.viewer_mut().unwrap().displayed_path = Some("a.png".into());
 
@@ -602,9 +602,17 @@ mod tests {
             },
         );
 
+        // The prefetch neighbor's lease is dropped; the on-screen image keeps its
+        // lease (so it still reads the shared cell) but its RAM is freed, since no
+        // window wants it any higher.
+        let a_key = ImageKey::new(
+            &crate::media::pipeline::Source::Fs,
+            std::path::Path::new("a.png"),
+        );
+        assert!(app.shared.store.tier(&a_key) < Tier::InRam);
         let v = app.viewer().unwrap();
-        assert!(!v.cache.contains(std::path::Path::new("a.png")));
-        assert!(!v.cache.contains(std::path::Path::new("b.png")));
+        assert!(v.cache.contains_key(std::path::Path::new("a.png")));
+        assert!(!v.cache.contains_key(std::path::Path::new("b.png")));
     }
 
     #[test]
@@ -691,18 +699,16 @@ mod tests {
     }
 
     #[test]
-    fn decay_stages_free_the_expected_bytes() {
+    fn decay_sheds_prefetch_then_evicts_the_rest() {
         use crate::app::test_support::viewing_app;
-        // Three 2x2 RGBA images, 16 bytes of RAM each, cached and resident.
         let mut app = viewing_app(&["a.png", "b.png", "c.png"], 1);
         cache_image(&mut app, "a.png");
         cache_image(&mut app, "b.png");
         cache_image(&mut app, "c.png");
         app.viewer_mut().unwrap().displayed_path = Some("b.png".into());
         let generation = app.window.decay_generation;
-        assert_eq!(app.viewer().unwrap().cache.used_bytes(), 48);
 
-        // Demote sheds the two prefetch neighbors' RAM, keeps the on-screen image.
+        // Demote sheds the two prefetch neighbors, keeping the on-screen image.
         let _ = update(
             &mut app.window,
             &mut app.shared,
@@ -711,9 +717,13 @@ mod tests {
                 stage: DecayStage::Demote,
             },
         );
-        assert_eq!(app.viewer().unwrap().cache.used_bytes(), 16);
+        let v = app.viewer().unwrap();
+        assert!(v.cache.contains_key(std::path::Path::new("b.png")));
+        assert!(!v.cache.contains_key(std::path::Path::new("a.png")));
+        assert!(!v.cache.contains_key(std::path::Path::new("c.png")));
 
-        // EvictRam frees the rest: no RAM held for this window.
+        // EvictRam frees the on-screen image's RAM while keeping its lease, so it
+        // can still read the shared cell if another window holds the texture.
         let _ = update(
             &mut app.window,
             &mut app.shared,
@@ -722,17 +732,26 @@ mod tests {
                 stage: DecayStage::EvictRam,
             },
         );
-        assert_eq!(app.viewer().unwrap().cache.used_bytes(), 0);
+        let b_key = ImageKey::new(
+            &crate::media::pipeline::Source::Fs,
+            std::path::Path::new("b.png"),
+        );
+        assert!(app.shared.store.tier(&b_key) < Tier::InRam);
+        assert!(
+            app.viewer()
+                .unwrap()
+                .cache
+                .contains_key(std::path::Path::new("b.png"))
+        );
     }
 
     #[test]
-    fn drop_vram_releases_textures_but_keeps_ram() {
+    fn drop_vram_drops_the_texture_but_keeps_ram() {
         use crate::app::test_support::viewing_app;
-        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        let mut app = viewing_app(&["a.png"], 0);
         cache_image(&mut app, "a.png");
-        cache_image(&mut app, "b.png");
+        app.viewer_mut().unwrap().displayed_path = Some("a.png".into());
         let generation = app.window.decay_generation;
-        let ram = app.viewer().unwrap().cache.used_bytes();
 
         let _ = update(
             &mut app.window,
@@ -743,10 +762,21 @@ mod tests {
             },
         );
 
+        // The texture is gone, but the RAM source survives in the store, so a
+        // refocus re-uploads with no disk read.
+        let key = ImageKey::new(
+            &crate::media::pipeline::Source::Fs,
+            std::path::Path::new("a.png"),
+        );
+        assert!(app.shared.store.tier(&key) >= Tier::InRam);
         let v = app.viewer().unwrap();
-        // RAM is untouched; every GPU keepalive (the resident texture) is gone.
-        assert_eq!(v.cache.used_bytes(), ram);
-        assert!(v.cache.iter().all(|(_, img)| img.keepalive.is_none()));
+        assert!(
+            v.cache
+                .get(std::path::Path::new("a.png"))
+                .unwrap()
+                .texture()
+                .is_none()
+        );
     }
 
     #[test]

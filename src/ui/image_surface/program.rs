@@ -11,14 +11,15 @@ use super::pipeline::{ImagePipeline, Keepalive};
 use crate::app::Message;
 use crate::ui::image_display::display_geometry;
 
-/// Build the still-image surface element for `handle` at the given zoom/pan.
-/// Fills the image area like the placeholder and video paths do.
+/// Build the still-image surface element at the given zoom/pan. Fills the image
+/// area like the placeholder and video paths do.
 ///
 /// When `texture` is `Some`, the surface renders that resident texture directly
-/// (the display owns it, so a black screen is impossible). `None` falls back to
-/// the id→texture map for the animation/bootstrap paths that don't hold a keepalive.
+/// (read live from the store's shared cell, so a black screen is impossible) and
+/// `handle` is unused. `None` falls back to the id→texture map for the
+/// animation/bootstrap paths, which pass their frame `handle`.
 pub fn view(
-    handle: Handle,
+    handle: Option<Handle>,
     texture: Option<Keepalive>,
     original: (u32, u32),
     zoom: f32,
@@ -45,8 +46,10 @@ pub fn warmup() -> Element<'static, Message> {
 
 /// The shader program: the image to show and where to place it.
 struct ImageSurface {
-    handle: Handle,
-    /// The resident texture the display owns, drawn directly when present.
+    /// The RGBA source for the id→texture fallback (animation/bootstrap). `None`
+    /// for a store-backed still, which draws its resident `texture` directly.
+    handle: Option<Handle>,
+    /// The resident texture, drawn directly when present.
     texture: Option<Keepalive>,
     valid: bool,
     /// Destination rect in normalized widget space: x0, y0, x1, y1.
@@ -59,7 +62,7 @@ struct ImageSurface {
 
 impl ImageSurface {
     fn new(
-        handle: Handle,
+        handle: Option<Handle>,
         texture: Option<Keepalive>,
         original: (u32, u32),
         zoom: f32,
@@ -91,7 +94,7 @@ impl ImageSurface {
     /// A degenerate surface that builds the pipeline but draws nothing.
     fn warmup() -> Self {
         Self {
-            handle: Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
+            handle: None,
             texture: None,
             valid: false,
             dst: [0.0; 4],
@@ -124,7 +127,9 @@ impl<T> shader::Program<T> for ImageSurface {
 
 /// One still's worth of work handed to the renderer.
 pub struct ImagePrimitive {
-    handle: Handle,
+    /// The RGBA source for the id→texture fallback, or `None` for a store-backed
+    /// still that draws its resident `texture` directly.
+    handle: Option<Handle>,
     /// The resident texture to draw, owned for the whole frame. `None` falls back
     /// to the id→texture map (animation/bootstrap).
     texture: Option<Keepalive>,
@@ -137,7 +142,7 @@ pub struct ImagePrimitive {
 impl std::fmt::Debug for ImagePrimitive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ImagePrimitive")
-            .field("id", &self.handle.id())
+            .field("id", &self.handle.as_ref().map(Handle::id))
             .field("valid", &self.valid)
             .finish()
     }
@@ -159,9 +164,10 @@ impl shader::Primitive for ImagePrimitive {
         }
         // A held texture only needs the uniforms written; the id→texture map (and
         // its inline upload) is the fallback for the keepalive-less paths.
-        match &self.texture {
-            Some(_) => pipeline.write_uniforms(queue, self.dst, self.src),
-            None => pipeline.prepare(device, queue, &self.handle, self.dst, self.src),
+        match (&self.texture, &self.handle) {
+            (Some(_), _) => pipeline.write_uniforms(queue, self.dst, self.src),
+            (None, Some(handle)) => pipeline.prepare(device, queue, handle, self.dst, self.src),
+            (None, None) => {}
         }
     }
 

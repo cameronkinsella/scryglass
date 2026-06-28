@@ -41,6 +41,8 @@ pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Envelope>) {
     let mut shared = Shared {
         config,
         pipeline: Pipeline::new(disk_thumbs),
+        store: crate::media::store::Store::default(),
+        thumbs: crate::media::cache::ImageCache::new(crate::app::state::THUMB_BUDGET_BYTES),
         disk_cache_size: None,
         associations_registered: crate::platform::file_associations_registered(),
         #[cfg(feature = "update-check")]

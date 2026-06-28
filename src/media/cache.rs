@@ -1,7 +1,7 @@
-//! LRU cache with a byte budget, keyed by path.
+//! Byte-budgeted LRU cache, keyed by path.
 //!
-//! The app stores GPU-resident allocations in here. The cache is generic
-//! over the stored value so the eviction logic stays pure and testable.
+//! The app uses it for the thumbnail cache shared across windows. The cache is
+//! generic over the stored value so the eviction logic stays pure and testable.
 //! Entries inside the prefetch window are pinned by the caller and never
 //! evicted. Eviction only reclaims images the user has scrolled away from.
 
@@ -41,60 +41,14 @@ impl<T> ImageCache<T> {
         self.used_bytes
     }
 
-    /// The current byte budget, so a rebalance can skip eviction when a
-    /// window's share is unchanged.
-    pub fn budget(&self) -> usize {
-        self.budget
-    }
-
     pub fn contains(&self, path: &Path) -> bool {
         self.entries.contains_key(path)
     }
 
-    /// Fetch a cached value, marking it as recently used.
-    pub fn get(&mut self, path: &Path) -> Option<&T> {
-        self.clock += 1;
-        let clock = self.clock;
-        let entry = self.entries.get_mut(path)?;
-        entry.last_used = clock;
-        Some(&entry.value)
-    }
-
-    /// Fetch without touching recency, for read-only view code.
+    /// Fetch a cached value (recency is tracked by insertion, not access, since
+    /// the render paths read through `peek`).
     pub fn peek(&self, path: &Path) -> Option<&T> {
         self.entries.get(path).map(|e| &e.value)
-    }
-
-    /// Iterate entries as `(path, value)` without touching recency. Used to
-    /// re-upload a minimized window's images from their RAM sources on restore.
-    pub fn iter(&self) -> impl Iterator<Item = (&Path, &T)> {
-        self.entries.iter().map(|(p, e)| (p.as_path(), &e.value))
-    }
-
-    /// Mutable access to every cached value, for releasing GPU keepalives when
-    /// a window minimizes (the RAM source stays, the texture is reclaimed).
-    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut T> {
-        self.entries.values_mut().map(|e| &mut e.value)
-    }
-
-    /// Change the byte budget (settings). Eviction applies on the next
-    /// `evict_over_budget` call.
-    pub fn set_budget(&mut self, budget_bytes: usize) {
-        self.budget = budget_bytes;
-    }
-
-    /// Drop every entry whose path is not in `keep`, regardless of budget. Used
-    /// to shed an unfocused window's prefetch down to just its on-screen image.
-    pub fn retain(&mut self, keep: &HashSet<PathBuf>) {
-        let mut freed = 0;
-        self.entries.retain(|path, entry| {
-            let stay = keep.contains(path);
-            if !stay {
-                freed += entry.bytes;
-            }
-            stay
-        });
-        self.used_bytes = self.used_bytes.saturating_sub(freed);
     }
 
     /// Remove an entry (file deleted or renamed), returning its value.
@@ -174,21 +128,20 @@ mod tests {
         cache.insert("a.png".into(), 1, 40);
         cache.insert("a.png".into(), 2, 50);
         assert_eq!(cache.used_bytes(), 50);
-        assert_eq!(cache.get(Path::new("a.png")), Some(&2));
+        assert_eq!(cache.peek(Path::new("a.png")), Some(&2));
     }
 
     #[test]
-    fn evicts_least_recently_used_first() {
+    fn evicts_the_oldest_first() {
         let mut cache: ImageCache<u8> = ImageCache::new(100);
         cache.insert("a.png".into(), 1, 40);
         cache.insert("b.png".into(), 2, 40);
-        // Touch a so b becomes the LRU entry.
-        cache.get(Path::new("a.png"));
         cache.insert("c.png".into(), 3, 40); // 120 > 100
 
         cache.evict_over_budget(&pins(&[]));
-        assert!(cache.contains(Path::new("a.png")));
-        assert!(!cache.contains(Path::new("b.png")));
+        // Recency is by insertion, so the oldest entry is dropped first.
+        assert!(!cache.contains(Path::new("a.png")));
+        assert!(cache.contains(Path::new("b.png")));
         assert!(cache.contains(Path::new("c.png")));
         assert_eq!(cache.used_bytes(), 80);
     }
@@ -205,19 +158,6 @@ mod tests {
         cache.evict_over_budget(&pins(&["new.png"]));
         assert!(!cache.contains(Path::new("old.png")));
         assert!(cache.contains(Path::new("new.png")));
-    }
-
-    #[test]
-    fn retain_drops_unkept_entries_and_frees_their_bytes() {
-        let mut cache: ImageCache<u8> = ImageCache::new(100);
-        cache.insert("a.png".into(), 1, 40);
-        cache.insert("b.png".into(), 2, 30);
-        cache.insert("c.png".into(), 3, 20);
-        cache.retain(&pins(&["b.png"]));
-        assert!(!cache.contains(Path::new("a.png")));
-        assert!(cache.contains(Path::new("b.png")));
-        assert!(!cache.contains(Path::new("c.png")));
-        assert_eq!(cache.used_bytes(), 30);
     }
 
     #[test]

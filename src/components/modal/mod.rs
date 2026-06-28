@@ -95,7 +95,9 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                     return purge;
                 };
                 viewer.cache.remove(&path);
-                viewer.thumbs.remove(&path);
+                shared
+                    .thumbs
+                    .remove(&crate::media::pipeline::thumb_key(&viewer.source, &path));
                 viewer.anim_player.remove(&path);
                 viewer.failed_thumbs.remove(&path);
                 viewer.failed_loads.remove(&path);
@@ -192,13 +194,17 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 let purge = purge_disk_thumb(&shared.pipeline, &old);
                 if let Some(viewer) = win.viewer_mut() {
                     viewer.nav.rename(&old, new.clone());
-                    if let Some(image) = viewer.cache.remove(&old) {
-                        let cost = image.byte_cost();
-                        viewer.cache.insert(new.clone(), image, cost);
+                    // Carry the store lease to the new path so the on-screen image
+                    // stays resident across the rename (it still points at the same
+                    // pixels until a fresh decode under the new name).
+                    if let Some(lease) = viewer.cache.remove(&old) {
+                        viewer.cache.insert(new.clone(), lease);
                     }
-                    if let Some(thumb) = viewer.thumbs.remove(&old) {
+                    let old_thumb = crate::media::pipeline::thumb_key(&viewer.source, &old);
+                    let new_thumb = crate::media::pipeline::thumb_key(&viewer.source, &new);
+                    if let Some(thumb) = shared.thumbs.remove(&old_thumb) {
                         let cost = thumb.byte_cost();
-                        viewer.thumbs.insert(new.clone(), thumb, cost);
+                        shared.thumbs.insert(new_thumb, thumb, cost);
                     }
                     viewer.anim_player.remove(&old);
                     viewer.failed_loads.remove(&old);

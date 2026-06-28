@@ -120,6 +120,7 @@ pub fn filmstrip<'a>(
     window: iced::window::Id,
     files: &'a [PathBuf],
     cursor: usize,
+    source: &'a crate::media::pipeline::Source,
     thumbs: &'a ImageCache<Thumb>,
     scroll_x: f32,
     viewport_w: f32,
@@ -150,18 +151,19 @@ pub fn filmstrip<'a>(
     for (i, path) in files[range.clone()].iter().enumerate() {
         let index = range.start + i;
 
-        let content: Element<'a, FilmstripMessage> = match thumbs.peek(path) {
-            Some(thumb) => image(thumb.handle.clone())
-                .content_fit(iced::ContentFit::Cover)
-                .width(Length::Fixed(THUMB_SIZE))
-                .height(Length::Fixed(THUMB_SIZE))
-                .into(),
-            None => container(space::horizontal())
-                .width(Length::Fixed(THUMB_SIZE))
-                .height(Length::Fixed(THUMB_SIZE))
-                .style(theme::thumb_placeholder)
-                .into(),
-        };
+        let content: Element<'a, FilmstripMessage> =
+            match thumbs.peek(&crate::media::pipeline::thumb_key(source, path)) {
+                Some(thumb) => image(thumb.handle.clone())
+                    .content_fit(iced::ContentFit::Cover)
+                    .width(Length::Fixed(THUMB_SIZE))
+                    .height(Length::Fixed(THUMB_SIZE))
+                    .into(),
+                None => container(space::horizontal())
+                    .width(Length::Fixed(THUMB_SIZE))
+                    .height(Length::Fixed(THUMB_SIZE))
+                    .style(theme::thumb_placeholder)
+                    .into(),
+            };
 
         let cell = button(content)
             .on_press(FilmstripMessage::Clicked(index))

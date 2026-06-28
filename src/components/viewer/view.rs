@@ -160,12 +160,55 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
     let image_view: Element<'_, Message> = match &viewer.displayed {
         DisplayedImage::None => ui::image_display::empty_viewport(),
         DisplayedImage::Full {
+            original_size,
+            rotated,
+        } => {
+            // The on-screen pixels are derived from the shared store at render
+            // time: the rotation override, else the cache lease's cell texture,
+            // else the thumbnail blur. The display owns nothing, so it always
+            // reflects what the store holds and can never show a black frame.
+            let path = viewer.displayed_path.as_deref();
+            let texture = rotated.clone().or_else(|| {
+                path.and_then(|p| viewer.cache.get(p))
+                    .and_then(|lease| lease.texture())
+            });
+            let viewport = (win.viewport_size.width, win.viewport_size.height);
+            match texture {
+                Some(texture) => ui::image_surface::view(
+                    None,
+                    Some(texture),
+                    *original_size,
+                    viewer.zoom,
+                    viewer.pan,
+                    viewport,
+                    shared.config.crisp_pixels,
+                ),
+                None => match path.and_then(|p| {
+                    shared
+                        .thumbs
+                        .peek(&crate::media::pipeline::thumb_key(&viewer.source, p))
+                }) {
+                    Some(thumb) => ui::image_display::image_display(
+                        &thumb.handle,
+                        thumb.size,
+                        thumb.original_size,
+                        viewer.zoom,
+                        viewer.pan,
+                        viewport,
+                        false,
+                    ),
+                    // Evicted with no thumbnail (rare and brief): a refocus
+                    // re-decodes behind this empty frame.
+                    None => ui::image_display::empty_viewport(),
+                },
+            }
+        }
+        DisplayedImage::Animated {
             handle,
             original_size,
-            texture,
         } => ui::image_surface::view(
-            handle.clone(),
-            texture.clone(),
+            Some(handle.clone()),
+            None,
             *original_size,
             viewer.zoom,
             viewer.pan,
@@ -198,14 +241,16 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
         DisplayedImage::Error { message } => ui::image_display::error_viewport(message),
     };
 
-    // Behind non-full content, a warmup surface builds the image pipeline up
-    // front. A full image already drives it, so it needs none.
-    let image_view: Element<'_, Message> =
-        if matches!(viewer.displayed, DisplayedImage::Full { .. }) {
-            image_view
-        } else {
-            Stack::with_children(vec![ui::image_surface::warmup(), image_view]).into()
-        };
+    // Behind non-surface content, a warmup surface builds the image pipeline up
+    // front. A still or animation already drives the surface, so it needs none.
+    let image_view: Element<'_, Message> = if matches!(
+        viewer.displayed,
+        DisplayedImage::Full { .. } | DisplayedImage::Animated { .. }
+    ) {
+        image_view
+    } else {
+        Stack::with_children(vec![ui::image_surface::warmup(), image_view]).into()
+    };
 
     // Optional checkerboard behind the image reveals transparency.
     let image_view: Element<'_, Message> = if shared.config.show_checkerboard

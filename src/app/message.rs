@@ -136,13 +136,16 @@ pub fn is_menu_message(msg: &Message) -> bool {
                     | open::Message::FileDialogResult(_)
             )
             | Message::Media(
-                media::Message::Loaded { .. }
+                media::Message::Decoded { .. }
+                    | media::Message::TextureReady { .. }
+                    | media::Message::MintFailed { .. }
+                    | media::Message::DecodeFailed { .. }
+                    | media::Message::AnimDecoded { .. }
                     | media::Message::ThumbLoaded { .. }
                     | media::Message::FileSizeProbed(_, _)
                     | media::Message::Resorted(_)
                     | media::Message::ExifLoaded(_, _)
                     | media::Message::ViewRotated { .. }
-                    | media::Message::Reuploaded { .. }
                     | media::Message::PromoteCurrent(_)
                     | media::Message::SpinnerTick
             )
@@ -181,13 +184,16 @@ pub fn is_context_menu_message(msg: &Message) -> bool {
                     | open::Message::FileDialogResult(_)
             )
             | Message::Media(
-                media::Message::Loaded { .. }
+                media::Message::Decoded { .. }
+                    | media::Message::TextureReady { .. }
+                    | media::Message::MintFailed { .. }
+                    | media::Message::DecodeFailed { .. }
+                    | media::Message::AnimDecoded { .. }
                     | media::Message::ThumbLoaded { .. }
                     | media::Message::FileSizeProbed(_, _)
                     | media::Message::Resorted(_)
                     | media::Message::ExifLoaded(_, _)
                     | media::Message::ViewRotated { .. }
-                    | media::Message::Reuploaded { .. }
                     | media::Message::PromoteCurrent(_)
                     | media::Message::SpinnerTick
             )

@@ -56,6 +56,7 @@ use crate::components::toasts::Toast;
 use crate::components::toolbar::OpenMenu;
 use crate::config::AppConfig;
 use crate::media::pipeline::Pipeline;
+use crate::media::store::Store;
 use crate::ui;
 
 use state::{Session, Viewer};
@@ -104,6 +105,14 @@ pub struct Shared {
     pub(crate) config: AppConfig,
     /// Load orchestrator: cancellation generations and priority lanes.
     pub(crate) pipeline: Pipeline,
+    /// The one owner of every still image's RAM and GPU texture, keyed by image
+    /// identity and shared across all windows. Windows hold leases into it. It
+    /// decides each image's tier from their aggregate demand.
+    pub(crate) store: Store,
+    /// In-memory thumbnails (the filmstrip previews and the placeholder blur),
+    /// shared across all windows and keyed by [`crate::media::pipeline::thumb_key`]
+    /// so each image is thumbnailed once and every window reads the same copy.
+    pub(crate) thumbs: crate::media::cache::ImageCache<crate::app::state::Thumb>,
     /// Probed size of the disk thumbnail store (settings display).
     pub(crate) disk_cache_size: Option<u64>,
     /// Whether the app is in the OS Open with menu (settings display,

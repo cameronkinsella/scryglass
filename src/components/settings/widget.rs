@@ -43,7 +43,6 @@ pub fn settings<'a>(
         };
 
     let depth = config.prefetch_depth;
-    let budget = config.cache_budget_mb;
 
     let mut rows = column![
         row![
@@ -79,12 +78,6 @@ pub fn settings<'a>(
             depth.to_string(),
             (depth > 1).then(|| SettingsMessage::SetPrefetchDepth(depth - 1)),
             (depth < 10).then(|| SettingsMessage::SetPrefetchDepth(depth + 1)),
-        ),
-        stepper(
-            "Image cache budget",
-            format!("{budget} MB"),
-            (budget > 128).then(|| SettingsMessage::SetCacheBudget(budget - 128)),
-            (budget < 4096).then(|| SettingsMessage::SetCacheBudget(budget + 128)),
         ),
     ]
     .spacing(10)
@@ -247,7 +240,6 @@ mod tests {
         let mut ui = simulator(card(None));
         assert!(ui.find("Settings").is_ok());
         assert!(ui.find("Prefetch depth").is_ok());
-        assert!(ui.find("Image cache budget").is_ok());
     }
 
     // Toggler labels aren't surfaced to `find`, so the disk-thumbs section is

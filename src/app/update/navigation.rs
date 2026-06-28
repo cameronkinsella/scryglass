@@ -9,13 +9,14 @@ use crate::app::state::{Direction, DisplayedImage, Session, Viewer};
 use crate::app::{MediaMessage, Message, OpenMessage, Shared, Window};
 use crate::config::{AppConfig, ZoomMode};
 use crate::media::archive::{self, ArchiveIndex};
-use crate::media::pipeline::{Lane, Source, ThumbUrgency};
+use crate::media::pipeline::{Source, ThumbUrgency, thumb_key};
+use crate::media::store::{ImageKey, Tier};
 use crate::nav::{self, Nav};
 
 use super::NavTarget;
 use super::media_tasks::{
-    fire_exif, fire_load, fire_prefetch, fire_reupload_res, fire_thumb, fire_thumbnailer,
-    probe_size, show_loaded, show_placeholder_or_clear,
+    fire_exif, fire_load, fire_prefetch, fire_thumb, fire_thumbnailer, probe_size, show_loaded,
+    show_placeholder_or_clear,
 };
 use super::video_flow::start_video;
 
@@ -81,7 +82,6 @@ pub(crate) fn open_viewer(
     let window_id = win.id;
     let depth = shared.config.prefetch_depth;
     let prefetch_vram = shared.config.resource.prefetch_vram;
-    let budget = shared.config.cache_budget_mb * 1024 * 1024;
     let window_w = win.window_size.width;
     let view = win.viewport_size;
     let show_filmstrip = shared.config.show_filmstrip;
@@ -89,7 +89,7 @@ pub(crate) fn open_viewer(
 
     // Privacy hygiene: purge persisted thumbnails of files that were
     // deleted from this folder/archive since the last visit. Uses the
-    // listing we already have, with no extra source I/O.
+    // listing already in hand, with no extra source I/O.
     let reconcile = match pipeline.disk() {
         Some(disk) => {
             let (container, _) = crate::media::pipeline::cache_key(
@@ -115,7 +115,7 @@ pub(crate) fn open_viewer(
         None => Task::none(),
     };
 
-    let mut viewer = Viewer::new(nav, source, AnimPlayer::new(), budget);
+    let mut viewer = Viewer::new(nav, source, AnimPlayer::new());
     let current = viewer.nav.current().to_path_buf();
     let mut tasks = vec![reconcile, probe_size(&mut viewer, current.clone())];
 
@@ -131,18 +131,32 @@ pub(crate) fn open_viewer(
     } else {
         tasks.push(fire_thumb(
             &pipeline,
+            &shared.thumbs,
             &mut viewer,
             current.clone(),
             ThumbUrgency::Urgent,
         ));
         tasks.push(fire_load(
+            &mut shared.store,
             &pipeline,
             &mut viewer,
-            current,
-            Lane::Current,
+            current.clone(),
+            Tier::Full,
             view,
-            prefetch_vram,
         ));
+        // Another window may already hold this image resident: show it at once,
+        // sharing the one texture with no fresh decode. Otherwise the load
+        // above brings it in and the thumbnail blur stands in until then.
+        let key = ImageKey::new(&viewer.source, &current);
+        let resident = viewer
+            .cache
+            .get(&current)
+            .and_then(|lease| lease.texture())
+            .is_some();
+        if resident && let Some(ram) = shared.store.ram(&key) {
+            let zoom_mode = shared.config.zoom_mode;
+            show_loaded(&mut viewer, &current, ram.original_size, zoom_mode, view);
+        }
     }
     // Set the scroll offset before the thumbnailer fires, so it reads the
     // cursor as on screen and fans from there, not from index 0.
@@ -161,6 +175,7 @@ pub(crate) fn open_viewer(
 
     tasks.extend(fire_thumbnailer(
         &pipeline,
+        &shared.thumbs,
         &mut viewer,
         3,
         window_w,
@@ -168,6 +183,7 @@ pub(crate) fn open_viewer(
     ));
     // Prefetch after thumbnailing (see complete_navigation).
     tasks.extend(fire_prefetch(
+        &mut shared.store,
         &pipeline,
         &mut viewer,
         depth,
@@ -264,7 +280,6 @@ pub(crate) fn open_path(path: PathBuf) -> Task<Message> {
 pub(crate) fn navigate(win: &mut Window, shared: &mut Shared, target: NavTarget) -> Task<Message> {
     let pipeline = shared.pipeline.clone();
     let view = win.viewport_size;
-    let prefetch_vram = shared.config.resource.prefetch_vram;
     let Some(viewer) = win.viewer_mut() else {
         return Task::none();
     };
@@ -295,7 +310,7 @@ pub(crate) fn navigate(win: &mut Window, shared: &mut Shared, target: NavTarget)
 
     // Something is on hand to show (full image, blur, or cached GIF):
     // move immediately.
-    if viewer.displayable(&target_path) {
+    if viewer.displayable(&shared.thumbs, &target_path) {
         return complete_navigation(win, shared, target_index, true);
     }
 
@@ -306,14 +321,20 @@ pub(crate) fn navigate(win: &mut Window, shared: &mut Shared, target: NavTarget)
     viewer.pending_since = Some(Instant::now());
 
     let tasks = vec![
-        fire_thumb(&pipeline, viewer, target_path.clone(), ThumbUrgency::Urgent),
+        fire_thumb(
+            &pipeline,
+            &shared.thumbs,
+            viewer,
+            target_path.clone(),
+            ThumbUrgency::Urgent,
+        ),
         fire_load(
+            &mut shared.store,
             &pipeline,
             viewer,
             target_path,
-            Lane::Current,
+            Tier::Full,
             view,
-            prefetch_vram,
         ),
     ];
     Task::batch(tasks)
@@ -357,13 +378,18 @@ pub(crate) fn scrub_to(
     viewer.video_extracting = None;
 
     let current = viewer.nav.current().to_path_buf();
-    if let Some(cached) = viewer.cache.get(&current).cloned() {
-        show_loaded(viewer, &current, cached, zoom_mode, viewport);
+    let key = ImageKey::new(&viewer.source, &current);
+    let resident = viewer
+        .cache
+        .get(&current)
+        .is_some_and(|lease| lease.texture().is_some());
+    if let Some(ram) = resident.then(|| shared.store.ram(&key)).flatten() {
+        show_loaded(viewer, &current, ram.original_size, zoom_mode, viewport);
     } else {
         // Show the blur if one exists, otherwise a spinner. The sharp image
         // loads on settle.
         viewer.pending_since = Some(Instant::now());
-        show_placeholder_or_clear(viewer, &current, zoom_mode, viewport);
+        show_placeholder_or_clear(viewer, &shared.thumbs, &current, zoom_mode, viewport);
     }
 
     let mut tasks = Vec::new();
@@ -391,6 +417,7 @@ pub(crate) fn scrub_to(
     // Follow the cursor with the outward fan.
     tasks.extend(fire_thumbnailer(
         &pipeline,
+        &shared.thumbs,
         viewer,
         3,
         window_w,
@@ -408,7 +435,7 @@ pub(crate) fn resolve_pending_nav(win: &mut Window, shared: &mut Shared) -> Task
         return Task::none();
     };
     let target_path = viewer.nav.files()[target_index].to_path_buf();
-    if viewer.displayable(&target_path) {
+    if viewer.displayable(&shared.thumbs, &target_path) {
         // No generation bump: the in-flight load for this very image must
         // survive the move (a bump would cancel it and double the decode).
         complete_navigation(win, shared, target_index, false)
@@ -446,7 +473,7 @@ pub(crate) fn complete_navigation(
 
     if bump_generation {
         // Everything in flight for the old position is now stale, including
-        // background thumbnails for the neighborhood we just left.
+        // background thumbnails for the neighborhood left behind.
         pipeline.bump_generation();
         pipeline.bump_thumb_generation();
         // Forget the queued thumbnails so the new neighborhood re-fires now
@@ -488,7 +515,7 @@ pub(crate) fn complete_navigation(
         // Video: blur-free spinner until the first frame arrives. The
         // session's tick subscription drives frames from here.
         viewer.pending_since = Some(Instant::now());
-        show_placeholder_or_clear(viewer, &current, zoom_mode, viewport);
+        show_placeholder_or_clear(viewer, &shared.thumbs, &current, zoom_mode, viewport);
         tasks.push(start_video(
             viewer,
             current.clone(),
@@ -500,17 +527,41 @@ pub(crate) fn complete_navigation(
     } else if let Some(anim_task) = viewer.anim_player.try_start_from_cache(&current) {
         // Cached animation: blur stands in until frame 0 allocates.
         viewer.pending_since = Some(Instant::now());
-        show_placeholder_or_clear(viewer, &current, zoom_mode, viewport);
+        show_placeholder_or_clear(viewer, &shared.thumbs, &current, zoom_mode, viewport);
         tasks.push(anim_task.map(Message::Anim));
-    } else if let Some(cached) = viewer.cache.get(&current).cloned() {
-        if cached.keepalive.is_some() {
-            // Instant display, the common case within the prefetch window.
-            let view_res = !cached.gpu_full;
-            show_loaded(viewer, &current, cached, zoom_mode, viewport);
-            // A prefetched neighbor displays at view resolution; once navigation
-            // settles here, promote it to full-res so zoom is crisp. Debounced by
-            // the displayed path, so rapid navigation past it never promotes.
-            if view_res {
+    } else {
+        let key = ImageKey::new(&viewer.source, &current);
+        // Take a lease: if a texture is resident anywhere (this window, or another
+        // window holding the same file), share it at its current tier with no
+        // upload. Otherwise request full, which decodes. An existing lease here is
+        // left as-is.
+        let store_tier = shared.store.tier(&key);
+        let want = if store_tier >= Tier::View {
+            store_tier
+        } else {
+            Tier::Full
+        };
+        tasks.push(fire_load(
+            &mut shared.store,
+            &pipeline,
+            viewer,
+            current.clone(),
+            want,
+            viewport,
+        ));
+
+        let resident = viewer
+            .cache
+            .get(&current)
+            .and_then(|lease| lease.texture())
+            .is_some();
+        if let Some(ram) = resident.then(|| shared.store.ram(&key)).flatten() {
+            // A texture is in hand (this window's, or shared from another window):
+            // show it at once, the common case within the prefetch window.
+            show_loaded(viewer, &current, ram.original_size, zoom_mode, viewport);
+            // A view-res image promotes to full once navigation settles, debounced
+            // by the displayed path so rapid pass-through never promotes.
+            if store_tier < Tier::Full {
                 let p = current.clone();
                 tasks.push(Task::future(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -518,31 +569,34 @@ pub(crate) fn complete_navigation(
                 }));
             }
         } else {
-            // Decoded to RAM but never uploaded (prefetch_vram = none): the blur
-            // stands in while we upload from the surviving RAM source, no disk
-            // read. Reuploaded swaps the sharp image in once its texture lands.
+            // RAM only here, or still decoding: the blur stands in while the store
+            // brings it to a full-res texture (no disk read when the RAM survives).
             viewer.pending_since = Some(Instant::now());
-            show_placeholder_or_clear(viewer, &current, zoom_mode, viewport);
-            let zoom = viewer.zoom;
-            tasks.push(fire_reupload_res(viewer, &current, zoom, true));
+            show_placeholder_or_clear(viewer, &shared.thumbs, &current, zoom_mode, viewport);
+            if want < Tier::Full {
+                tasks.push(fire_load(
+                    &mut shared.store,
+                    &pipeline,
+                    viewer,
+                    current.clone(),
+                    Tier::Full,
+                    viewport,
+                ));
+            }
         }
-    } else {
-        // Navigation only lands on displayable targets, so the blur is
-        // guaranteed here. The full image (or animation) loads behind it.
-        viewer.pending_since = Some(Instant::now());
-        show_placeholder_or_clear(viewer, &current, zoom_mode, viewport);
-        tasks.push(fire_load(
-            &pipeline,
-            viewer,
-            current,
-            Lane::Current,
-            viewport,
-            prefetch_vram,
-        ));
     }
 
+    // Leased-set only: keep the on-screen image and its prefetch window.
+    // Everything else drops its lease, so the store demotes or evicts it.
     let pinned = viewer.pinned_paths(depth);
-    viewer.cache.evict_over_budget(&pinned);
+    viewer.cache.retain(|p, _| pinned.contains(p));
+    // The shared thumbnail budget is bounded by this window's pinned set (others
+    // re-thumbnail on demand). Pin by the shared key, not the per-window path.
+    let pinned_thumbs: std::collections::HashSet<PathBuf> = pinned
+        .iter()
+        .map(|p| thumb_key(&viewer.source, p))
+        .collect();
+    shared.thumbs.evict_over_budget(&pinned_thumbs);
 
     if show_filmstrip {
         // Scroll only enough to keep the cursor on screen. Warm visible thumbs.
@@ -565,12 +619,14 @@ pub(crate) fn complete_navigation(
     // files already being full-loaded, so prefetch-first leaves no blur.
     tasks.extend(fire_thumbnailer(
         &pipeline,
+        &shared.thumbs,
         viewer,
         3,
         window_w,
         show_filmstrip,
     ));
     tasks.extend(fire_prefetch(
+        &mut shared.store,
         &pipeline,
         viewer,
         depth,
@@ -712,7 +768,7 @@ mod tests {
             NavTarget::Delta(Direction::Forward),
         );
         let v = app.viewer().unwrap();
-        assert_eq!(v.nav.cursor(), 1); // b.png had a thumb, so we moved
+        assert_eq!(v.nav.cursor(), 1); // b.png had a thumb, so the cursor moved
         assert!(v.pending_nav.is_none());
     }
 
@@ -750,7 +806,7 @@ mod tests {
         let names = many();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut app = viewing_app(&refs, 0);
-        // A thumbnail queued far from where we jump.
+        // A thumbnail queued far from the jump target.
         app.viewer_mut()
             .unwrap()
             .in_flight_thumbs

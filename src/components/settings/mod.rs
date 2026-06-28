@@ -8,7 +8,6 @@ pub enum Message {
     #[cfg(feature = "disk-thumbs")]
     ClearDiskThumbs,
     SetPrefetchDepth(usize),
-    SetCacheBudget(usize),
     ToggleReadOnly,
     ToggleConfirmDelete,
     ToggleMouseNav,
@@ -150,14 +149,6 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             save_config(win, shared)
         }
 
-        Message::SetCacheBudget(megabytes) => {
-            // The new budget is split across all viewer windows by the top-level
-            // rebalance that runs after this message, so no per-window eviction
-            // is needed here.
-            shared.config.cache_budget_mb = megabytes.clamp(128, 4096);
-            save_config(win, shared)
-        }
-
         Message::ToggleReadOnly => {
             shared.config.read_only = !shared.config.read_only;
             save_config(win, shared)
@@ -285,25 +276,6 @@ mod tests {
             Message::SetPrefetchDepth(4),
         );
         assert_eq!(app.shared.config.prefetch_depth, 4);
-    }
-
-    #[test]
-    fn cache_budget_clamps_to_its_range() {
-        let mut app = empty_app();
-        let _ = update(&mut app.window, &mut app.shared, Message::SetCacheBudget(1));
-        assert_eq!(app.shared.config.cache_budget_mb, 128);
-        let _ = update(
-            &mut app.window,
-            &mut app.shared,
-            Message::SetCacheBudget(99_999),
-        );
-        assert_eq!(app.shared.config.cache_budget_mb, 4096);
-        let _ = update(
-            &mut app.window,
-            &mut app.shared,
-            Message::SetCacheBudget(512),
-        );
-        assert_eq!(app.shared.config.cache_budget_mb, 512);
     }
 
     #[test]

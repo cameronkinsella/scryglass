@@ -25,8 +25,8 @@ pub(crate) use file_ops::{
     copy_bitmap, copy_rgba_bitmap, file_op_target, fire_delete, purge_disk_thumb, validate_rename,
 };
 pub(crate) use media_tasks::{
-    fire_exif, fire_load, fire_prefetch, fire_restore_textures, fire_reupload_res, fire_rotate,
-    fire_thumbnailer, show_loaded, show_placeholder,
+    fire_exif, fire_load, fire_prefetch, fire_rotate, fire_thumbnailer, run_jobs, show_loaded,
+    show_placeholder,
 };
 pub(crate) use navigation::open_path;
 pub(crate) use navigation::{
@@ -47,12 +47,11 @@ pub(crate) enum NavTarget {
 }
 
 /// Daemon update: route a per-window message to its window, or handle a
-/// window-lifecycle event, then re-split cache budgets if the window count
-/// changed.
+/// window-lifecycle event, then let the store reconcile any image whose demand a
+/// dropped lease just lowered (navigation, decay, window close).
 pub fn update(app: &mut App, envelope: Envelope) -> Task<Envelope> {
     let task = route(app, envelope);
-    rebalance_budgets(app);
-    task
+    Task::batch([task, pump_store(app)])
 }
 
 fn route(app: &mut App, envelope: Envelope) -> Task<Envelope> {
@@ -97,8 +96,8 @@ fn route(app: &mut App, envelope: Envelope) -> Task<Envelope> {
 
 /// Adopt a hand-edited config across the whole app: re-theme (read live from the
 /// config at render), recompute every viewport (chrome/zoom-mode changes shift
-/// it), and let the budget rebalance and the decay tiers pick up the new values
-/// on their next pass. Window geometry only takes effect on the next window.
+/// it), and let the decay tiers pick up the new values on their next pass. Window
+/// geometry only takes effect on the next window.
 fn apply_config(app: &mut App, config: AppConfig) {
     app.shared.config = config;
     for win in app.windows.values_mut() {
@@ -132,33 +131,32 @@ fn config_invalid_toast(app: &mut App) -> Task<Envelope> {
     )
 }
 
-/// Divide the image and thumbnail budgets evenly across the windows that hold a
-/// viewer, so total cache memory stays bounded however many windows are open.
-/// Cheap per message (a count plus a budget compare); only a viewer whose share
-/// actually changed pays for an eviction pass.
-fn rebalance_budgets(app: &mut App) {
-    // TODO: add a config knob to scope the cache budget per-window or globally.
-    let share = app
-        .windows
-        .values()
-        .filter(|w| w.viewer().is_some())
-        .count()
-        .max(1);
-    let cache_each = app.shared.config.cache_budget_mb * 1024 * 1024 / share;
-    let thumb_each = super::state::THUMB_BUDGET_BYTES / share;
-    let depth = app.shared.config.prefetch_depth;
-    for win in app.windows.values_mut() {
-        if let Some(viewer) = win.viewer_mut() {
-            if viewer.cache.budget() == cache_each {
-                continue;
-            }
-            viewer.cache.set_budget(cache_each);
-            viewer.thumbs.set_budget(thumb_each);
-            let pinned = viewer.pinned_paths(depth);
-            viewer.cache.evict_over_budget(&pinned);
-            viewer.thumbs.evict_over_budget(&pinned);
-        }
+/// Drain the store's drop-fed dirty queue and run whatever re-mint a lowered
+/// demand calls for (re-uploading a now-smaller texture as a higher tier is
+/// released). Sync demotes and evictions already happened on the lease drop; this
+/// fires only the async re-mints, which touch the shared cell, not any window's
+/// display, so they route through any live window. O(keys dirtied), never a scan.
+fn pump_store(app: &mut App) -> Task<Envelope> {
+    let outcome = app.shared.store.pump();
+    if outcome.jobs.is_empty() {
+        return Task::none();
     }
+    let target = app
+        .windows
+        .iter()
+        .find(|(_, w)| w.viewer().is_some())
+        .map(|(id, w)| (*id, w.viewport_size));
+    let Some((id, view)) = target else {
+        return Task::none();
+    };
+    let pipeline = app.shared.pipeline.clone();
+    let task = run_jobs(
+        outcome.jobs,
+        &pipeline,
+        crate::media::pipeline::Lane::Prefetch,
+        view,
+    );
+    Envelope::wrap(id, task)
 }
 
 /// Open a new window for a forwarded launch at the last-saved size (the OS
@@ -304,42 +302,17 @@ mod tests {
     }
 
     #[test]
-    fn cache_budget_is_split_across_viewer_windows() {
-        let (mut app, id1) = into_app(viewing_app(&["a.png"], 0));
-        let full = app.shared.config.cache_budget_mb * 1024 * 1024;
-        // One viewer holds the whole budget.
-        rebalance_budgets(&mut app);
-        assert_eq!(app.windows[&id1].viewer().unwrap().cache.budget(), full);
-
-        // A second viewer window halves each window's share.
-        let second = viewing_app(&["b.png"], 0).window;
-        let id2 = second.id;
-        app.windows.insert(id2, second);
-        rebalance_budgets(&mut app);
-        assert_eq!(app.windows[&id1].viewer().unwrap().cache.budget(), full / 2);
-        assert_eq!(app.windows[&id2].viewer().unwrap().cache.budget(), full / 2);
-
-        // Closing one restores the survivor to the whole budget.
-        app.windows.remove(&id2);
-        rebalance_budgets(&mut app);
-        assert_eq!(app.windows[&id1].viewer().unwrap().cache.budget(), full);
-    }
-
-    #[test]
     fn a_config_reload_applies_new_settings_across_windows() {
         use crate::config::ThemeChoice;
         let (mut app, _id) = into_app(viewing_app(&["a.png"], 0));
         let mut edited = app.shared.config.clone();
         edited.theme = ThemeChoice::Light;
-        edited.cache_budget_mb = 1234;
+        edited.prefetch_depth = 7;
 
         let _ = update(&mut app, Envelope::ConfigReloaded(Box::new(edited)));
 
         assert_eq!(app.shared.config.theme, ThemeChoice::Light);
-        assert_eq!(app.shared.config.cache_budget_mb, 1234);
-        // The new budget reached the viewer window (rebalance ran after apply).
-        let viewer = app.windows.values().next().unwrap().viewer().unwrap();
-        assert_eq!(viewer.cache.budget(), 1234 * 1024 * 1024);
+        assert_eq!(app.shared.config.prefetch_depth, 7);
     }
 
     #[test]

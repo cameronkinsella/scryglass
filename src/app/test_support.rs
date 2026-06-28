@@ -11,7 +11,7 @@ use iced::{Size, window};
 use crate::anim::AnimPlayer;
 use crate::app::state::{Session, Thumb, Viewer};
 use crate::config::AppConfig;
-use crate::media::pipeline::{Pipeline, Source};
+use crate::media::pipeline::{Pipeline, Source, thumb_key};
 use crate::nav::Nav;
 
 use super::{App, Shared, Window};
@@ -42,6 +42,8 @@ pub(crate) fn empty_app() -> TestApp {
         shared: Shared {
             config: AppConfig::default(),
             pipeline: Pipeline::new(None),
+            store: crate::media::store::Store::default(),
+            thumbs: crate::media::cache::ImageCache::new(crate::app::state::THUMB_BUDGET_BYTES),
             disk_cache_size: None,
             associations_registered: false,
             #[cfg(feature = "update-check")]
@@ -79,8 +81,7 @@ pub(crate) fn viewing_app(names: &[&str], cursor: usize) -> TestApp {
     let files: Vec<PathBuf> = names.iter().map(PathBuf::from).collect();
     let start = files[cursor].clone();
     let nav = Nav::new(files, &start).unwrap();
-    let budget = AppConfig::default().cache_budget_mb * 1024 * 1024;
-    let viewer = Viewer::new(nav, Source::Fs, AnimPlayer::new(), budget);
+    let viewer = Viewer::new(nav, Source::Fs, AnimPlayer::new());
     let mut app = empty_app();
     app.window.session = Session::Viewing(Box::new(viewer));
     app
@@ -114,9 +115,46 @@ pub(crate) fn thumb(w: u32, h: u32) -> Thumb {
 /// Give `path` a cached thumbnail, so the viewer treats it as displayable
 /// (a blur is on hand) without any GPU upload.
 pub(crate) fn cache_thumb(app: &mut TestApp, path: &str, w: u32, h: u32) {
+    let source = app
+        .window
+        .viewer()
+        .map(|v| v.source.clone())
+        .unwrap_or(Source::Fs);
+    let thumb = thumb(w, h);
+    let cost = thumb.byte_cost();
+    app.shared
+        .thumbs
+        .insert(thumb_key(&source, std::path::Path::new(path)), thumb, cost);
+}
+
+/// Give `path` a resident leased image in the window's cache, backed by the
+/// shared store (as if decoded and uploaded to a full-res texture), so the
+/// viewer treats it as a resident sharp image with no real decode or GPU work.
+pub(crate) fn cache_image(app: &mut TestApp, path: &str) {
+    use crate::media::store::{ImageKey, RamImage, Tier};
+    let source = app
+        .window
+        .viewer()
+        .map(|v| v.source.clone())
+        .unwrap_or(Source::Fs);
+    let p = PathBuf::from(path);
+    let key = ImageKey::new(&source, &p);
+    let (lease, _) = app
+        .shared
+        .store
+        .request(key.clone(), p.clone(), source, Tier::Full);
+    app.shared.store.on_decoded(
+        key.clone(),
+        RamImage {
+            handle: Handle::from_rgba(2, 2, vec![0u8; 16]),
+            original_size: (2, 2),
+            decode_time: None,
+        },
+    );
+    app.shared
+        .store
+        .on_minted(key, Tier::Full, crate::ui::image_surface::test_keepalive());
     if let Some(viewer) = app.window.viewer_mut() {
-        let thumb = thumb(w, h);
-        let cost = thumb.byte_cost();
-        viewer.thumbs.insert(PathBuf::from(path), thumb, cost);
+        viewer.cache.insert(p, lease);
     }
 }

@@ -1,15 +1,51 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::media::MediaError;
-use crate::media::pipeline::ThumbUrgency;
+use crate::media::animation::AnimatedImage;
+use crate::media::pipeline::{ThumbUrgency, thumb_key};
+use crate::media::store::{ImageKey, RamImage, Tier};
+use crate::ui::image_surface::Keepalive;
 
-use crate::app::state::{CachedImage, LoadedMedia, Session, Thumb};
+use crate::app::state::{Session, Thumb};
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    Loaded {
+    /// A still decoded to RAM, from a store decode job. Install it in the store
+    /// (which mints the texture next) and show it if it is the on-screen image.
+    /// The RAM source is boxed to keep this routing message small.
+    Decoded {
+        key: ImageKey,
         path: PathBuf,
-        result: Result<LoadedMedia, MediaError>,
+        ram: Box<RamImage>,
+        thumb: Option<Thumb>,
+    },
+    /// A store upload finished: install the texture at its tier and swap the
+    /// shared cell. Every window leasing this image sees it sharpen.
+    TextureReady {
+        key: ImageKey,
+        tier: Tier,
+        texture: Keepalive,
+    },
+    /// An upload could not reach the GPU after retries; clear the pending mark so
+    /// a later pass can try again.
+    MintFailed {
+        key: ImageKey,
+    },
+    /// A store decode produced no still: cancelled by a newer navigation, a real
+    /// decode failure, or a file that vanished.
+    DecodeFailed {
+        key: ImageKey,
+        path: PathBuf,
+        err: MediaError,
+    },
+    /// A store decode turned out to be an animation, which keeps its own player
+    /// path. The store forgets the key.
+    AnimDecoded {
+        key: ImageKey,
+        path: PathBuf,
+        anim: Arc<AnimatedImage>,
+        thumb: Option<Thumb>,
     },
     ThumbLoaded {
         path: PathBuf,
@@ -21,17 +57,11 @@ pub enum Message {
     ViewRotated {
         path: PathBuf,
         baked: u8,
-        image: CachedImage,
+        original_size: (u32, u32),
+        texture: Option<Keepalive>,
     },
-    /// A minimized window's image came back from its RAM source after restore.
-    /// Only re-seats the texture (cache keepalive + cross-window dedup); the
-    /// displayed image is untouched so pan and zoom survive the round trip.
-    Reuploaded {
-        path: PathBuf,
-        image: CachedImage,
-    },
-    /// Debounced after navigation settles on a view-res neighbor: promote it to
-    /// a full-res texture so zoom is crisp, unless navigation has moved on.
+    /// Debounced after navigation settles on a view-res neighbor: promote its
+    /// lease to a full-res texture so zoom is crisp, unless navigation moved on.
     PromoteCurrent(PathBuf),
     Resorted(Vec<PathBuf>),
     SpinnerTick,
@@ -41,8 +71,8 @@ use iced::Task;
 use crate::anim::AnimMessage;
 use crate::app::state::DisplayedImage;
 use crate::app::update::{
-    complete_navigation, fire_load, fire_rotate, fire_thumbnailer, resolve_pending_nav,
-    show_loaded, show_placeholder,
+    complete_navigation, fire_rotate, fire_thumbnailer, resolve_pending_nav, run_jobs, show_loaded,
+    show_placeholder,
 };
 use crate::app::viewer_math::compute_zoom;
 use crate::app::{Message as AppMessage, Shared, Window};
@@ -52,140 +82,168 @@ use crate::media::pipeline::Lane;
 
 pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) -> Task<AppMessage> {
     match message {
-        Message::Loaded { path, result } => {
+        Message::Decoded {
+            key,
+            path,
+            ram,
+            thumb,
+        } => {
             let zoom_mode = shared.config.zoom_mode;
             let viewport = win.viewport_size;
-            let depth = shared.config.prefetch_depth;
-            let prefetch_vram = shared.config.resource.prefetch_vram;
             let pipeline = shared.pipeline.clone();
+            let original_size = ram.original_size;
+            // Install the RAM source; the store answers with the upload job that
+            // mints the texture at the tier this image is wanted.
+            let outcome = shared.store.on_decoded(key, *ram);
+            if let Some(viewer) = win.viewer_mut() {
+                viewer.in_flight.remove(&path);
+                if let Some(thumb) = thumb {
+                    let cost = thumb.byte_cost();
+                    shared
+                        .thumbs
+                        .insert(thumb_key(&viewer.source, &path), thumb, cost);
+                }
+                // Put it on screen now; the texture lands shortly via
+                // TextureReady, and the blur stands in until it does.
+                if viewer.nav.current() == path {
+                    show_loaded(viewer, &path, original_size, zoom_mode, viewport);
+                }
+            }
+            let upload = run_jobs(outcome.jobs, &pipeline, Lane::Current, viewport);
+            Task::batch([upload, resolve_pending_nav(win, shared)])
+        }
+
+        Message::TextureReady { key, tier, texture } => {
+            let viewport = win.viewport_size;
+            let zoom_mode = shared.config.zoom_mode;
+            let pipeline = shared.pipeline.clone();
+            // Swap the shared cell; every window leasing this image now draws it.
+            let outcome = shared.store.on_minted(key.clone(), tier, texture);
+            // If the on-screen image is still standing in with its blur, promote it
+            // to the full display now that a texture exists. This covers the image
+            // that became resident via a shared upload (another window's decode),
+            // so no decode of its own ever fired show_loaded.
+            if let Some(viewer) = win.viewer_mut() {
+                let on_screen = matches!(
+                    viewer.displayed,
+                    DisplayedImage::Placeholder(_) | DisplayedImage::None
+                );
+                let target = viewer
+                    .displayed_path
+                    .clone()
+                    .filter(|path| on_screen && ImageKey::new(&viewer.source, path) == key);
+                if let Some(path) = target
+                    && let Some(ram) = shared.store.ram(&key)
+                {
+                    show_loaded(viewer, &path, ram.original_size, zoom_mode, viewport);
+                }
+            }
+            run_jobs(outcome.jobs, &pipeline, Lane::Current, viewport)
+        }
+
+        Message::MintFailed { key } => {
+            let viewport = win.viewport_size;
+            let pipeline = shared.pipeline.clone();
+            let outcome = shared.store.on_mint_failed(&key);
+            run_jobs(outcome.jobs, &pipeline, Lane::Current, viewport)
+        }
+
+        Message::AnimDecoded {
+            key,
+            path,
+            anim,
+            thumb,
+        } => {
+            // Not a still: the store forgets it, and the leftover lease drops.
+            shared.store.abandon(&key);
             let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
-
             viewer.in_flight.remove(&path);
-
-            match result {
-                Ok(LoadedMedia::Static { image, thumb }) => {
-                    viewer
-                        .cache
-                        .insert(path.clone(), image.clone(), image.byte_cost());
-                    // Register for cross-window reuse while its texture stays
-                    // resident, so another window opening this file shares it.
-                    if let Some(keepalive) = &image.keepalive {
-                        pipeline.dedup_insert(
-                            path.clone(),
-                            image.handle.clone(),
-                            image.original_size,
-                            image.gpu_full,
-                            keepalive,
-                        );
-                    }
-                    if let Some(thumb) = thumb {
-                        let cost = thumb.byte_cost();
-                        viewer.thumbs.insert(path.clone(), thumb, cost);
-                    }
-                    if viewer.nav.current() == path {
-                        show_loaded(viewer, &path, image, zoom_mode, viewport);
-                    }
-                    let pinned = viewer.pinned_paths(depth);
-                    viewer.cache.evict_over_budget(&pinned);
-                    viewer.thumbs.evict_over_budget(&pinned);
-                    resolve_pending_nav(win, shared)
-                }
-                Ok(LoadedMedia::Animated { anim, thumb }) => {
-                    if let Some(thumb) = thumb {
-                        let cost = thumb.byte_cost();
-                        viewer.thumbs.insert(path.clone(), thumb, cost);
-                    }
-                    viewer.anim_player.insert(path.clone(), anim);
-                    let play = if viewer.nav.current() == path {
-                        viewer
-                            .anim_player
-                            .try_start_from_cache(&path)
-                            .map(|t| t.map(AppMessage::Anim))
-                            .unwrap_or_else(Task::none)
-                    } else {
-                        Task::none()
-                    };
-                    Task::batch([play, resolve_pending_nav(win, shared)])
-                }
-                Err(MediaError::Cancelled) => {
-                    let pending_path = viewer
-                        .pending_nav
-                        .map(|i| viewer.nav.files()[i].to_path_buf());
-                    if viewer.nav.current() == path || pending_path.as_deref() == Some(&*path) {
-                        fire_load(
-                            &pipeline,
-                            viewer,
-                            path,
-                            Lane::Current,
-                            viewport,
-                            prefetch_vram,
-                        )
-                    } else if viewer.pinned_paths(depth).contains(&path) {
-                        fire_load(
-                            &pipeline,
-                            viewer,
-                            path,
-                            Lane::Prefetch,
-                            viewport,
-                            prefetch_vram,
-                        )
-                    } else {
-                        Task::none()
-                    }
-                }
-                Err(err) => {
-                    let pending_index = viewer.pending_nav;
-                    let pending_path = pending_index.map(|i| viewer.nav.files()[i].to_path_buf());
-                    let is_current = viewer.nav.current() == path;
-                    let is_pending = pending_path.as_deref() == Some(&*path);
-                    if !is_current && !is_pending {
-                        return Task::none();
-                    }
-                    viewer.pending_since = None;
-                    if is_pending {
-                        viewer.pending_nav = None;
-                    }
-                    // The file vanished (deleted outside the app): drop it and
-                    // move on instead of erroring. The watcher usually removes it
-                    // first. This is the backstop for the race.
-                    if !path.exists() {
-                        viewer.cache.remove(&path);
-                        viewer.thumbs.remove(&path);
-                        viewer.anim_player.remove(&path);
-                        viewer.failed_thumbs.remove(&path);
-                        viewer.failed_loads.remove(&path);
-                        if !viewer.nav.remove(&path) {
-                            win.session = Session::Empty;
-                            return Task::none();
-                        }
-                        let cursor = viewer.nav.cursor();
-                        return complete_navigation(win, shared, cursor, true);
-                    }
-                    // The file exists but won't decode (a video renamed to .png,
-                    // a truncated image). Remember it and show the error in place.
-                    let name = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let message = format!("{name}\n\n{err}");
-                    viewer.failed_loads.insert(path.clone(), message.clone());
-
-                    if is_pending && let Some(index) = pending_index {
-                        return complete_navigation(win, shared, index, false);
-                    }
-                    // The current file failed in place: show the error unless a
-                    // good image for it is already on screen.
-                    let already_shown = matches!(viewer.displayed, DisplayedImage::Full { .. })
-                        && viewer.displayed_path.as_deref() == Some(&*path);
-                    if !already_shown {
-                        viewer.displayed = DisplayedImage::Error { message };
-                        viewer.displayed_path = Some(path.clone());
-                    }
-                    Task::none()
-                }
+            viewer.cache.remove(&path);
+            if let Some(thumb) = thumb {
+                let cost = thumb.byte_cost();
+                shared
+                    .thumbs
+                    .insert(thumb_key(&viewer.source, &path), thumb, cost);
             }
+            viewer.anim_player.insert(path.clone(), anim);
+            let play = if viewer.nav.current() == path {
+                viewer
+                    .anim_player
+                    .try_start_from_cache(&path)
+                    .map(|t| t.map(AppMessage::Anim))
+                    .unwrap_or_else(Task::none)
+            } else {
+                Task::none()
+            };
+            Task::batch([play, resolve_pending_nav(win, shared)])
+        }
+
+        Message::DecodeFailed { key, path, err } => {
+            let viewport = win.viewport_size;
+            let pipeline = shared.pipeline.clone();
+            // Cancelled by a newer navigation: retry it if a holder still wants
+            // it. A real failure or an animation: forget it.
+            let retry = matches!(err, MediaError::Cancelled);
+            let outcome = shared.store.on_decode_failed(&key, retry);
+            let retry_jobs = run_jobs(outcome.jobs, &pipeline, Lane::Current, viewport);
+
+            let Some(viewer) = win.viewer_mut() else {
+                return retry_jobs;
+            };
+            viewer.in_flight.remove(&path);
+            if retry {
+                return retry_jobs;
+            }
+
+            let pending_index = viewer.pending_nav;
+            let pending_path = pending_index.map(|i| viewer.nav.files()[i].to_path_buf());
+            let is_current = viewer.nav.current() == path;
+            let is_pending = pending_path.as_deref() == Some(&*path);
+            if !is_current && !is_pending {
+                return retry_jobs;
+            }
+            viewer.pending_since = None;
+            if is_pending {
+                viewer.pending_nav = None;
+            }
+            // The file vanished (deleted outside the app): drop it and move on
+            // instead of erroring. The watcher usually removes it first.
+            if !path.exists() {
+                viewer.cache.remove(&path);
+                shared.thumbs.remove(&thumb_key(&viewer.source, &path));
+                viewer.anim_player.remove(&path);
+                viewer.failed_thumbs.remove(&path);
+                viewer.failed_loads.remove(&path);
+                if !viewer.nav.remove(&path) {
+                    win.session = Session::Empty;
+                    return retry_jobs;
+                }
+                let cursor = viewer.nav.cursor();
+                return Task::batch([retry_jobs, complete_navigation(win, shared, cursor, true)]);
+            }
+            // The file exists but won't decode (a video renamed to .png, a
+            // truncated image). Remember it and show the error in place.
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let message = format!("{name}\n\n{err}");
+            viewer.failed_loads.insert(path.clone(), message.clone());
+
+            if is_pending && let Some(index) = pending_index {
+                return Task::batch([retry_jobs, complete_navigation(win, shared, index, false)]);
+            }
+            // The current file failed in place: show the error unless a good
+            // image for it is already on screen.
+            let already_shown = matches!(viewer.displayed, DisplayedImage::Full { .. })
+                && viewer.displayed_path.as_deref() == Some(&*path);
+            if !already_shown {
+                viewer.displayed = DisplayedImage::Error { message };
+                viewer.displayed_path = Some(path.clone());
+            }
+            retry_jobs
         }
 
         Message::ThumbLoaded {
@@ -206,7 +264,9 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 Ok(thumb) => {
                     viewer.in_flight_thumbs.remove(&path);
                     let cost = thumb.byte_cost();
-                    viewer.thumbs.insert(path.clone(), thumb.clone(), cost);
+                    shared
+                        .thumbs
+                        .insert(thumb_key(&viewer.source, &path), thumb.clone(), cost);
                     if viewer.nav.current() == path
                         && viewer.pending_since.is_some()
                         && viewer.pending_nav.is_none()
@@ -225,7 +285,14 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 }
             }
 
-            let mut tasks = fire_thumbnailer(&pipeline, viewer, 1, window_w, show_filmstrip);
+            let mut tasks = fire_thumbnailer(
+                &pipeline,
+                &shared.thumbs,
+                viewer,
+                1,
+                window_w,
+                show_filmstrip,
+            );
             tasks.push(resolve_pending_nav(win, shared));
             Task::batch(tasks)
         }
@@ -271,6 +338,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 ));
                 tasks.extend(fire_thumbnailer(
                     &pipeline,
+                    &shared.thumbs,
                     viewer,
                     3,
                     window_w,
@@ -280,7 +348,12 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             Task::batch(tasks)
         }
 
-        Message::ViewRotated { path, baked, image } => {
+        Message::ViewRotated {
+            path,
+            baked,
+            original_size,
+            texture,
+        } => {
             let zoom_mode = shared.config.zoom_mode;
             let viewport = win.viewport_size;
             let Some(viewer) = win.viewer_mut() else {
@@ -292,11 +365,10 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 return Task::none();
             }
 
-            let (w, h) = image.original_size;
+            let (w, h) = original_size;
             viewer.displayed = DisplayedImage::Full {
-                handle: image.handle,
-                original_size: image.original_size,
-                texture: image.keepalive,
+                original_size,
+                rotated: texture,
             };
             viewer.displayed_rotation = baked;
             viewer.pan = (0.0, 0.0);
@@ -304,56 +376,27 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 viewer.zoom = compute_zoom(zoom_mode, w, h, viewport);
             }
 
-            fire_rotate(viewer)
-        }
-
-        Message::Reuploaded { path, image } => {
-            let pipeline = shared.pipeline.clone();
-            let Some(viewer) = win.viewer_mut() else {
-                return Task::none();
-            };
-            // Only re-seat the texture if the file is still cached (navigation
-            // during restore may have evicted it). Refresh dedup so another
-            // window reopening it shares this texture again.
-            if viewer.cache.contains(&path) {
-                if let Some(keepalive) = &image.keepalive {
-                    pipeline.dedup_insert(
-                        path.clone(),
-                        image.handle.clone(),
-                        image.original_size,
-                        image.gpu_full,
-                        keepalive,
-                    );
-                }
-                // If a visible drop swapped this image to its thumbnail, bring the
-                // sharp image back now that its texture is resident, keeping zoom.
-                if viewer.displayed_path.as_deref() == Some(&*path)
-                    && matches!(viewer.displayed, DisplayedImage::Placeholder(_))
-                {
-                    viewer.displayed = DisplayedImage::Full {
-                        handle: image.handle.clone(),
-                        original_size: image.original_size,
-                        texture: image.keepalive.clone(),
-                    };
-                }
-                let cost = image.byte_cost();
-                viewer.cache.insert(path, image, cost);
-            }
-            Task::none()
+            fire_rotate(viewer, &shared.store)
         }
 
         Message::PromoteCurrent(path) => {
+            let viewport = win.viewport_size;
+            let pipeline = shared.pipeline.clone();
             let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
             // Only promote if navigation is still resting on this image, so a
             // quick pass-through never re-uploads it at full resolution.
-            if viewer.displayed_path.as_deref() == Some(&*path) {
-                let zoom = viewer.zoom;
-                crate::app::update::fire_reupload_res(viewer, &path, zoom, true)
-            } else {
-                Task::none()
+            if viewer.displayed_path.as_deref() != Some(&*path) {
+                return Task::none();
             }
+            // Raise the on-screen image's lease to a full-res texture for crisp
+            // zoom; the store re-uploads from the RAM it already holds.
+            let Some(lease) = viewer.cache.get(&path) else {
+                return Task::none();
+            };
+            let outcome = shared.store.retarget(lease, Tier::Full);
+            run_jobs(outcome.jobs, &pipeline, Lane::Current, viewport)
         }
 
         Message::ExifLoaded(path, fields) => {
@@ -391,12 +434,9 @@ pub(crate) fn update_anim(
             viewer.zoom = compute_zoom(zoom_mode, w, h, viewport);
             viewer.pan = (0.0, 0.0);
         }
-        viewer.displayed = DisplayedImage::Full {
+        viewer.displayed = DisplayedImage::Animated {
             handle,
             original_size: (w, h),
-            // Animation frames re-upload every tick and have no app-held keepalive
-            // here, so they keep the id→texture render path.
-            texture: None,
         };
         viewer.displayed_path = Some(viewer.nav.current().to_path_buf());
         viewer.pending_since = None;
@@ -429,9 +469,16 @@ mod tests {
                 result: Ok(thumb(4, 4)),
             },
         );
-        let v = app.viewer().unwrap();
-        assert!(v.thumbs.contains(Path::new("a.png")));
-        assert!(!v.in_flight_thumbs.contains(Path::new("a.png")));
+        assert!(app.shared.thumbs.contains(&thumb_key(
+            &crate::media::pipeline::Source::Fs,
+            Path::new("a.png")
+        )));
+        assert!(
+            !app.viewer()
+                .unwrap()
+                .in_flight_thumbs
+                .contains(Path::new("a.png"))
+        );
     }
 
     #[test]
@@ -518,71 +565,6 @@ mod tests {
     }
 
     #[test]
-    fn reupload_reseats_the_texture_for_a_cached_file() {
-        let mut app = viewing_app(&["a.png"], 0);
-        let handle = iced::widget::image::Handle::from_rgba(2, 2, vec![0u8; 16]);
-        // Simulate a minimized window: the file is cached but its keepalive was
-        // released, so the texture is gone while the RAM source survives.
-        let released = CachedImage {
-            handle: handle.clone(),
-            original_size: (2, 2),
-            keepalive: None,
-            gpu_full: false,
-            decode_time: None,
-        };
-        let cost = released.byte_cost();
-        app.viewer_mut()
-            .unwrap()
-            .cache
-            .insert("a.png".into(), released, cost);
-
-        let _ = update(
-            &mut app.window,
-            &mut app.shared,
-            Message::Reuploaded {
-                path: "a.png".into(),
-                image: CachedImage {
-                    handle,
-                    original_size: (2, 2),
-                    keepalive: Some(crate::ui::image_surface::test_keepalive()),
-                    gpu_full: true,
-                    decode_time: None,
-                },
-            },
-        );
-
-        let v = app.viewer().unwrap();
-        assert!(
-            v.cache
-                .peek(Path::new("a.png"))
-                .unwrap()
-                .keepalive
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn reupload_ignores_a_file_evicted_during_restore() {
-        let mut app = viewing_app(&["a.png"], 0);
-        // Nothing cached for the path: a navigation during restore evicted it.
-        let _ = update(
-            &mut app.window,
-            &mut app.shared,
-            Message::Reuploaded {
-                path: "gone.png".into(),
-                image: CachedImage {
-                    handle: iced::widget::image::Handle::from_rgba(2, 2, vec![0u8; 16]),
-                    original_size: (2, 2),
-                    keepalive: Some(crate::ui::image_surface::test_keepalive()),
-                    gpu_full: true,
-                    decode_time: None,
-                },
-            },
-        );
-        assert!(!app.viewer().unwrap().cache.contains(Path::new("gone.png")));
-    }
-
-    #[test]
     fn a_broken_file_becomes_a_navigable_error_stop() {
         use std::io::Write;
 
@@ -608,12 +590,14 @@ mod tests {
             v.pending_since = Some(iced::time::Instant::now());
         }
 
+        let key = ImageKey::new(&crate::media::pipeline::Source::Fs, &b);
         let _ = update(
             &mut app.window,
             &mut app.shared,
-            Message::Loaded {
+            Message::DecodeFailed {
+                key,
                 path: b.clone(),
-                result: Err(crate::media::MediaError::Decode("bad".into())),
+                err: crate::media::MediaError::Decode("bad".into()),
             },
         );
 

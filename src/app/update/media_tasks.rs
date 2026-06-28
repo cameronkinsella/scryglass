@@ -5,31 +5,39 @@ use std::pin::Pin;
 use iced::widget::image::Handle;
 use iced::{Size, Task};
 
-use crate::app::state::{CachedImage, DisplayedImage, LoadedMedia, Thumb, Viewer};
+use crate::app::state::{DisplayedImage, Thumb, Viewer};
 use crate::app::viewer_math::compute_zoom;
 use crate::app::{MediaMessage, Message, Shared, Window};
 use crate::config::{PrefetchVram, ZoomMode};
-use crate::media::pipeline::{Lane, Pipeline, Source, ThumbUrgency};
+use crate::media::cache::ImageCache;
+use crate::media::pipeline::{Lane, Pipeline, Source, ThumbUrgency, thumb_key};
 use crate::media::registry::DecodeOpts;
+use crate::media::store::{ImageKey, Job, RamImage, Store, Tier};
 use crate::media::{DecodedMedia, MediaError, ThumbData};
 
-/// Rotate the displayed texture to the desired view rotation, off-thread.
-/// Rotating the pixels (not the geometry) leaves zoom, pan, and crop math
-/// unchanged. The cache keeps the unrotated original.
-pub(crate) fn fire_rotate(viewer: &mut Viewer) -> Task<Message> {
-    if viewer.rotation == viewer.displayed_rotation {
+/// Rotate the displayed image to the desired view rotation, off-thread. Rotating
+/// the pixels (not the geometry) leaves zoom, pan, and crop math unchanged. The
+/// override is always re-derived from the store's unrotated original by the total
+/// turns, so it never iterates on already-rotated pixels and the store keeps one
+/// shared original.
+pub(crate) fn fire_rotate(viewer: &mut Viewer, store: &Store) -> Task<Message> {
+    if viewer.rotation == viewer.displayed_rotation
+        || !matches!(viewer.displayed, DisplayedImage::Full { .. })
+    {
         return Task::none();
     }
-    let DisplayedImage::Full { handle, .. } = &viewer.displayed else {
+    let path = viewer.nav.current().to_path_buf();
+    // A no-op if the source was evicted: a reload restores it, then this fires
+    // again as the rotation still differs from what is baked.
+    let Some(ram) = store.ram(&ImageKey::new(&viewer.source, &path)) else {
         return Task::none();
     };
-    let delta = (4 + viewer.rotation - viewer.displayed_rotation) % 4;
+    let turns = viewer.rotation;
     let baked = viewer.rotation;
-    let handle = handle.clone();
-    let path = viewer.nav.current().to_path_buf();
+    let source = ram.handle;
 
     Task::perform(
-        async move { tokio::task::spawn_blocking(move || rotate_pixels(&handle, delta)).await },
+        async move { tokio::task::spawn_blocking(move || rotate_pixels(&source, turns)).await },
         |r| r.ok().flatten(),
     )
     .then(move |rotated| {
@@ -48,16 +56,8 @@ pub(crate) fn fire_rotate(viewer: &mut Viewer) -> Task<Message> {
             Message::Media(MediaMessage::ViewRotated {
                 path: p.clone(),
                 baked,
-                image: CachedImage {
-                    handle,
-                    original_size: (width, height),
-                    keepalive,
-                    // Rotation re-uploads the displayed image at full resolution.
-                    gpu_full: true,
-                    // The rotated image only ever displays; the cache keeps the
-                    // unrotated original, so this decode time is never read.
-                    decode_time: None,
-                },
+                original_size: (width, height),
+                texture: keepalive,
             })
         })
     })
@@ -190,15 +190,18 @@ pub(crate) fn thumb_focus(
     }
 }
 
-/// Put a loaded image on screen, computing zoom from its true dimensions.
+/// Put a loaded still on screen, computing zoom from its true dimensions. The
+/// pixels are derived from the store at render time (the lease's texture, else
+/// the thumbnail blur), so this only needs the true size and the path. While the
+/// texture is still uploading, the view shows the blur.
 pub(crate) fn show_loaded(
     viewer: &mut Viewer,
     path: &std::path::Path,
-    image: CachedImage,
+    original_size: (u32, u32),
     zoom_mode: ZoomMode,
     viewport: Size,
 ) {
-    let (w, h) = image.original_size;
+    let (w, h) = original_size;
     // Keep the live zoom and pan when a same-path placeholder swaps to full: a
     // pending navigation already set the fit zoom (identical geometry), and a
     // decay restore must preserve the zoom it was viewed at. Only a fresh display
@@ -212,9 +215,8 @@ pub(crate) fn show_loaded(
         viewer.pan = (0.0, 0.0);
     }
     viewer.displayed = DisplayedImage::Full {
-        handle: image.handle,
-        original_size: image.original_size,
-        texture: image.keepalive,
+        original_size,
+        rotated: None,
     };
     viewer.displayed_path = Some(path.to_path_buf());
     viewer.pending_since = None;
@@ -244,11 +246,12 @@ pub(crate) fn show_placeholder(
 /// the image area now refers to `path`, never to a previous image.
 pub(crate) fn show_placeholder_or_clear(
     viewer: &mut Viewer,
+    thumbs: &ImageCache<Thumb>,
     path: &std::path::Path,
     zoom_mode: ZoomMode,
     viewport: Size,
 ) -> bool {
-    if let Some(thumb) = viewer.thumbs.get(path).cloned() {
+    if let Some(thumb) = thumbs.peek(&thumb_key(&viewer.source, path)).cloned() {
         show_placeholder(viewer, path, thumb, zoom_mode, viewport);
         true
     } else {
@@ -262,11 +265,12 @@ pub(crate) fn show_placeholder_or_clear(
 /// known to fail.
 pub(crate) fn fire_thumb(
     pipeline: &Pipeline,
+    thumbs: &ImageCache<Thumb>,
     viewer: &mut Viewer,
     path: PathBuf,
     urgency: ThumbUrgency,
 ) -> Task<Message> {
-    if viewer.thumbs.contains(&path)
+    if thumbs.contains(&thumb_key(&viewer.source, &path))
         || viewer.in_flight_thumbs.contains(&path)
         || viewer.failed_thumbs.contains(&path)
     {
@@ -304,6 +308,7 @@ pub(crate) fn fire_thumb(
 /// current [`thumb_focus`].
 pub(crate) fn fire_thumbnailer(
     pipeline: &Pipeline,
+    thumbs: &ImageCache<Thumb>,
     viewer: &mut Viewer,
     chains: usize,
     viewport_w: f32,
@@ -312,236 +317,175 @@ pub(crate) fn fire_thumbnailer(
     let mut tasks = Vec::new();
     for _ in 0..chains {
         let (center, range) = thumb_focus(viewer, viewport_w, filmstrip_shown);
-        let Some(path) = viewer.next_unthumbed_in(center, range) else {
+        let Some(path) = viewer.next_unthumbed_in(thumbs, center, range) else {
             break;
         };
-        tasks.push(fire_thumb(pipeline, viewer, path, ThumbUrgency::Background));
+        tasks.push(fire_thumb(
+            pipeline,
+            thumbs,
+            viewer,
+            path,
+            ThumbUrgency::Background,
+        ));
     }
     tasks
 }
 
-/// How a freshly loaded image's GPU texture is uploaded.
-enum Upload {
-    /// Decode to RAM only, upload nothing (uploaded on navigation instead).
-    Skip,
-    /// Downscaled to the fit view resolution (smaller VRAM).
-    View,
-    /// Full resolution (instant crisp zoom).
-    Full,
-}
-
-/// Resolve the upload for a load: the current image is always full-res; a
-/// prefetch neighbor follows the `prefetch_vram` setting.
-fn upload_for(lane: Lane, prefetch_vram: PrefetchVram) -> Upload {
-    match (lane, prefetch_vram) {
-        (Lane::Current, _) | (Lane::Prefetch, PrefetchVram::FullRes) => Upload::Full,
-        (Lane::Prefetch, PrefetchVram::ViewRes) => Upload::View,
-        (Lane::Prefetch, PrefetchVram::None) => Upload::Skip,
+/// The store lease tier a prefetched neighbor is held at, from the
+/// `prefetch_vram` setting: a full-res texture, a downscaled view-res texture,
+/// or RAM only (uploaded on navigation).
+pub(crate) fn prefetch_want(prefetch_vram: PrefetchVram) -> Tier {
+    match prefetch_vram {
+        PrefetchVram::FullRes => Tier::Full,
+        PrefetchVram::ViewRes => Tier::View,
+        PrefetchVram::None => Tier::InRam,
     }
 }
 
-/// Fire a pipeline load for `path` unless it's already cached or in flight.
-/// The resulting RGBA is uploaded to the GPU and lands as `MediaLoaded`.
+/// The decode priority lane for a wanted tier: the on-screen image (wants Full)
+/// is urgent, a prefetch neighbor rides the background lane.
+fn lane_for(want: Tier) -> Lane {
+    if want >= Tier::Full {
+        Lane::Current
+    } else {
+        Lane::Prefetch
+    }
+}
+
+/// Claim `path` from the store at `want` for this window, leasing it into the
+/// cache, and fire whatever decode or upload the store asks for. The store dedups
+/// across windows: a file another window already decoded is shared, not redone.
+/// Already-leased here, it only raises the tier if this request wants more.
+/// Animations and videos keep their own paths.
 pub(crate) fn fire_load(
+    store: &mut Store,
     pipeline: &Pipeline,
     viewer: &mut Viewer,
     path: PathBuf,
+    want: Tier,
+    view: Size,
+) -> Task<Message> {
+    if viewer.anim_player.has_cached(&path) || crate::video::is_video(&path) {
+        return Task::none();
+    }
+    let lane = lane_for(want);
+    if let Some(lease) = viewer.cache.get(&path) {
+        if lease.want() >= want {
+            return Task::none();
+        }
+        let outcome = store.retarget(lease, want);
+        return run_jobs(outcome.jobs, pipeline, lane, view);
+    }
+    let key = ImageKey::new(&viewer.source, &path);
+    let (lease, outcome) = store.request(key, path.clone(), viewer.source.clone(), want);
+    // Mark it loading only when a decode is actually firing: that decode produces
+    // a thumbnail and clears this when it lands. A request that shares another
+    // window's already-resident image runs no decode, so marking it would leave it
+    // stuck here and the background thumbnailer would skip it forever, never giving
+    // this window a thumbnail.
+    if outcome
+        .jobs
+        .iter()
+        .any(|job| matches!(job, Job::Decode { .. }))
+    {
+        viewer.in_flight.insert(path.clone());
+    }
+    viewer.cache.insert(path, lease);
+    run_jobs(outcome.jobs, pipeline, lane, view)
+}
+
+/// Turn the store's pending [`Job`]s into async tasks. A decode reads and decodes
+/// from disk (or finds an animation); an upload pushes RAM to the GPU. Each
+/// reports back so the store can install the result and swap the shared cell.
+pub(crate) fn run_jobs(
+    jobs: Vec<Job>,
+    pipeline: &Pipeline,
     lane: Lane,
     view: Size,
-    prefetch_vram: PrefetchVram,
 ) -> Task<Message> {
-    if viewer.cache.contains(&path)
-        || viewer.anim_player.has_cached(&path)
-        || viewer.in_flight.contains(&path)
-        // Videos never go through the image pipeline. Reading a multi-GB
-        // file into memory to fail decoding would be a disaster.
-        || crate::video::is_video(&path)
-    {
-        return Task::none();
-    }
-    viewer.in_flight.insert(path.clone());
+    Task::batch(
+        jobs.into_iter()
+            .map(|job| run_job(job, pipeline, lane, view)),
+    )
+}
 
-    // Reuse another window's resident decode of this file, sharing its one GPU
-    // texture instead of decoding and uploading again.
-    if matches!(viewer.source, Source::Fs)
-        && let Some((handle, original_size, gpu_full, keepalive)) = pipeline.dedup_get(&path)
-    {
-        return Task::done(Message::Media(MediaMessage::Loaded {
-            path: path.clone(),
-            result: Ok(LoadedMedia::Static {
-                image: CachedImage {
-                    handle,
-                    original_size,
-                    keepalive: Some(keepalive),
-                    // Reuse the shared texture at its real resolution. Reporting
-                    // it as not-full would make the display path re-upload, which
-                    // forks the shared texture and leaves the other window drawing
-                    // a copy it no longer keeps alive.
-                    gpu_full,
-                    // Reused, not decoded here, so the cost is unknown: never
-                    // evict this on a guess.
-                    decode_time: None,
-                },
-                thumb: None,
-            }),
-        }));
-    }
-
-    let generation = pipeline.generation();
-    let load = pipeline.load(
-        viewer.source.clone(),
-        path.clone(),
-        DecodeOpts::default(),
-        lane,
-        generation,
-    );
-
-    // Time the read + decode so dynamic eviction can weigh this source's
-    // reproduction cost against the memory it holds.
-    let timed = async move {
-        let start = std::time::Instant::now();
-        let result = load.await;
-        (result, start.elapsed())
-    };
-    Task::perform(timed, |x| x).then(move |(result, decode_time)| match result {
-        Ok(DecodedMedia::Static(img)) => {
-            let original_size = img.original_size;
-            let thumb = img.thumbnail.map(|t| Thumb {
-                handle: Handle::from_rgba(t.width, t.height, t.pixels),
-                size: (t.width, t.height),
-                original_size: t.original_size,
-            });
-            let handle = Handle::from_rgba(img.width, img.height, img.pixels);
-            let p = path.clone();
-            // TODO: add a config knob to drop the RAM copy after a full-res VRAM
-            // upload, holding only the GPU copy.
-            let upload = upload_for(lane, prefetch_vram);
-            // Hand the texture to the upload thread, then wait for it to become
-            // resident before displaying, so navigation never stalls the UI
-            // thread on a texture upload. A skipped upload keeps the RAM source
-            // only; the display path uploads it from RAM on navigation.
-            Task::future(async move {
-                let (keepalive, gpu_full) = match upload {
-                    Upload::Skip => (None, false),
-                    Upload::View => {
-                        let zoom = fit_zoom(original_size, view);
-                        (
-                            upload_at_res(&handle, original_size, zoom, false).await,
-                            false,
-                        )
-                    }
-                    Upload::Full => (upload_at_res(&handle, original_size, 1.0, true).await, true),
-                };
-                Message::Media(MediaMessage::Loaded {
-                    path: p.clone(),
-                    result: Ok(LoadedMedia::Static {
-                        image: CachedImage {
+fn run_job(job: Job, pipeline: &Pipeline, lane: Lane, view: Size) -> Task<Message> {
+    match job {
+        Job::Decode { key, path, source } => {
+            let generation = pipeline.generation();
+            let load = pipeline.load(
+                source,
+                path.clone(),
+                DecodeOpts::default(),
+                lane,
+                generation,
+            );
+            // Time the read + decode so dynamic eviction can weigh this source's
+            // reproduction cost against the memory it holds.
+            let timed = async move {
+                let start = std::time::Instant::now();
+                let result = load.await;
+                (result, start.elapsed())
+            };
+            Task::perform(timed, |x| x).map(move |(result, decode_time)| match result {
+                Ok(DecodedMedia::Static(img)) => {
+                    let thumb = img.thumbnail.map(|t| Thumb {
+                        handle: Handle::from_rgba(t.width, t.height, t.pixels),
+                        size: (t.width, t.height),
+                        original_size: t.original_size,
+                    });
+                    let handle = Handle::from_rgba(img.width, img.height, img.pixels);
+                    Message::Media(MediaMessage::Decoded {
+                        key: key.clone(),
+                        path: path.clone(),
+                        ram: Box::new(RamImage {
                             handle,
-                            original_size,
-                            keepalive,
-                            gpu_full,
+                            original_size: img.original_size,
                             decode_time: Some(decode_time),
-                        },
+                        }),
                         thumb,
-                    }),
-                })
+                    })
+                }
+                Ok(DecodedMedia::Animated(anim)) => {
+                    // Frames allocate at display time; only the thumb needs a
+                    // handle here. The store forgets this key (it is not a still).
+                    let thumb = anim.thumbnail.as_ref().map(|t| Thumb {
+                        handle: Handle::from_rgba(t.width, t.height, t.pixels.clone()),
+                        size: (t.width, t.height),
+                        original_size: t.original_size,
+                    });
+                    Message::Media(MediaMessage::AnimDecoded {
+                        key: key.clone(),
+                        path: path.clone(),
+                        anim,
+                        thumb,
+                    })
+                }
+                Err(err) => Message::Media(MediaMessage::DecodeFailed {
+                    key: key.clone(),
+                    path: path.clone(),
+                    err,
+                }),
             })
         }
-        Ok(DecodedMedia::Animated(anim)) => {
-            // Frames allocate at display time, only the thumb needs a
-            // handle here.
-            let thumb = anim.thumbnail.as_ref().map(|t| Thumb {
-                handle: Handle::from_rgba(t.width, t.height, t.pixels.clone()),
-                size: (t.width, t.height),
-                original_size: t.original_size,
-            });
-            Task::done(Message::Media(MediaMessage::Loaded {
-                path: path.clone(),
-                result: Ok(LoadedMedia::Animated { anim, thumb }),
-            }))
-        }
-        Err(e) => Task::done(Message::Media(MediaMessage::Loaded {
-            path: path.clone(),
-            result: Err(e),
-        })),
-    })
-}
-
-/// Re-upload a restored window's resident images from their RAM sources after a
-/// minimize freed the GPU textures, displayed image first. Each upload reuses a
-/// still-resident shared texture (another window kept it) or re-uploads from the
-/// surviving handle, never a disk read, at the same resolution it had.
-pub(crate) fn fire_restore_textures(
-    pipeline: &Pipeline,
-    viewer: &Viewer,
-    view: Size,
-) -> Vec<Task<Message>> {
-    viewer
-        .restore_list()
-        .into_iter()
-        .map(|(path, handle, original_size, gpu_full, decode_time)| {
-            let pipeline = pipeline.clone();
-            Task::future(async move {
-                let keepalive = match pipeline.dedup_get(&path) {
-                    Some((_, _, _, keep)) => Some(keep),
-                    None => {
-                        // Restore each texture at the fit zoom it is shown at when
-                        // navigated to; full-res entries ignore the zoom.
-                        let zoom = fit_zoom(original_size, view);
-                        upload_at_res(&handle, original_size, zoom, gpu_full).await
-                    }
+        Job::Upload { key, tier, ram } => Task::future(async move {
+            // The upload thread is built by the warmup surface; retry briefly so
+            // the very first upload, which may race that setup, still lands.
+            for _ in 0..30 {
+                let texture = if tier >= Tier::Full {
+                    upload_at_res(&ram.handle, ram.original_size, 1.0, true).await
+                } else {
+                    let zoom = fit_zoom(ram.original_size, view);
+                    upload_at_res(&ram.handle, ram.original_size, zoom, false).await
                 };
-                Message::Media(MediaMessage::Reuploaded {
-                    path,
-                    image: CachedImage {
-                        handle,
-                        original_size,
-                        keepalive,
-                        gpu_full,
-                        decode_time,
-                    },
-                })
-            })
-        })
-        .collect()
-}
-
-/// Re-upload `path`'s texture at full resolution (`full`, for crisp zoom on the
-/// focused image) or downscaled to the view resolution for `zoom` (for an
-/// unfocused or passed-by image), from its in-RAM full-res handle (no disk). A
-/// no-op when it is already at that resolution or not cached.
-pub(crate) fn fire_reupload_res(
-    viewer: &Viewer,
-    path: &std::path::Path,
-    zoom: f32,
-    full: bool,
-) -> Task<Message> {
-    let Some(cached) = viewer.cache.peek(path) else {
-        return Task::none();
-    };
-    // Already at the wanted resolution and still resident: nothing to do. A
-    // released texture (keepalive cleared on minimize) re-uploads even when the
-    // resolution matches, so a restore re-seats it.
-    if cached.gpu_full == full && cached.keepalive.is_some() {
-        return Task::none();
+                if let Some(texture) = texture {
+                    return Message::Media(MediaMessage::TextureReady { key, tier, texture });
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+            }
+            Message::Media(MediaMessage::MintFailed { key })
+        }),
     }
-    let handle = cached.handle.clone();
-    let original_size = cached.original_size;
-    let decode_time = cached.decode_time;
-    let p = path.to_path_buf();
-    Task::future(async move {
-        let keepalive = upload_at_res(&handle, original_size, zoom, full).await;
-        Message::Media(MediaMessage::Reuploaded {
-            path: p,
-            image: CachedImage {
-                handle,
-                original_size,
-                keepalive,
-                gpu_full: full,
-                decode_time,
-            },
-        })
-    })
 }
 
 /// Upload `handle` at full resolution (`full`) or downscaled to the view
@@ -572,20 +516,22 @@ async fn upload_at_res(
     }
 }
 
-/// Warm the prefetch window around the cursor, each neighbor uploaded per the
-/// `prefetch_vram` setting (view-res, full-res, or RAM only).
+/// Warm the prefetch window around the cursor, each neighbor leased at the tier
+/// the `prefetch_vram` setting asks for (full-res, view-res, or RAM only).
 pub(crate) fn fire_prefetch(
+    store: &mut Store,
     pipeline: &Pipeline,
     viewer: &mut Viewer,
     depth: usize,
     view: Size,
     prefetch_vram: PrefetchVram,
 ) -> Vec<Task<Message>> {
+    let want = prefetch_want(prefetch_vram);
     viewer
         .nav
         .peek_around(depth)
         .into_iter()
-        .map(|p| fire_load(pipeline, viewer, p, Lane::Prefetch, view, prefetch_vram))
+        .map(|p| fire_load(store, pipeline, viewer, p, want, view))
         .collect()
 }
 
@@ -644,25 +590,12 @@ mod tests {
     }
 
     #[test]
-    fn upload_for_resolves_the_prefetch_vram_mode() {
-        // The current image is always full-res, whatever the prefetch setting.
-        assert!(matches!(
-            upload_for(Lane::Current, PrefetchVram::None),
-            Upload::Full
-        ));
-        // A prefetch neighbor follows the setting.
-        assert!(matches!(
-            upload_for(Lane::Prefetch, PrefetchVram::FullRes),
-            Upload::Full
-        ));
-        assert!(matches!(
-            upload_for(Lane::Prefetch, PrefetchVram::ViewRes),
-            Upload::View
-        ));
-        assert!(matches!(
-            upload_for(Lane::Prefetch, PrefetchVram::None),
-            Upload::Skip
-        ));
+    fn prefetch_want_resolves_the_prefetch_vram_mode() {
+        // The prefetch tier follows the setting; the current image always asks
+        // for Full at its call site.
+        assert_eq!(prefetch_want(PrefetchVram::FullRes), Tier::Full);
+        assert_eq!(prefetch_want(PrefetchVram::ViewRes), Tier::View);
+        assert_eq!(prefetch_want(PrefetchVram::None), Tier::InRam);
     }
 
     #[test]

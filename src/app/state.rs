@@ -2,22 +2,18 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::Duration;
 
 use iced::time::Instant;
 use iced::widget::image::Handle;
 
 use crate::anim::AnimPlayer;
 use crate::media::cache::ImageCache;
-use crate::media::pipeline::Source;
+use crate::media::pipeline::{Source, thumb_key};
+use crate::media::store::Lease;
 use crate::nav::Nav;
 
 /// Thumbnail cache budget, about 500 thumbs. Split across live windows.
 pub(crate) const THUMB_BUDGET_BYTES: usize = 128 * 1024 * 1024;
-
-/// A released texture to re-upload on restore: path, RAM handle, true size,
-/// whether it was full-res, and its decode time (carried forward for eviction).
-type RestoreEntry = (PathBuf, Handle, (u32, u32), bool, Option<Duration>);
 
 /// Whether the app is idle or actively viewing a directory of images.
 pub enum Session {
@@ -25,42 +21,6 @@ pub enum Session {
     Empty,
     /// Actively viewing images.
     Viewing(Box<Viewer>),
-}
-
-/// A decoded image, held as its RGBA source handle. The GPU texture is uploaded
-/// and cached by the image-surface pipeline, keyed by the handle's id.
-#[derive(Debug, Clone)]
-pub struct CachedImage {
-    pub handle: Handle,
-    /// True dimensions (post-orientation, pre-downscale) for zoom math.
-    pub original_size: (u32, u32),
-    /// Keepalive owning the GPU texture: it stays resident while this lives, and
-    /// frees the instant this drops (so a minimized or closed window reclaims its
-    /// VRAM at once). None for the first image, before the upload thread's GPU
-    /// context exists. Held for its refcount, never read.
-    #[allow(dead_code)]
-    pub keepalive: Option<crate::ui::image_surface::Keepalive>,
-    /// Whether the GPU texture holds the full-resolution pixels. Prefetched
-    /// neighbors upload at view resolution to save VRAM; the displayed image is
-    /// promoted to full resolution so zoom stays crisp. The RAM `handle` is
-    /// always full-res, so promotion never re-reads from disk.
-    pub gpu_full: bool,
-    /// How long this image took to read and decode, when it was decoded here.
-    /// Drives dynamic RAM eviction: a fast-decoding source is cheap to drop and
-    /// reproduce, a slow one is kept. `None` when reused from another window's
-    /// decode (cost unknown), so it is never evicted on a guess.
-    pub decode_time: Option<std::time::Duration>,
-}
-
-impl CachedImage {
-    /// Approximate GPU memory cost in bytes (RGBA8), from the texture size.
-    pub fn byte_cost(&self) -> usize {
-        if let Handle::Rgba { width, height, .. } = &self.handle {
-            *width as usize * *height as usize * 4
-        } else {
-            0
-        }
-    }
 }
 
 /// A small preview texture, used by the filmstrip and as the blurred
@@ -81,38 +41,30 @@ impl Thumb {
     }
 }
 
-/// A finished pipeline load: media ready to show plus its derived thumbnail.
-#[derive(Debug, Clone)]
-pub enum LoadedMedia {
-    /// A still image, already uploaded to the GPU.
-    Static {
-        image: CachedImage,
-        thumb: Option<Thumb>,
-    },
-    /// A decoded animation, played frame-by-frame by the [`AnimPlayer`].
-    Animated {
-        anim: std::sync::Arc<crate::media::animation::AnimatedImage>,
-        thumb: Option<Thumb>,
-    },
-}
-
 /// What the image area is currently showing.
-#[derive(Debug, Clone, Default)]
+#[derive(Default)]
 pub enum DisplayedImage {
     /// Nothing yet, first image still loading.
     #[default]
     None,
     /// A blurred low-res stand-in while the full image decodes.
     Placeholder(Thumb),
-    /// The fully decoded image, held as its RGBA source handle plus the GPU
-    /// texture it renders. Owning the texture here (not looking it up by id) is
-    /// what makes a black screen impossible: nothing can free a texture the
-    /// on-screen image still holds. `None` only for the animation/bootstrap
-    /// paths, which fall back to the id→texture map.
+    /// A decoded still, identified by `displayed_path`. The on-screen pixels are
+    /// derived entirely from the shared store at render time: the texture from the
+    /// current cache entry's lease cell (or `rotated`, a view-local rotation
+    /// override), else the thumbnail blur. The display owns no texture and no RAM,
+    /// so it can never diverge from what the store holds and never pins memory: a
+    /// background window's decay can free its RAM while it keeps showing the image
+    /// through another window's shared texture. A black frame is unrepresentable.
     Full {
+        original_size: (u32, u32),
+        rotated: Option<crate::ui::image_surface::Keepalive>,
+    },
+    /// An animation frame, re-uploaded each tick and drawn through the id→texture
+    /// path (animations are not store-backed; their frames are transient).
+    Animated {
         handle: Handle,
         original_size: (u32, u32),
-        texture: Option<crate::ui::image_surface::Keepalive>,
     },
     /// Live video, drawn by the GPU YUV surface. Carries dimensions for
     /// zoom and the info panel. The frame planes live on the viewer.
@@ -129,6 +81,7 @@ impl DisplayedImage {
             DisplayedImage::None => None,
             DisplayedImage::Placeholder(thumb) => Some(thumb.original_size),
             DisplayedImage::Full { original_size, .. } => Some(*original_size),
+            DisplayedImage::Animated { original_size, .. } => Some(*original_size),
             DisplayedImage::Video { original_size } => Some(*original_size),
             DisplayedImage::Error { .. } => None,
         }
@@ -144,11 +97,12 @@ pub struct Viewer {
     /// the old image stays visible until the new one is ready
     /// (flicker prevention).
     pub displayed: DisplayedImage,
-    /// Decoded images, keyed by path, with an LRU byte budget. Each holds its
-    /// RGBA source handle; the image-surface pipeline owns the GPU texture.
-    pub cache: ImageCache<CachedImage>,
-    /// Small previews for placeholders and the filmstrip.
-    pub thumbs: ImageCache<Thumb>,
+    /// This window's store leases, keyed by path: the on-screen image plus its
+    /// prefetch neighbors. Each lease is a claim on the one shared texture the
+    /// store owns; holding it keeps the image resident at the demanded tier, and
+    /// dropping it (navigation, decay, close) lowers the demand. The set is the
+    /// window's whole still-image footprint: no separate warm pool.
+    pub cache: HashMap<PathBuf, Lease>,
     /// Paths with a full load currently in flight, to avoid duplicate decodes.
     pub in_flight: HashSet<PathBuf>,
     /// Paths with a thumbnail probe in flight.
@@ -238,18 +192,14 @@ pub struct Viewer {
 impl Viewer {
     /// Fresh viewer for a newly scanned directory or archive, with the
     /// first load and metadata probe pending.
-    pub fn new(
-        nav: Nav,
-        source: Source,
-        anim_player: AnimPlayer,
-        cache_budget_bytes: usize,
-    ) -> Self {
+    pub fn new(nav: Nav, source: Source, anim_player: AnimPlayer) -> Self {
         Self {
             nav,
             source,
             displayed: DisplayedImage::None,
-            cache: ImageCache::new(cache_budget_bytes),
-            thumbs: ImageCache::new(THUMB_BUDGET_BYTES),
+            // Memory is the leased set: this map holds the on-screen image plus
+            // its prefetch neighbors, pruned by `retain`, with no byte budget.
+            cache: HashMap::new(),
             in_flight: HashSet::new(),
             in_flight_thumbs: HashSet::new(),
             failed_thumbs: HashSet::new(),
@@ -284,44 +234,6 @@ impl Viewer {
         }
     }
 
-    /// Release the GPU textures this viewer holds, keeping the RAM sources.
-    /// Dropping each cache entry's keepalive lets the image pipeline reclaim the
-    /// texture on its next sweep; the surviving `Handle` re-uploads on restore
-    /// without a disk read. Called when the window minimizes.
-    pub fn release_textures(&mut self) {
-        for image in self.cache.values_mut() {
-            image.keepalive = None;
-        }
-    }
-
-    /// The images whose textures were released and need re-uploading from their
-    /// surviving RAM source, each as `(path, handle, original_size, gpu_full,
-    /// decode_time)`, with the displayed image first so it reappears before its
-    /// neighbors. Already-resident entries are skipped, so a refocus that only
-    /// demoted (never released) re-seats nothing. Each keeps the resolution it
-    /// had, so prefetch neighbors stay view-res.
-    pub fn restore_list(&self) -> Vec<RestoreEntry> {
-        let current = self.displayed_path.as_ref();
-        let mut list: Vec<RestoreEntry> = self
-            .cache
-            .iter()
-            .filter(|(_, image)| image.keepalive.is_none())
-            .map(|(path, image)| {
-                (
-                    path.to_path_buf(),
-                    image.handle.clone(),
-                    image.original_size,
-                    image.gpu_full,
-                    image.decode_time,
-                )
-            })
-            .collect();
-        // Float the displayed image to the front so it reappears before its
-        // neighbors: only it compares equal to `current`, and `false` sorts first.
-        list.sort_by_key(|(path, ..)| Some(path) != current);
-        list
-    }
-
     /// Shed the prefetch look-ahead down to just the on-screen image, freeing
     /// the neighbors' VRAM and RAM. Called when a window has sat unfocused long
     /// enough that its look-ahead is unlikely to be used soon; refocus re-warms
@@ -330,29 +242,7 @@ impl Viewer {
         let keep: HashSet<PathBuf> = std::iter::once(self.nav.current().to_path_buf())
             .chain(self.displayed_path.clone())
             .collect();
-        self.cache.retain(&keep);
-    }
-
-    /// Swap the on-screen image to its thumbnail blur, keeping the live zoom and
-    /// pan, so a visible window does not blank when its texture is about to be
-    /// freed. A no-op without a thumbnail, or when not showing a full image.
-    pub fn swap_display_to_thumb(&mut self) {
-        if !matches!(self.displayed, DisplayedImage::Full { .. }) {
-            return;
-        }
-        let Some(path) = self.displayed_path.as_ref() else {
-            return;
-        };
-        if let Some(thumb) = self.thumbs.get(path).cloned() {
-            self.displayed = DisplayedImage::Placeholder(thumb);
-        }
-    }
-
-    /// Evict every RAM source this window holds, so the on-screen image and its
-    /// prefetch neighbors re-decode from disk on return. The cache entries own
-    /// the `Handle`s and GPU keepalives, so this frees both. Thumbnails are kept.
-    pub fn evict_sources(&mut self) {
-        self.cache.retain(&HashSet::new());
+        self.cache.retain(|p, _| keep.contains(p));
     }
 
     /// The paths that must stay cached: the current image plus the
@@ -369,11 +259,21 @@ impl Viewer {
         matches!(self.source, Source::Fs)
     }
 
+    /// Whether `path` has a resident shared texture this window can draw right
+    /// now (its lease's cell is filled). The store-era replacement for the old
+    /// "is it cached" check: a lease without a texture (still decoding, or
+    /// decayed) does not count, so navigation never moves onto a blank.
+    fn has_resident_texture(&self, path: &std::path::Path) -> bool {
+        self.cache
+            .get(path)
+            .is_some_and(|lease| lease.texture().is_some())
+    }
+
     /// Whether anything can be put on screen for `path` right now:
-    /// a decoded image, a thumbnail (blur), or a cached GIF.
-    pub fn displayable(&self, path: &std::path::Path) -> bool {
-        self.cache.contains(path)
-            || self.thumbs.contains(path)
+    /// a resident image, a thumbnail (blur), or a cached GIF.
+    pub fn displayable(&self, thumbs: &ImageCache<Thumb>, path: &std::path::Path) -> bool {
+        self.has_resident_texture(path)
+            || thumbs.contains(&thumb_key(&self.source, path))
             || self.anim_player.has_cached(path)
             // Videos display as soon as their first frame decodes, so
             // navigation never waits on them.
@@ -386,7 +286,7 @@ impl Viewer {
     /// Whether the sharp image for `path` is already in hand, so a resting
     /// slider has nothing left to load. A thumbnail blur does not count.
     pub fn has_full(&self, path: &std::path::Path) -> bool {
-        self.cache.contains(path)
+        self.has_resident_texture(path)
             || self.anim_player.has_cached(path)
             || crate::video::is_video(path)
             || self.failed_loads.contains_key(path)
@@ -398,6 +298,7 @@ impl Viewer {
     /// produces a thumbnail anyway).
     pub fn next_unthumbed_in(
         &self,
+        thumbs: &ImageCache<Thumb>,
         center: usize,
         range: std::ops::Range<usize>,
     ) -> Option<PathBuf> {
@@ -415,7 +316,7 @@ impl Viewer {
             .flatten()
             .map(|i| &files[i])
             .find(|p| {
-                !self.thumbs.contains(p)
+                !thumbs.contains(&thumb_key(&self.source, p))
                     && !self.in_flight_thumbs.contains(*p)
                     && !self.failed_thumbs.contains(*p)
                     && !self.in_flight.contains(*p)
@@ -468,7 +369,7 @@ mod tests {
         let files: Vec<PathBuf> = names.iter().map(PathBuf::from).collect();
         let start = files[cursor].clone();
         let nav = Nav::new(files, &start).unwrap();
-        Viewer::new(nav, Source::Fs, AnimPlayer::new(), 1024)
+        Viewer::new(nav, Source::Fs, AnimPlayer::new())
     }
 
     #[test]
@@ -477,12 +378,12 @@ mod tests {
         // Cursor first, then alternate outward: c, d, b, e, a.
         for expected in ["c.png", "d.png", "b.png", "e.png", "a.png"] {
             assert_eq!(
-                viewer.next_unthumbed_in(2, 0..5),
+                viewer.next_unthumbed_in(&ImageCache::new(0), 2, 0..5),
                 Some(PathBuf::from(expected))
             );
             viewer.in_flight_thumbs.insert(PathBuf::from(expected));
         }
-        assert_eq!(viewer.next_unthumbed_in(2, 0..5), None);
+        assert_eq!(viewer.next_unthumbed_in(&ImageCache::new(0), 2, 0..5), None);
     }
 
     #[test]
@@ -491,12 +392,12 @@ mod tests {
         // Window 3..8 centered on 5: 5, 6, 4, 7, 3 and never 2 or 8.
         for expected in ["5", "6", "4", "7", "3"] {
             assert_eq!(
-                viewer.next_unthumbed_in(5, 3..8),
+                viewer.next_unthumbed_in(&ImageCache::new(0), 5, 3..8),
                 Some(PathBuf::from(expected))
             );
             viewer.in_flight_thumbs.insert(PathBuf::from(expected));
         }
-        assert_eq!(viewer.next_unthumbed_in(5, 3..8), None);
+        assert_eq!(viewer.next_unthumbed_in(&ImageCache::new(0), 5, 3..8), None);
     }
 
     #[test]
@@ -505,12 +406,12 @@ mod tests {
         // Window 1..4 centered on 2: 2, 3, 1 and never the out-of-range 0 or 4.
         for expected in ["2", "3", "1"] {
             assert_eq!(
-                viewer.next_unthumbed_in(2, 1..4),
+                viewer.next_unthumbed_in(&ImageCache::new(0), 2, 1..4),
                 Some(PathBuf::from(expected))
             );
             viewer.in_flight_thumbs.insert(PathBuf::from(expected));
         }
-        assert_eq!(viewer.next_unthumbed_in(2, 1..4), None);
+        assert_eq!(viewer.next_unthumbed_in(&ImageCache::new(0), 2, 1..4), None);
     }
 
     #[test]
@@ -520,7 +421,7 @@ mod tests {
         viewer.failed_thumbs.insert("b.png".into());
         viewer.in_flight.insert("c.png".into());
         assert_eq!(
-            viewer.next_unthumbed_in(0, 0..4),
+            viewer.next_unthumbed_in(&ImageCache::new(0), 0, 0..4),
             Some(PathBuf::from("d.png"))
         );
     }
@@ -529,7 +430,7 @@ mod tests {
     fn next_unthumbed_returns_none_when_exhausted() {
         let mut viewer = test_viewer(&["a.png"], 0);
         viewer.failed_thumbs.insert("a.png".into());
-        assert_eq!(viewer.next_unthumbed_in(0, 0..1), None);
+        assert_eq!(viewer.next_unthumbed_in(&ImageCache::new(0), 0, 0..1), None);
     }
 
     #[test]
@@ -542,107 +443,50 @@ mod tests {
     #[test]
     fn a_failed_load_is_displayable_so_the_cursor_can_land() {
         let mut viewer = test_viewer(&["a.png", "b.png"], 0);
-        assert!(!viewer.displayable(Path::new("b.png")));
+        assert!(!viewer.displayable(&ImageCache::new(0), Path::new("b.png")));
         viewer
             .failed_loads
             .insert("b.png".into(), "could not decode".into());
-        assert!(viewer.displayable(Path::new("b.png")));
+        assert!(viewer.displayable(&ImageCache::new(0), Path::new("b.png")));
+    }
+
+    /// A lease holding a resident full-res texture, as after a decode and upload.
+    /// The backing store is dropped right away; the lease keeps its shared cell
+    /// alive on its own (the cell is `Arc`), so `lease.texture()` stays `Some` and
+    /// the image counts as displayable.
+    fn resident_lease(path: &str) -> Lease {
+        use crate::media::store::{ImageKey, RamImage, Store, Tier};
+        let mut store = Store::default();
+        let p = PathBuf::from(path);
+        let key = ImageKey::new(&Source::Fs, &p);
+        let (lease, _) = store.request(key.clone(), p, Source::Fs, Tier::Full);
+        store.on_decoded(
+            key.clone(),
+            RamImage {
+                handle: Handle::from_rgba(2, 2, vec![0u8; 16]),
+                original_size: (2, 2),
+                decode_time: None,
+            },
+        );
+        store.on_minted(key, Tier::Full, crate::ui::image_surface::test_keepalive());
+        lease
     }
 
     fn cache_image(viewer: &mut Viewer, path: &str) {
-        let handle = Handle::from_rgba(2, 2, vec![0u8; 16]);
-        let image = CachedImage {
-            handle,
-            original_size: (2, 2),
-            keepalive: Some(crate::ui::image_surface::test_keepalive()),
-            gpu_full: true,
-            decode_time: None,
-        };
-        let cost = image.byte_cost();
-        viewer.cache.insert(PathBuf::from(path), image, cost);
+        viewer
+            .cache
+            .insert(PathBuf::from(path), resident_lease(path));
     }
 
     #[test]
-    fn release_textures_drops_keepalives_but_keeps_the_ram_source() {
+    fn a_resident_cache_entry_is_displayable() {
         let mut viewer = test_viewer(&["a.png", "b.png"], 0);
+        // Nothing leased yet: not displayable as a sharp image.
+        assert!(!viewer.displayable(&ImageCache::new(0), Path::new("a.png")));
         cache_image(&mut viewer, "a.png");
-        cache_image(&mut viewer, "b.png");
-
-        viewer.release_textures();
-
-        // The RAM sources stay cached, only the GPU keepalives are gone.
-        assert!(viewer.cache.contains(Path::new("a.png")));
-        assert!(viewer.cache.contains(Path::new("b.png")));
-        assert!(
-            viewer
-                .cache
-                .peek(Path::new("a.png"))
-                .unwrap()
-                .keepalive
-                .is_none()
-        );
-        assert!(
-            viewer
-                .cache
-                .peek(Path::new("b.png"))
-                .unwrap()
-                .keepalive
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn restore_list_puts_the_displayed_image_first() {
-        let mut viewer = test_viewer(&["a.png", "b.png", "c.png"], 0);
-        cache_image(&mut viewer, "a.png");
-        cache_image(&mut viewer, "b.png");
-        cache_image(&mut viewer, "c.png");
-        viewer.displayed_path = Some(PathBuf::from("b.png"));
-        // restore_list reports only released textures, as after a minimize.
-        viewer.release_textures();
-
-        let list = viewer.restore_list();
-        assert_eq!(list.len(), 3);
-        assert_eq!(list[0].0, PathBuf::from("b.png"));
-    }
-
-    #[test]
-    fn restore_list_skips_still_resident_textures() {
-        let mut viewer = test_viewer(&["a.png", "b.png"], 0);
-        cache_image(&mut viewer, "a.png");
-        cache_image(&mut viewer, "b.png");
-        viewer.displayed_path = Some(PathBuf::from("a.png"));
-        // Nothing was released, so there is nothing to re-seat.
-        assert!(viewer.restore_list().is_empty());
-    }
-
-    #[test]
-    fn evict_sources_clears_every_ram_source() {
-        let mut viewer = test_viewer(&["a.png", "b.png"], 0);
-        cache_image(&mut viewer, "a.png");
-        cache_image(&mut viewer, "b.png");
-
-        viewer.evict_sources();
-
-        assert!(!viewer.cache.contains(Path::new("a.png")));
-        assert!(!viewer.cache.contains(Path::new("b.png")));
-    }
-
-    #[test]
-    fn swap_display_to_thumb_without_a_thumbnail_is_a_noop() {
-        let mut viewer = test_viewer(&["a.png"], 0);
-        viewer.displayed = DisplayedImage::Full {
-            handle: Handle::from_rgba(2, 2, vec![0u8; 16]),
-            original_size: (2, 2),
-            texture: None,
-        };
-        viewer.displayed_path = Some(PathBuf::from("a.png"));
-
-        // No thumbnail is cached, so the full image must stay on screen rather
-        // than blank.
-        viewer.swap_display_to_thumb();
-
-        assert!(matches!(viewer.displayed, DisplayedImage::Full { .. }));
+        // The lease holds a resident texture, so the image can go on screen.
+        assert!(viewer.displayable(&ImageCache::new(0), Path::new("a.png")));
+        assert!(viewer.has_full(Path::new("a.png")));
     }
 
     #[test]
@@ -655,8 +499,8 @@ mod tests {
 
         viewer.drop_prefetch();
 
-        assert!(viewer.cache.contains(Path::new("b.png")));
-        assert!(!viewer.cache.contains(Path::new("a.png")));
-        assert!(!viewer.cache.contains(Path::new("c.png")));
+        assert!(viewer.cache.contains_key(Path::new("b.png")));
+        assert!(!viewer.cache.contains_key(Path::new("a.png")));
+        assert!(!viewer.cache.contains_key(Path::new("c.png")));
     }
 }

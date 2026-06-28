@@ -17,7 +17,7 @@ use crate::app::{Message as AppMessage, Shared, Window};
 /// the thumbnail lane.
 const SETTLE: Duration = Duration::from_millis(100);
 
-pub(crate) fn view<'a>(win: &'a Window, _shared: &'a Shared) -> Element<'a, AppMessage> {
+pub(crate) fn view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, AppMessage> {
     let Some(viewer) = win.viewer() else {
         return iced::widget::row![].into();
     };
@@ -26,7 +26,8 @@ pub(crate) fn view<'a>(win: &'a Window, _shared: &'a Shared) -> Element<'a, AppM
         win.id,
         viewer.nav.files(),
         viewer.nav.cursor(),
-        &viewer.thumbs,
+        &viewer.source,
+        &shared.thumbs,
         viewer.filmstrip_scroll_x,
         win.window_size.width,
     )
@@ -55,7 +56,14 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 // Restart the cursor fan only if it drained, so repeated scroll
                 // events don't pile on extra chains.
                 if viewer.in_flight_thumbs.is_empty() {
-                    Task::batch(fire_thumbnailer(&pipeline, viewer, 3, window_w, show))
+                    Task::batch(fire_thumbnailer(
+                        &pipeline,
+                        &shared.thumbs,
+                        viewer,
+                        3,
+                        window_w,
+                        show,
+                    ))
                 } else {
                     Task::none()
                 }
@@ -89,7 +97,14 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             }
             pipeline.bump_thumb_generation();
             viewer.in_flight_thumbs.clear();
-            Task::batch(fire_thumbnailer(&pipeline, viewer, 3, window_w, show))
+            Task::batch(fire_thumbnailer(
+                &pipeline,
+                &shared.thumbs,
+                viewer,
+                3,
+                window_w,
+                show,
+            ))
         }
 
         Message::Clicked(index) => complete_navigation(win, shared, index, true),
