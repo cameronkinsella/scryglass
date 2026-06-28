@@ -114,7 +114,7 @@ fn window_subscriptions(id: window::Id, win: &Window) -> Vec<Subscription<Messag
 
         // Video pacing: pull frames due for display ~60×/s while a
         // session is active (paused sessions still need control redraws).
-        if viewer.video.is_some() && !win.minimized {
+        if viewer.video.session.is_some() && !win.minimized {
             subs.push(
                 iced::time::every(Duration::from_millis(16))
                     .map(|_| Message::VideoControls(VideoControlsMessage::Tick)),

@@ -77,7 +77,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                     let handle = handle.clone();
                     Some(tokio::task::spawn_blocking(move || copy_bitmap(&handle)))
                 }
-                DisplayedImage::Video { .. } => viewer.video_frame.clone().map(|frame| {
+                DisplayedImage::Video { .. } => viewer.video.frame.clone().map(|frame| {
                     tokio::task::spawn_blocking(move || {
                         let (w, h, rgba) = frame.to_rgba();
                         copy_rgba_bitmap(w, h, rgba)

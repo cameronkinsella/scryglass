@@ -279,7 +279,7 @@ async fn rename_with_retry(old: PathBuf, new: PathBuf) -> Result<(), String> {
 fn take_open_video(win: &mut Window, shared: &mut Shared, path: &Path) -> Option<VideoResume> {
     let hardware = shared.config.hardware_decode;
     let viewer = win.viewer_mut()?;
-    let session = viewer.video.as_ref()?;
+    let session = viewer.video.session.as_ref()?;
     if session.path != *path {
         return None;
     }
@@ -291,7 +291,7 @@ fn take_open_video(win: &mut Window, shared: &mut Shared, path: &Path) -> Option
         hardware,
         playing: session.playing,
     };
-    viewer.video = None;
+    viewer.video.session = None;
     Some(resume)
 }
 
@@ -311,7 +311,7 @@ fn resume_video(win: &mut Window, _shared: &mut Shared, resume: VideoResume, pat
     if !resume.playing {
         session.pause();
     }
-    viewer.video = Some(session);
+    viewer.video.session = Some(session);
 }
 
 /// How the view should react to a successful rename.
@@ -545,16 +545,16 @@ mod tests {
         let open = || {
             crate::video::VideoSession::open(path.clone(), Duration::ZERO, 0.4, false, true, false)
         };
-        app.viewer_mut().unwrap().video = Some(open());
+        app.viewer_mut().unwrap().video.session = Some(open());
         // A file op on the open video releases its session so the file unlocks.
         assert!(take_open_video(&mut app.window, &mut app.shared, &path).is_some());
-        assert!(app.viewer().unwrap().video.is_none());
+        assert!(app.viewer().unwrap().video.session.is_none());
         // A different file leaves the video alone.
-        app.viewer_mut().unwrap().video = Some(open());
+        app.viewer_mut().unwrap().video.session = Some(open());
         assert!(
             take_open_video(&mut app.window, &mut app.shared, Path::new("other.mp4")).is_none()
         );
-        assert!(app.viewer().unwrap().video.is_some());
+        assert!(app.viewer().unwrap().video.session.is_some());
     }
 
     #[tokio::test]
@@ -574,7 +574,7 @@ mod tests {
             &mut app.shared,
             Message::DeleteFinished(path, Err("locked".into()), Some(resume)),
         );
-        assert!(app.viewer().unwrap().video.is_some());
+        assert!(app.viewer().unwrap().video.session.is_some());
     }
 
     #[tokio::test]

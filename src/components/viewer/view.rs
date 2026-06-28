@@ -26,9 +26,9 @@ pub(crate) fn view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Messa
             let image_view = image_view(win, shared);
 
             let hide_cursor = crate::app::viewer_math::hide_idle_cursor(
-                viewer.video.as_ref().is_some_and(|s| s.playing),
-                viewer.video_seek_drag.is_some(),
-                viewer.controls_opacity > 0.0,
+                viewer.video.session.as_ref().is_some_and(|s| s.playing),
+                viewer.video.seek_drag.is_some(),
+                viewer.video.controls_opacity > 0.0,
             );
 
             let interactive = mouse_area(image_view)
@@ -58,7 +58,7 @@ pub(crate) fn view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Messa
 
             let media: Element<'_, Message> = if edge_nav_active(win, shared, viewer, hide_cursor) {
                 // Keep the strips clear of the video transport bar at the bottom.
-                let reserve = if viewer.controls_opacity > 0.0 {
+                let reserve = if viewer.video.controls_opacity > 0.0 {
                     VIDEO_CONTROLS_RESERVE
                 } else {
                     0.0
@@ -226,7 +226,7 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
                 false,
             )
         }
-        DisplayedImage::Video { .. } => match viewer.video_frame.clone() {
+        DisplayedImage::Video { .. } => match viewer.video.frame.clone() {
             #[cfg(feature = "video")]
             Some(frame) => ui::video_surface::view(
                 frame,
@@ -263,10 +263,10 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
     };
 
     // Video transport controls, faded in/out by the per-tick opacity ease.
-    match &viewer.video {
-        Some(session) if viewer.controls_opacity > 0.0 => Stack::with_children(vec![
+    match &viewer.video.session {
+        Some(session) if viewer.video.controls_opacity > 0.0 => Stack::with_children(vec![
             image_view,
-            video_controls::view(session, viewer, viewer.controls_opacity),
+            video_controls::view(session, viewer, viewer.video.controls_opacity),
         ])
         .into(),
         _ => image_view,

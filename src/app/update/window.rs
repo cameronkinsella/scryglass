@@ -148,7 +148,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             // un-minimized video keeps playing regardless.
             let pause = shared.config.resource.minimized.pause_video;
             let mut resume = win.video_resumes_on_restore;
-            if let Some(session) = win.viewer_mut().and_then(|v| v.video.as_mut()) {
+            if let Some(session) = win.viewer_mut().and_then(|v| v.video.session.as_mut()) {
                 if minimized && pause {
                     resume = session.playing;
                     session.pause();

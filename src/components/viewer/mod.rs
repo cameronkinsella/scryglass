@@ -291,8 +291,8 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             win.last_cursor_pos = pos;
             let viewport = win.viewport_size;
             if let Some(viewer) = win.viewer_mut() {
-                if viewer.video.is_some() {
-                    viewer.video_controls_until =
+                if viewer.video.session.is_some() {
+                    viewer.video.controls_until =
                         Some(Instant::now() + crate::app::VIDEO_CONTROLS_TIMEOUT);
                 }
                 if let Some(ds) = viewer.drag {
@@ -310,7 +310,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
         }
         Message::CursorLeft => {
             if let Some(viewer) = win.viewer_mut() {
-                viewer.video_controls_until = None;
+                viewer.video.controls_until = None;
             }
             Task::none()
         }
@@ -581,10 +581,10 @@ mod tests {
     #[test]
     fn cursor_leave_clears_the_controls_clock() {
         let mut app = viewing_app(&["a.png"], 0);
-        app.viewer_mut().unwrap().video_controls_until =
+        app.viewer_mut().unwrap().video.controls_until =
             Some(Instant::now() + std::time::Duration::from_secs(5));
         let _ = update(&mut app.window, &mut app.shared, Message::CursorLeft);
-        assert!(viewer(&app).video_controls_until.is_none());
+        assert!(viewer(&app).video.controls_until.is_none());
     }
 
     #[test]

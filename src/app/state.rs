@@ -91,6 +91,38 @@ impl DisplayedImage {
     }
 }
 
+/// All video playback state for a viewer: the decode session, the latest frame,
+/// the seek drag, archive extraction, and the controls overlay. Grouped so
+/// navigation tears the active video down in one place.
+#[derive(Default)]
+pub struct VideoState {
+    /// Active playback session (feature `video`). Dropping it stops the decode
+    /// threads.
+    pub session: Option<crate::video::VideoSession>,
+    /// Latest decoded frame, drawn by the GPU YUV surface.
+    pub frame: Option<std::sync::Arc<crate::video::VideoFrame>>,
+    /// Mid-drag value of the seek slider (seconds), committed on release.
+    pub seek_drag: Option<f64>,
+    /// Archive video entry currently extracting to a temp file.
+    pub extracting: Option<PathBuf>,
+    /// Controls stay visible until this deadline, refreshed by mouse movement.
+    pub controls_until: Option<Instant>,
+    /// Control-bar fade level, eased toward 0 or 1 each tick.
+    pub controls_opacity: f32,
+}
+
+impl VideoState {
+    /// Tear down the active video (session, frame, seek, extraction), as
+    /// navigating away from a video does. The controls overlay is left to ease
+    /// out on its own, since it only renders while a session exists.
+    pub fn reset(&mut self) {
+        self.session = None;
+        self.frame = None;
+        self.seek_drag = None;
+        self.extracting = None;
+    }
+}
+
 /// All state tied to an open directory (or archive) of images.
 pub struct Viewer {
     pub nav: Nav,
@@ -170,22 +202,9 @@ pub struct Viewer {
     /// Rotation currently baked into the displayed texture. When this
     /// trails `rotation`, a rotate task is producing the next texture.
     pub displayed_rotation: u8,
-    /// Active video playback session (feature `video`). Dropping it
-    /// stops the decode processes.
-    pub video: Option<crate::video::VideoSession>,
-    /// Latest decoded video frame, drawn by the GPU YUV surface.
-    pub video_frame: Option<std::sync::Arc<crate::video::VideoFrame>>,
-    /// Mid-drag value of the video seek slider (seconds), committed on
-    /// release.
-    pub video_seek_drag: Option<f64>,
-    /// Archive video entry currently extracting to a temp file, to
-    /// prevent duplicate extractions.
-    pub video_extracting: Option<PathBuf>,
-    /// Video controls stay visible until this deadline, refreshed by any
-    /// mouse movement. `None` means hidden (while playing).
-    pub video_controls_until: Option<Instant>,
-    /// Control-bar fade level, eased toward 0 or 1 each video tick.
-    pub controls_opacity: f32,
+    /// All video playback state: the decode session, latest frame, seek drag,
+    /// archive extraction, and the controls overlay.
+    pub video: VideoState,
     /// After the post-open resort lands, jump to the first image of the
     /// new order. Set when a folder or archive was opened rather than a
     /// specific file.
@@ -227,12 +246,7 @@ impl Viewer {
             exif: None,
             rotation: 0,
             displayed_rotation: 0,
-            video: None,
-            video_frame: None,
-            video_seek_drag: None,
-            video_extracting: None,
-            video_controls_until: None,
-            controls_opacity: 0.0,
+            video: VideoState::default(),
             resort_to_first: false,
         }
     }

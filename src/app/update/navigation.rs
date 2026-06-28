@@ -372,10 +372,7 @@ pub(crate) fn scrub_to(
     viewer.exif = None;
     viewer.rotation = 0;
     viewer.displayed_rotation = 0;
-    viewer.video = None;
-    viewer.video_frame = None;
-    viewer.video_seek_drag = None;
-    viewer.video_extracting = None;
+    viewer.video.reset();
 
     let current = viewer.nav.current().to_path_buf();
     let key = ImageKey::new(&viewer.source, &current);
@@ -482,10 +479,7 @@ pub(crate) fn complete_navigation(
     }
 
     viewer.anim_player.stop();
-    viewer.video = None;
-    viewer.video_frame = None;
-    viewer.video_seek_drag = None;
-    viewer.video_extracting = None;
+    viewer.video.reset();
     viewer.drag = None;
 
     // Reset pan on navigation. Zoom is preserved only in LockZoomRatio mode.
