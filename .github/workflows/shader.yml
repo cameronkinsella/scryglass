@@ -28,6 +28,9 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # The shared kernel weights are pure math, so they run on stable here rather
+      # than only on the GPU.
+      - run: cargo test --manifest-path shaders/common/Cargo.toml
       # cargo-gpu installs the matching nightly and builds the backend itself.
       - run: cargo install --git https://github.com/Rust-GPU/rust-gpu --tag v0.10.0-alpha.1 cargo-gpu
       - run: cargo xtask build-shaders

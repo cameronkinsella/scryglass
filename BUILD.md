@@ -42,6 +42,8 @@ compiled to committed SPIR-V:
 
 - `shaders/yuv/` -> `src/ui/video_surface/yuv.spv` (YUV-to-RGB video).
 - `shaders/image/` -> `src/ui/image_surface/image.spv` (RGBA still image).
+- `shaders/common/` -> shared resampling-kernel weights used by both. Being pure
+  math, its tests run on stable (`cargo test --manifest-path shaders/common/Cargo.toml`).
 
 Because the `.spv` files are committed and the shader crates are excluded from
 the workspace, normal builds and `cargo install` need only stable Rust.

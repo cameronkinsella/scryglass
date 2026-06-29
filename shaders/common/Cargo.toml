@@ -1,0 +1,17 @@
+[package]
+name = "scryglass-shader-common"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# Pure-Rust libm so sinf compiles both to SPIR-V and on the host for tests.
+libm = "0.2"
+
+[lib]
+crate-type = ["rlib"]
+
+# cargo-gpu builds for the spirv target; declare it so the host build does not
+# flag the target_arch check as an unknown cfg value.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_arch, values("spirv"))'] }
