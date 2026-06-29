@@ -102,6 +102,36 @@ impl ZoomMode {
     }
 }
 
+/// Kernel used to shrink a still or animation to fit. All fix the aliasing a plain
+/// bilinear tap leaves on heavy minification; they differ only in sharpness and
+/// whether they ring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DownscaleKernel {
+    /// One bilinear tap (fastest, softens and aliases when shrunk past ~2x).
+    Bilinear,
+    /// Balanced cubic that never rings: the safe default for mixed content.
+    #[default]
+    Mitchell,
+    /// Sharper cubic with a small overshoot (mild ringing).
+    CatmullRom,
+    /// Sharpest, with visible ringing; best on clean photographic detail.
+    Lanczos3,
+}
+
+impl DownscaleKernel {
+    /// The shader's kernel selector (`flags.y`) and Mitchell-Netravali `(B, C)`.
+    /// The cubics share one selector and differ only by `(B, C)`; Lanczos ignores it.
+    pub fn shader_params(self) -> (u32, [f32; 2]) {
+        match self {
+            DownscaleKernel::Bilinear => (0, [0.0, 0.0]),
+            DownscaleKernel::Mitchell => (1, [1.0 / 3.0, 1.0 / 3.0]),
+            DownscaleKernel::CatmullRom => (1, [0.0, 0.5]),
+            DownscaleKernel::Lanczos3 => (2, [0.0, 0.0]),
+        }
+    }
+}
+
 /// What resolution a focused window's prefetch neighbors are uploaded at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -449,6 +479,8 @@ pub struct AppConfig {
     pub sort_desc: bool,
     /// Nearest-neighbor sampling past 100% zoom: crisp pixels for pixel art.
     pub crisp_pixels: bool,
+    /// Kernel used to shrink stills and animations to fit.
+    pub downscale_kernel: DownscaleKernel,
     /// Persist thumbnails on disk between sessions (warm folders open
     /// instantly). Reconciled against deleted files, expired after 90
     /// unused days, size-capped. Requires the `disk-thumbs` build feature.
@@ -502,6 +534,7 @@ impl Default for AppConfig {
             sort_key: SortKey::default(),
             sort_desc: false,
             crisp_pixels: false,
+            downscale_kernel: DownscaleKernel::default(),
             disk_thumbs: true,
             read_only: false,
             confirm_delete: true,
@@ -742,6 +775,7 @@ mod tests {
             sort_key: SortKey::DateModified,
             sort_desc: true,
             crisp_pixels: true,
+            downscale_kernel: DownscaleKernel::Lanczos3,
             disk_thumbs: false,
             read_only: true,
             confirm_delete: false,

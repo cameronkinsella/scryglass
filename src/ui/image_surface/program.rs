@@ -8,13 +8,15 @@ use iced::{Element, Length, Rectangle, mouse, wgpu};
 
 use super::pipeline::{ImagePipeline, Keepalive};
 use crate::app::Message;
-use crate::ui::image_display::SurfacePlacement;
+use crate::config::DownscaleKernel;
+use crate::ui::image_display::{self, SurfacePlacement};
 
 /// Build the image surface element at the given zoom/pan, drawing the resident
 /// `texture` directly (read live from the store's shared cell for stills, or the
 /// current frame's keepalive for animations, so a black screen is impossible).
 /// `None` is the degenerate warmup case that draws nothing. Fills the image area
 /// like the placeholder and video paths do.
+#[allow(clippy::too_many_arguments)]
 pub fn view(
     texture: Option<Keepalive>,
     original: (u32, u32),
@@ -22,9 +24,10 @@ pub fn view(
     pan: (f32, f32),
     viewport: (f32, f32),
     pixelated: bool,
+    kernel: DownscaleKernel,
 ) -> Element<'static, Message> {
     shader::Shader::new(ImageSurface::new(
-        texture, original, zoom, pan, viewport, pixelated,
+        texture, original, zoom, pan, viewport, pixelated, kernel,
     ))
     .width(Length::Fill)
     .height(Length::Fill)
@@ -40,14 +43,21 @@ pub fn warmup() -> Element<'static, Message> {
         .into()
 }
 
-/// The shader program: the texture to show and where to place it.
+/// The shader program: the texture to show, where to place it, and how to downscale.
 struct ImageSurface {
     /// The resident texture to draw, or `None` for the warmup surface.
     texture: Option<Keepalive>,
     placement: SurfacePlacement,
+    /// The downscale kernel and the per-axis footprint it is scaled by, plus the
+    /// texture's texel size, all passed straight into the shader uniform.
+    footprint: [f32; 2],
+    tex_size: [f32; 2],
+    kernel: u32,
+    bc: [f32; 2],
 }
 
 impl ImageSurface {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         texture: Option<Keepalive>,
         original: (u32, u32),
@@ -55,10 +65,26 @@ impl ImageSurface {
         pan: (f32, f32),
         viewport: (f32, f32),
         pixelated: bool,
+        kernel: DownscaleKernel,
     ) -> Self {
+        let placement = SurfacePlacement::new(zoom, pan, viewport, original, pixelated);
+        // The footprint is measured against the resident texture's real size (a
+        // view-res copy is already smaller, so its footprint is nearer 1), falling
+        // back to the original dims for the tokenless test keepalive.
+        let tex_dims = texture.as_ref().and_then(|t| t.size()).unwrap_or(original);
+        let footprint = if placement.valid {
+            image_display::footprint(placement.dst, placement.src, tex_dims, viewport)
+        } else {
+            [1.0, 1.0]
+        };
+        let (selector, bc) = kernel.shader_params();
         Self {
             texture,
-            placement: SurfacePlacement::new(zoom, pan, viewport, original, pixelated),
+            placement,
+            footprint,
+            tex_size: [tex_dims.0 as f32, tex_dims.1 as f32],
+            kernel: selector,
+            bc,
         }
     }
 
@@ -67,6 +93,10 @@ impl ImageSurface {
         Self {
             texture: None,
             placement: SurfacePlacement::empty(),
+            footprint: [1.0, 1.0],
+            tex_size: [1.0, 1.0],
+            kernel: 0,
+            bc: [0.0, 0.0],
         }
     }
 }
@@ -84,6 +114,10 @@ impl<T> shader::Program<T> for ImageSurface {
         ImagePrimitive {
             texture: self.texture.clone(),
             placement: self.placement,
+            footprint: self.footprint,
+            tex_size: self.tex_size,
+            kernel: self.kernel,
+            bc: self.bc,
         }
     }
 }
@@ -93,6 +127,10 @@ pub struct ImagePrimitive {
     /// The resident texture to draw, owned for the whole frame.
     texture: Option<Keepalive>,
     placement: SurfacePlacement,
+    footprint: [f32; 2],
+    tex_size: [f32; 2],
+    kernel: u32,
+    bc: [f32; 2],
 }
 
 impl std::fmt::Debug for ImagePrimitive {
@@ -115,7 +153,15 @@ impl shader::Primitive for ImagePrimitive {
         _viewport: &shader::Viewport,
     ) {
         if self.placement.valid {
-            pipeline.write_uniforms(queue, self.placement.dst, self.placement.src);
+            pipeline.write_uniforms(
+                queue,
+                self.placement.dst,
+                self.placement.src,
+                self.footprint,
+                self.tex_size,
+                self.kernel,
+                self.bc,
+            );
         }
     }
 

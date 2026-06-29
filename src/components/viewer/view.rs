@@ -181,6 +181,7 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
                     viewer.pan,
                     viewport,
                     shared.config.crisp_pixels,
+                    shared.config.downscale_kernel,
                 ),
                 None => match path.and_then(|p| {
                     shared
@@ -214,6 +215,7 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
                     viewer.pan,
                     viewport,
                     shared.config.crisp_pixels,
+                    shared.config.downscale_kernel,
                 ),
                 None => match viewer.displayed_path.as_deref().and_then(|p| {
                     shared

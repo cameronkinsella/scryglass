@@ -96,6 +96,10 @@ fn fit_zoom(original: (u32, u32), view: Size) -> f32 {
 /// Downscale a full-res RGBA handle to `target`, for a prefetch neighbor's
 /// smaller GPU texture. Returns the original handle when it already fits. Borrows
 /// the source pixels (no full-res copy) so the resize stays cheap.
+///
+/// Uses a cubic (CatmullRom), the closest match the `image` crate has to the
+/// shader's cubic downscale, so a demoted view-res copy shown near 1:1 looks like
+/// the full-res image sampled at fit and the swap is invisible.
 fn downscale(handle: &Handle, target: (u32, u32)) -> Handle {
     let Handle::Rgba {
         width,
@@ -118,7 +122,7 @@ fn downscale(handle: &Handle, target: (u32, u32)) -> Handle {
         &view,
         target.0,
         target.1,
-        image::imageops::FilterType::Triangle,
+        image::imageops::FilterType::CatmullRom,
     );
     Handle::from_rgba(target.0, target.1, resized.into_raw())
 }

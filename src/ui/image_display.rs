@@ -143,6 +143,38 @@ pub(crate) fn display_geometry(
     }
 }
 
+/// The downscale ratio in source texels per output pixel, per axis, for content
+/// placed at `dst` (normalized widget space) sampling `src` (texture UV) of a
+/// `tex_size`-texel texture into a `viewport`-pixel area. Above 1 means that axis is
+/// minified, so the shader widens its kernel to that footprint; at 1:1 it is 1 and
+/// the shader takes a single tap. Exact, so it never leans on screen-space
+/// derivatives.
+pub(crate) fn footprint(
+    dst: [f32; 4],
+    src: [f32; 4],
+    tex_size: (u32, u32),
+    viewport: (f32, f32),
+) -> [f32; 2] {
+    let (tw, th) = (tex_size.0 as f32, tex_size.1 as f32);
+    let (vw, vh) = viewport;
+    let dst_px_w = (dst[2] - dst[0]) * vw;
+    let dst_px_h = (dst[3] - dst[1]) * vh;
+    let src_tx_w = (src[2] - src[0]) * tw;
+    let src_tx_h = (src[3] - src[1]) * th;
+    [
+        if dst_px_w > 0.0 {
+            src_tx_w / dst_px_w
+        } else {
+            1.0
+        },
+        if dst_px_h > 0.0 {
+            src_tx_h / dst_px_h
+        } else {
+            1.0
+        },
+    ]
+}
+
 /// Where a shader surface draws its content this frame: the destination and
 /// source-UV rects plus the sampling mode, resolved from the display geometry.
 /// `valid` is false for the degenerate case that draws nothing. The still and video
@@ -463,5 +495,29 @@ mod tests {
         let (_, src) = display_geometry(1.0, (100.0, 0.0), VP, (2000, 1000)).expect("geometry");
         assert!(src[0] < 0.3, "panned u0 {} should be left of 0.3", src[0]);
         assert!(src[0] >= 0.0);
+    }
+
+    #[test]
+    fn footprint_is_one_at_one_to_one() {
+        // A 400x300 texture shown fit in 800x600 lands at exactly its own pixel size.
+        let (dst, src) = display_geometry(1.0, (0.0, 0.0), VP, (400, 300)).expect("geometry");
+        let fp = footprint(dst, src, (400, 300), VP);
+        assert!((fp[0] - 1.0).abs() < 1e-5, "fp.x {}", fp[0]);
+        assert!((fp[1] - 1.0).abs() < 1e-5, "fp.y {}", fp[1]);
+    }
+
+    #[test]
+    fn footprint_grows_with_the_downscale_ratio() {
+        // The whole texture (800x600) shown at half size (400x300) is a 2x minify.
+        let dst = [0.25, 0.25, 0.75, 0.75];
+        let fp = footprint(dst, [0.0, 0.0, 1.0, 1.0], (800, 600), VP);
+        assert!((fp[0] - 2.0).abs() < 1e-5, "fp.x {}", fp[0]);
+        assert!((fp[1] - 2.0).abs() < 1e-5, "fp.y {}", fp[1]);
+    }
+
+    #[test]
+    fn footprint_guards_a_degenerate_destination() {
+        let fp = footprint([0.5, 0.5, 0.5, 0.5], [0.0, 0.0, 1.0, 1.0], (800, 600), VP);
+        assert_eq!(fp, [1.0, 1.0]);
     }
 }

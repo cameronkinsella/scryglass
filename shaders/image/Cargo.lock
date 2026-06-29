@@ -62,7 +62,15 @@ name = "scryglass-image-shader"
 version = "0.0.0"
 dependencies = [
  "glam",
+ "scryglass-shader-common",
  "spirv-std",
+]
+
+[[package]]
+name = "scryglass-shader-common"
+version = "0.0.0"
+dependencies = [
+ "libm",
 ]
 
 [[package]]

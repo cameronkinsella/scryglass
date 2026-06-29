@@ -9,7 +9,7 @@ use iced::widget::image::Handle;
 use iced::widget::shader;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-const UNIFORM_SIZE: u64 = 48;
+const UNIFORM_SIZE: u64 = 80;
 
 /// Hands decoded images to the single dedicated upload thread (set up on the
 /// pipeline's first build, the only place wgpu gives us the device). One thread
@@ -43,6 +43,14 @@ static UPLOAD_CONTEXT: OnceLock<UploadContext> = OnceLock::new();
 pub struct ResidentImage {
     image: Option<GpuImage>,
     drop_tx: Option<UnboundedSender<Job>>,
+}
+
+impl ResidentImage {
+    /// The resident texture's size in texels, or `None` for the tokenless test
+    /// keepalive. The downscale shader needs it to step taps by whole texels.
+    pub fn size(&self) -> Option<(u32, u32)> {
+        self.image.as_ref().map(|image| image.size)
+    }
 }
 
 impl std::fmt::Debug for ResidentImage {
@@ -92,6 +100,7 @@ pub struct ImagePipeline {
 struct GpuImage {
     bind_linear: wgpu::BindGroup,
     bind_nearest: wgpu::BindGroup,
+    size: (u32, u32),
 }
 
 impl shader::Pipeline for ImagePipeline {
@@ -218,10 +227,24 @@ impl shader::Pipeline for ImagePipeline {
 }
 
 impl ImagePipeline {
-    /// Write the per-draw uniforms (the dst/src rects) for the resident-texture
-    /// draw path.
-    pub(super) fn write_uniforms(&self, queue: &wgpu::Queue, dst: [f32; 4], src: [f32; 4]) {
-        queue.write_buffer(&self.uniforms, 0, &build_uniforms(dst, src, self.is_srgb));
+    /// Write the per-draw uniforms for the resident-texture draw path: the dst/src
+    /// rects plus the downscale kernel and the footprint it is scaled by.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn write_uniforms(
+        &self,
+        queue: &wgpu::Queue,
+        dst: [f32; 4],
+        src: [f32; 4],
+        footprint: [f32; 2],
+        tex_size: [f32; 2],
+        kernel: u32,
+        bc: [f32; 2],
+    ) {
+        queue.write_buffer(
+            &self.uniforms,
+            0,
+            &build_uniforms(dst, src, self.is_srgb, kernel, footprint, tex_size, bc),
+        );
     }
 
     /// Draw a resident image the caller already owns (its `Keepalive` keeps the
@@ -301,6 +324,7 @@ fn bind_texture(
     GpuImage {
         bind_linear: bind(sampler_linear),
         bind_nearest: bind(sampler_nearest),
+        size: (texture.width(), texture.height()),
     }
 }
 
@@ -463,10 +487,20 @@ fn sampler_desc(filter: wgpu::FilterMode) -> wgpu::SamplerDescriptor<'static> {
     }
 }
 
-/// Pack the per-draw uniform block: the destination and source rects, plus the
-/// sRGB-target flag. Layout matches the shader `Uniforms` struct (48 bytes).
-fn build_uniforms(dst: [f32; 4], src: [f32; 4], is_srgb: bool) -> [u8; 48] {
-    let mut buf = [0u8; 48];
+/// Pack the per-draw uniform block to match the shader `Uniforms` struct (80 bytes):
+/// the dst/src rects (0..32), the flags `UVec4` (32..48, x = sRGB, y = kernel), then
+/// footprint, tex_size, and the cubic `(B, C)` (48..72; 72..80 is tail padding).
+#[allow(clippy::too_many_arguments)]
+fn build_uniforms(
+    dst: [f32; 4],
+    src: [f32; 4],
+    is_srgb: bool,
+    kernel: u32,
+    footprint: [f32; 2],
+    tex_size: [f32; 2],
+    bc: [f32; 2],
+) -> [u8; 80] {
+    let mut buf = [0u8; 80];
     let floats = [
         dst[0], dst[1], dst[2], dst[3], src[0], src[1], src[2], src[3],
     ];
@@ -474,6 +508,19 @@ fn build_uniforms(dst: [f32; 4], src: [f32; 4], is_srgb: bool) -> [u8; 48] {
         buf[i * 4..i * 4 + 4].copy_from_slice(&f.to_le_bytes());
     }
     buf[32..36].copy_from_slice(&(is_srgb as u32).to_le_bytes());
+    buf[36..40].copy_from_slice(&kernel.to_le_bytes());
+    let tail = [
+        footprint[0],
+        footprint[1],
+        tex_size[0],
+        tex_size[1],
+        bc[0],
+        bc[1],
+    ];
+    for (i, f) in tail.iter().enumerate() {
+        let o = 48 + i * 4;
+        buf[o..o + 4].copy_from_slice(&f.to_le_bytes());
+    }
     buf
 }
 
