@@ -200,12 +200,16 @@ pub(crate) fn show_loaded(
     viewport: Size,
 ) {
     let (w, h) = original_size;
-    // Keep the live zoom and pan when a same-path placeholder swaps to full: a
-    // pending navigation already set the fit zoom (identical geometry), and a
-    // decay restore must preserve the zoom it was viewed at. Only a fresh display
-    // recomputes.
-    let resuming = matches!(viewer.displayed, DisplayedImage::Placeholder(_))
-        && viewer.displayed_path.as_deref() == Some(path);
+    // Keep the live zoom and pan when the same image is already on screen: a pending
+    // navigation's placeholder swapping to full (its fit zoom is already set), or a
+    // decayed image re-decoding after eviction (still shown Full through its blur,
+    // and it must return to the zoom it was viewed at). Only a fresh display, where
+    // the path differs or nothing is shown, recomputes.
+    let resuming = viewer.displayed_path.as_deref() == Some(path)
+        && matches!(
+            viewer.displayed,
+            DisplayedImage::Placeholder(_) | DisplayedImage::Full { .. }
+        );
     if !resuming {
         if !viewer.manual_zoom || zoom_mode != ZoomMode::LockZoomRatio {
             viewer.zoom = compute_zoom(zoom_mode, w, h, viewport);
