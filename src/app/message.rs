@@ -45,6 +45,11 @@ pub enum Envelope {
     /// The watched config file changed but no longer parses. Keep the current
     /// settings and warn.
     ConfigInvalid,
+    /// The working-set trim timer fired for this generation (Windows only). A
+    /// background-state change since arming bumps the generation, so a
+    /// superseded timer no-ops.
+    #[cfg(target_os = "windows")]
+    TrimWorkingSet(u64),
 }
 
 impl Envelope {

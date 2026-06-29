@@ -145,3 +145,19 @@ alt-tab back within the grace period keeps the session. An archive video re-uses
 re-extracts. While a video is released its transport controls disappear and keyboard
 playback keys do nothing until it returns, so unfocused (still visible) videos
 default to never releasing; only minimized (hidden) ones do.
+
+### `[resource.working_set]` (Windows only)
+
+Decay frees a window's *own* GPU and RAM, but it cannot shrink the process's
+irreducible baseline (the renderer, the GPU driver, the decoders). On Windows,
+`EmptyWorkingSet` can: it hands the whole process's resident pages back to the OS,
+so the idle footprint drops below what decay alone reaches. The pages fault back in
+when next touched, so this is a footprint-vs-restore-latency trade, not a free win.
+It is process-global, so it fires only once the *whole* app is in the background,
+never per window. Off by default. This table is ignored on macOS and Linux, where
+the OS reclaims idle memory on its own.
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `trim_when` | `"never"` \| `"all-unfocused"` \| `"all-minimized"` | `"never"` | The background condition that arms the trim. `all-unfocused` fires whenever scryglass is not the foreground app (any window still visible); `all-minimized` only once every window is minimized (fully hidden), which hides the re-fault behind the restore you are already waiting on. |
+| `trim_after` | duration | `"10s"` | How long the condition must hold, uninterrupted, before the trim fires. A refocus or restore within this grace period cancels it. |

@@ -98,6 +98,17 @@ pub struct App {
     pub(crate) windows: HashMap<window::Id, Window>,
 }
 
+/// Runtime bookkeeping for the Windows working-set trim. `generation` is bumped
+/// on each background-state transition so a superseded timer no-ops; `armed`
+/// records whether the trim condition already held, so only a transition arms a
+/// new timer (the periodic minimize poll never resets a running one).
+#[cfg(target_os = "windows")]
+#[derive(Default)]
+pub(crate) struct WorkingSet {
+    pub(crate) generation: u64,
+    pub(crate) armed: bool,
+}
+
 /// State common to every window: settings, the load pipeline, and global
 /// facts shown in the per-window settings card.
 pub struct Shared {
@@ -127,6 +138,9 @@ pub struct Shared {
     /// when settings closes so a reopen never shows a stale verdict.
     #[cfg(feature = "update-check")]
     pub(crate) update_status: Option<crate::update_check::UpdateStatus>,
+    /// Process-global working-set trim bookkeeping (Windows only).
+    #[cfg(target_os = "windows")]
+    pub(crate) working_set: WorkingSet,
 }
 
 /// Everything tied to one viewer window.

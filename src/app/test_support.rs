@@ -49,6 +49,8 @@ pub(crate) fn empty_app() -> TestApp {
             associations_registered: false,
             #[cfg(feature = "update-check")]
             update_status: None,
+            #[cfg(target_os = "windows")]
+            working_set: crate::app::WorkingSet::default(),
         },
         window: Window {
             id: window::Id::unique(),

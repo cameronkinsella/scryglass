@@ -48,6 +48,8 @@ pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Envelope>) {
         associations_registered: crate::platform::file_associations_registered(),
         #[cfg(feature = "update-check")]
         update_status: None,
+        #[cfg(target_os = "windows")]
+        working_set: crate::app::WorkingSet::default(),
     };
 
     let (id, opened) = window::open(window_settings(&shared.config));

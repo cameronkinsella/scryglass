@@ -82,6 +82,18 @@ pub fn file_associations_registered() -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// Working-set trim
+// ---------------------------------------------------------------------------
+
+/// Ask the OS to return this process's resident pages, shrinking its reported
+/// working set; the pages fault back in when next touched. A no-op off Windows,
+/// where the kernel reclaims idle memory under pressure on its own.
+pub fn trim_working_set() {
+    #[cfg(target_os = "windows")]
+    windows::trim_working_set();
+}
+
 /// The ProgID groups we register: (progid, friendly name, extensions).
 /// Extensions come from the live decoder registry, so new formats flow
 /// through automatically. Plain archives (zip, 7z, rar) are left out; only
@@ -223,6 +235,17 @@ mod windows {
 
         notify_shell();
         Ok(())
+    }
+
+    /// Empty this process's working set with `EmptyWorkingSet`, moving its
+    /// resident pages to the standby list so the OS can reclaim them.
+    pub fn trim_working_set() {
+        use windows_sys::Win32::System::ProcessStatus::EmptyWorkingSet;
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        // SAFETY: GetCurrentProcess returns a pseudo-handle that needs no close,
+        // and EmptyWorkingSet only reads it. The call is best-effort, so a
+        // failure (the BOOL result) is ignored.
+        let _ = unsafe { EmptyWorkingSet(GetCurrentProcess()) };
     }
 
     /// A null-terminated UTF-16 copy of `s`, as the wide-string Win32 APIs

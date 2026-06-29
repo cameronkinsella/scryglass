@@ -13,6 +13,8 @@ pub(crate) mod open;
 pub(super) mod settings;
 pub(crate) mod video_flow;
 pub(crate) mod window;
+#[cfg(target_os = "windows")]
+mod working_set;
 
 use std::path::PathBuf;
 
@@ -51,7 +53,14 @@ pub(crate) enum NavTarget {
 /// dropped lease just lowered (navigation, decay, window close).
 pub fn update(app: &mut App, envelope: Envelope) -> Task<Envelope> {
     let task = route(app, envelope);
-    Task::batch([task, pump_store(app)])
+    let store = pump_store(app);
+    // A focus/minimize change may have moved the whole app into (or out of) the
+    // background, so re-evaluate the working-set trim.
+    #[cfg(target_os = "windows")]
+    let trim = working_set::reconcile(app);
+    #[cfg(not(target_os = "windows"))]
+    let trim = Task::none();
+    Task::batch([task, store, trim])
 }
 
 fn route(app: &mut App, envelope: Envelope) -> Task<Envelope> {
@@ -91,6 +100,8 @@ fn route(app: &mut App, envelope: Envelope) -> Task<Envelope> {
             Task::none()
         }
         Envelope::ConfigInvalid => config_invalid_toast(app),
+        #[cfg(target_os = "windows")]
+        Envelope::TrimWorkingSet(generation) => working_set::on_timer(app, generation),
     }
 }
 
@@ -177,7 +188,14 @@ fn open_new_window(app: &mut App, path: Option<PathBuf>) -> Task<Envelope> {
         None => Task::none(),
     };
     app.windows.insert(id, win);
-    Task::batch([opened.map(Envelope::Opened), open])
+    // A forwarded window must come to the front: open it, then steal focus once
+    // it exists, so a later launch never opens behind the current window.
+    Task::batch([
+        opened
+            .map(Envelope::Opened)
+            .chain(iced::window::gain_focus(id)),
+        open,
+    ])
 }
 
 /// Handle a message for one window: auto-dismiss transient UI, then dispatch

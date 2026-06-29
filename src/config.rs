@@ -320,6 +320,48 @@ impl Default for MinimizedConfig {
     }
 }
 
+/// When the process empties its working set back to the OS (Windows only).
+/// `EmptyWorkingSet` is process-global, so it fires only once the whole app is in
+/// the background by the chosen measure, never per window.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkingSetTrim {
+    /// Never trim.
+    #[default]
+    Never,
+    /// Trim once every window has lost focus (the app is not the foreground app).
+    AllUnfocused,
+    /// Trim once every window is minimized (the app is fully hidden).
+    AllMinimized,
+}
+
+/// Working-set trimming for the idle process (Windows only). When the chosen
+/// condition holds across every window without interruption for `trim_after`, the
+/// process empties its working set, returning resident pages to the OS so the
+/// background footprint drops. The pages fault back in on return, so this trades a
+/// little restore latency for a smaller idle footprint.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkingSetConfig {
+    /// The background condition that arms the trim.
+    pub trim_when: WorkingSetTrim,
+    /// How long the condition must hold before the trim fires.
+    #[serde(with = "humantime_dur")]
+    pub trim_after: Duration,
+}
+
+#[cfg(target_os = "windows")]
+impl Default for WorkingSetConfig {
+    fn default() -> Self {
+        Self {
+            trim_when: WorkingSetTrim::Never,
+            trim_after: Duration::from_secs(10),
+        }
+    }
+}
+
 /// Advanced memory/VRAM resource model. The defaults are scryglass's opinion;
 /// every field is tunable in `config.toml`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -331,6 +373,9 @@ pub struct ResourceConfig {
     pub unfocused: StateDecay,
     /// Decay timers for a minimized window, by media kind.
     pub minimized: MinimizedConfig,
+    /// Working-set trimming for the idle process (Windows only).
+    #[cfg(target_os = "windows")]
+    pub working_set: WorkingSetConfig,
 }
 
 impl Default for ResourceConfig {
@@ -381,6 +426,10 @@ impl Default for ResourceConfig {
                     evict_session_after: Some(Duration::from_secs(5)),
                 },
             },
+            // Off by default: the trim is an aggressive, Windows-only knob whose
+            // re-fault on return the user should opt into.
+            #[cfg(target_os = "windows")]
+            working_set: WorkingSetConfig::default(),
         }
     }
 }
@@ -753,6 +802,11 @@ mod tests {
                     video: VideoDecay {
                         evict_session_after: Some(Duration::from_secs(8)),
                     },
+                },
+                #[cfg(target_os = "windows")]
+                working_set: WorkingSetConfig {
+                    trim_when: WorkingSetTrim::AllMinimized,
+                    trim_after: Duration::from_secs(12),
                 },
             },
         };
