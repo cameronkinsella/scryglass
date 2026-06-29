@@ -63,22 +63,20 @@ pub(crate) fn fire_rotate(viewer: &mut Viewer, store: &Store) -> Task<Message> {
     })
 }
 
-/// Extra resolution kept over the logical viewport so the view-res texture
-/// stays crisp at fit on a HiDPI display (whose physical pixels exceed logical).
-const VIEW_HEADROOM: f32 = 1.5;
-
 /// Caps how many prefetch downscales run at once, so rapid navigation through
 /// fresh neighbors cannot saturate the CPU with resizes.
 static RESIZE_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 /// The view-resolution target for an image of `original` size shown at `zoom`
-/// (1.0 = full native): the displayed pixel size with HiDPI headroom, never
-/// upscaled past native. A demoted but visible image targets its current zoom so
-/// it stays as crisp as what is on screen; a prefetch neighbor targets its fit
-/// zoom, since it is shown fit when navigated to.
-pub(crate) fn view_target(original: (u32, u32), zoom: f32) -> (u32, u32) {
+/// (1.0 = full native): the displayed size in physical pixels (logical size times
+/// the display `scale_factor`), never upscaled past native. Sizing to the physical
+/// display, rather than a fixed headroom, keeps the demoted copy crisp on HiDPI and
+/// seamless with the full-res view on the way down. A demoted but visible image
+/// targets its current zoom so it stays as crisp as what is on screen; a prefetch
+/// neighbor targets its fit zoom, since it is shown fit when navigated to.
+pub(crate) fn view_target(original: (u32, u32), zoom: f32, scale_factor: f32) -> (u32, u32) {
     let (w, h) = (original.0.max(1) as f32, original.1.max(1) as f32);
-    let scale = (zoom * VIEW_HEADROOM).clamp(0.0, 1.0);
+    let scale = (zoom * scale_factor.max(1.0)).clamp(0.0, 1.0);
     (
         ((w * scale).round() as u32).max(1),
         ((h * scale).round() as u32).max(1),
@@ -93,13 +91,14 @@ fn fit_zoom(original: (u32, u32), view: Size) -> f32 {
     (view.width / w).min(view.height / h).min(1.0)
 }
 
-/// Downscale a full-res RGBA handle to `target`, for a prefetch neighbor's
-/// smaller GPU texture. Returns the original handle when it already fits. Borrows
-/// the source pixels (no full-res copy) so the resize stays cheap.
+/// Downscale a full-res RGBA handle to `target`, for a prefetch neighbor's smaller
+/// GPU texture. Returns the original handle when it already fits.
 ///
-/// Uses a cubic (CatmullRom), the closest match the `image` crate has to the
-/// shader's cubic downscale, so a demoted view-res copy shown near 1:1 looks like
-/// the full-res image sampled at fit and the swap is invisible.
+/// Downscales through the exact CPU port of the display shader with the live kernel,
+/// so a prefetched neighbor's view-res copy is indistinguishable from the full-res
+/// it promotes to, the same way a demote's GPU-baked copy is. A plain resize (a
+/// fixed cubic averaged in gamma space) was visibly softer than the shader's
+/// linear-light kernel.
 fn downscale(handle: &Handle, target: (u32, u32)) -> Handle {
     let Handle::Rgba {
         width,
@@ -113,18 +112,13 @@ fn downscale(handle: &Handle, target: (u32, u32)) -> Handle {
     if target.0 >= *width || target.1 >= *height {
         return handle.clone();
     }
-    let Some(view) =
-        image::ImageBuffer::<image::Rgba<u8>, &[u8]>::from_raw(*width, *height, pixels.as_ref())
-    else {
-        return handle.clone();
-    };
-    let resized = image::imageops::resize(
-        &view,
-        target.0,
-        target.1,
-        image::imageops::FilterType::CatmullRom,
+    let resized = crate::media::resample::downscale(
+        pixels.as_ref(),
+        (*width, *height),
+        target,
+        crate::ui::image_surface::current_kernel(),
     );
-    Handle::from_rgba(target.0, target.1, resized.into_raw())
+    Handle::from_rgba(target.0, target.1, resized)
 }
 
 /// Rotate RGBA pixels behind a handle by quarter turns clockwise.
@@ -486,13 +480,32 @@ pub(crate) fn run_jobs(
     lane: Lane,
     view: Size,
 ) -> Task<Message> {
+    run_jobs_at(jobs, pipeline, lane, view, None)
+}
+
+/// Like [`run_jobs`], but for a demote of the on-screen image `zoom` is its current
+/// zoom, so its view-res copy is sized to what is actually displayed rather than the
+/// fit zoom it opened at. `None` (prefetch and fresh loads) uses the fit zoom.
+pub(crate) fn run_jobs_at(
+    jobs: Vec<Job>,
+    pipeline: &Pipeline,
+    lane: Lane,
+    view: Size,
+    zoom: Option<f32>,
+) -> Task<Message> {
     Task::batch(
         jobs.into_iter()
-            .map(|job| run_job(job, pipeline, lane, view)),
+            .map(|job| run_job(job, pipeline, lane, view, zoom)),
     )
 }
 
-fn run_job(job: Job, pipeline: &Pipeline, lane: Lane, view: Size) -> Task<Message> {
+fn run_job(
+    job: Job,
+    pipeline: &Pipeline,
+    lane: Lane,
+    view: Size,
+    zoom_override: Option<f32>,
+) -> Task<Message> {
     match job {
         Job::Decode { key, path, source } => {
             let generation = pipeline.generation();
@@ -552,15 +565,20 @@ fn run_job(job: Job, pipeline: &Pipeline, lane: Lane, view: Size) -> Task<Messag
                 }),
             })
         }
-        Job::Upload { key, tier, ram } => Task::future(async move {
+        Job::Upload {
+            key,
+            tier,
+            ram,
+            source,
+        } => Task::future(async move {
             // The upload thread is built by the warmup surface; retry briefly so
             // the very first upload, which may race that setup, still lands.
             for _ in 0..30 {
                 let texture = if tier >= Tier::Full {
                     upload_at_res(&ram.handle, ram.original_size, 1.0, true).await
                 } else {
-                    let zoom = fit_zoom(ram.original_size, view);
-                    upload_at_res(&ram.handle, ram.original_size, zoom, false).await
+                    let zoom = zoom_override.unwrap_or_else(|| fit_zoom(ram.original_size, view));
+                    view_res_texture(source.clone(), &ram.handle, ram.original_size, zoom).await
                 };
                 if let Some(texture) = texture {
                     return Message::Media(MediaMessage::TextureReady { key, tier, texture });
@@ -570,6 +588,32 @@ fn run_job(job: Job, pipeline: &Pipeline, lane: Lane, view: Size) -> Task<Messag
             Message::Media(MediaMessage::MintFailed { key })
         }),
     }
+}
+
+/// Produce the view-resolution texture for `zoom`. When a full-res texture is still
+/// resident (`source`, a demote), the copy is baked from it on the GPU through the
+/// display shader, so it looks like the full-res view it replaces. Otherwise (a
+/// fresh prefetch, or if that render path is unavailable) it falls back to a CPU
+/// downscale of the RAM.
+async fn view_res_texture(
+    source: Option<crate::ui::image_surface::Keepalive>,
+    handle: &Handle,
+    original_size: (u32, u32),
+    zoom: f32,
+) -> Option<crate::ui::image_surface::Keepalive> {
+    if let Some(src) = source {
+        let target = view_target(
+            original_size,
+            zoom,
+            crate::ui::image_surface::current_scale_factor(),
+        );
+        if let Some(rx) = crate::ui::image_surface::submit_render_downscale(src, target)
+            && let Ok(texture) = rx.await
+        {
+            return Some(texture);
+        }
+    }
+    upload_at_res(handle, original_size, zoom, false).await
 }
 
 /// Upload `handle` at full resolution (`full`) or downscaled to the view
@@ -588,9 +632,12 @@ async fn upload_at_res(
         // saturates the CPU with resizes.
         let _permit = RESIZE_GATE.acquire().await.ok();
         let h = handle.clone();
-        tokio::task::spawn_blocking(move || downscale(&h, view_target(original_size, zoom)))
-            .await
-            .unwrap_or_else(|_| handle.clone())
+        let scale_factor = crate::ui::image_surface::current_scale_factor();
+        tokio::task::spawn_blocking(move || {
+            downscale(&h, view_target(original_size, zoom, scale_factor))
+        })
+        .await
+        .unwrap_or_else(|_| handle.clone())
     };
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     if crate::ui::image_surface::submit_upload(gpu_handle, ready_tx) {
@@ -652,25 +699,28 @@ mod tests {
     use crate::app::test_support::viewing_app;
 
     #[test]
-    fn view_target_downscales_to_the_fit_zoom_with_headroom() {
-        // 4000x3000 fit into 800x600 is a 0.2 zoom; x1.5 headroom -> 0.3 -> 1200x900.
+    fn view_target_sizes_to_the_physical_display() {
+        // 4000x3000 fit into 800x600 is a 0.2 zoom. At 100% scaling the copy is the
+        // logical size; a 200% display doubles it to stay crisp on the denser panel.
         let zoom = fit_zoom((4000, 3000), Size::new(800.0, 600.0));
-        assert_eq!(view_target((4000, 3000), zoom), (1200, 900));
+        assert_eq!(view_target((4000, 3000), zoom, 1.0), (800, 600));
+        assert_eq!(view_target((4000, 3000), zoom, 2.0), (1600, 1200));
     }
 
     #[test]
     fn view_target_never_upscales_past_native() {
-        // A small image at fit zoom, and even zoomed way in, stays at native.
+        // A small image at fit zoom, and even zoomed way in on a dense display,
+        // stays at native.
         let zoom = fit_zoom((100, 80), Size::new(800.0, 600.0));
-        assert_eq!(view_target((100, 80), zoom), (100, 80));
-        assert_eq!(view_target((100, 80), 8.0), (100, 80));
+        assert_eq!(view_target((100, 80), zoom, 1.0), (100, 80));
+        assert_eq!(view_target((100, 80), 8.0, 2.0), (100, 80));
     }
 
     #[test]
     fn view_target_preserves_aspect_on_a_wide_image() {
-        // 4000x1000 in 800x600: width binds at 0.2 zoom -> 1200x300.
+        // 4000x1000 in 800x600: width binds at 0.2 zoom -> 800x200 at 100% scaling.
         let zoom = fit_zoom((4000, 1000), Size::new(800.0, 600.0));
-        assert_eq!(view_target((4000, 1000), zoom), (1200, 300));
+        assert_eq!(view_target((4000, 1000), zoom, 1.0), (800, 200));
     }
 
     #[test]
@@ -684,9 +734,9 @@ mod tests {
 
     #[test]
     fn view_target_keeps_more_resolution_when_zoomed_in() {
-        // A zoomed-in but demoted image targets its zoom, not its fit, so it
-        // stays crisp: 4000x3000 at 0.5 zoom -> x1.5 -> 0.75 -> 3000x2250.
-        assert_eq!(view_target((4000, 3000), 0.5), (3000, 2250));
+        // A zoomed-in but demoted image targets its zoom, not its fit, so it stays
+        // crisp: 4000x3000 at 0.5 zoom on a 100% display -> 2000x1500.
+        assert_eq!(view_target((4000, 3000), 0.5, 1.0), (2000, 1500));
     }
 
     #[test]

@@ -1,23 +1,14 @@
 //! The single texture-lifecycle store: the one owner of every still image's
 //! decoded RAM and GPU texture, keyed by image identity and shared across all
-//! windows. This module is the typestate core; it is wired into the load,
-//! display, prefetch, and decay paths over the migration stages that follow, so
-//! some items are not referenced yet.
+//! windows. Three invariants are structural rather than checked by hand.
 //!
-//! Three invariants are made structural here rather than checked by hand:
-//!
-//! - **One texture per image, never duplicated.** Identity is [`ImageKey`]
-//!   (container + entry), not a per-decode handle id. The store is the only
-//!   minter; holders receive `Arc` clones of the one texture, so cloning is a
-//!   refcount bump, not a copy.
-//! - **No invalid tier move.** The tier values ([`FullTexture`], [`ViewTexture`],
-//!   [`RamImage`], [`Evicted`]) expose only forward-release transitions, each
-//!   consuming `self`; a backward move like evicted -> demote has no method, so
-//!   it does not compile.
-//! - **Demote/evict only once every holder permits.** Demand is a set of atomic
-//!   per-tier counters ([`TierCounters`]) shared between the store entry and every
-//!   lease; the image sits at `max_wanted()`, recomputed O(1) on each lease event,
-//!   never by scanning windows.
+//! One texture per image: identity is [`ImageKey`] (container + entry), the
+//! store is the only minter, and holders get `Arc` clones of the one texture.
+//! No invalid tier move: the typestate tier values expose only forward-release
+//! transitions, each consuming `self`, so a backward move does not compile.
+//! Demote/evict only once every holder permits: atomic per-tier counters
+//! ([`TierCounters`]) shared with every lease keep the image at `max_wanted()`,
+//! recomputed O(1) on each lease event.
 
 use std::cell::Cell as StdCell;
 use std::collections::HashMap;
@@ -104,8 +95,8 @@ pub trait Medium {
     fn decode_time(state: &Self::State) -> Option<Duration>;
 }
 
-// --- typestate tier values: forward-release transitions consume self; the
-// invalid (backward) moves simply have no method, so they cannot be written. ---
+// --- typestate tier values: forward-release transitions consume self. The
+// invalid (backward) moves have no method, so they cannot be written. ---
 
 /// Full-resolution RGBA in RAM, the substrate every GPU tier is uploaded from.
 /// Arc-backed through iced's `Handle`, so a clone is a refcount bump and the last
@@ -312,7 +303,7 @@ impl Medium for Anim {
 
     fn demote(state: AnimState, target: Tier) -> AnimState {
         // The only tier below InRam is Evicted, so a demote either keeps the frames
-        // or frees them; there is no GPU tier in between to drop to.
+        // or frees them. There is no GPU tier in between to drop to.
         if target < Tier::InRam {
             AnimState::Evicted
         } else {
@@ -406,10 +397,14 @@ pub enum Job<M: Medium = Still> {
         source: Source,
     },
     /// Upload the held `ram` for `key` at `tier`, then call [`Store::on_minted`].
+    /// `source` is the currently resident resource, if any: a full -> view demote
+    /// lets the app downscale that texture on the GPU through the display shader
+    /// instead of resizing the RAM on the CPU, keeping the swap seamless.
     Upload {
         key: ImageKey,
         tier: Tier,
         ram: M::Ram,
+        source: Option<Arc<M::Shared>>,
     },
 }
 
@@ -424,8 +419,8 @@ impl<M: Medium> Default for StoreOutcome<M> {
 }
 
 /// Keys whose demand changed via a `Lease` drop, drained by [`Store::pump`]. A drop
-/// can't run store logic (no `&mut Store`, can't be async), so it just records the
-/// key here; the next pump reconciles it. O(keys dirtied), never a scan.
+/// can't run store logic (no `&mut Store`, can't be async), so it records the key
+/// here and the next pump reconciles it. O(keys dirtied), never a scan.
 type Dirty = Arc<Mutex<Vec<ImageKey>>>;
 
 /// A holder's claim on an image at a tier. Held in window state (a display slot or a
@@ -461,8 +456,8 @@ impl<M: Medium> Drop for Lease<M> {
 
 struct Entry<M: Medium> {
     counters: Arc<TierCounters>,
-    /// Holders own the strong `Arc<Cell<_>>`; the entry only borrows it. A dead
-    /// weak therefore means no holder is leasing this image right now.
+    /// Holders own the strong `Arc<Cell<_>>` and the entry only borrows it, so a
+    /// dead weak means no holder is leasing this image right now.
     cell: Weak<Cell<M::Shared>>,
     state: M::State,
     /// How to re-decode this image, kept so any window's request can drive it.
@@ -480,9 +475,9 @@ impl<M: Medium> Entry<M> {
 }
 
 /// The single resource-lifecycle store: the one owner of every resident image's tier,
-/// keyed by [`ImageKey`]. Holders talk to it through [`Lease`]s; it answers with the
-/// async [`Job`]s the app should run. All decisions are O(1) (a hash lookup and the
-/// fixed four-slot `max_wanted`); nothing iterates windows or holders.
+/// keyed by [`ImageKey`]. Holders talk to it through [`Lease`]s, and it answers with
+/// the async [`Job`]s the app should run. All decisions are O(1), a hash lookup and
+/// the fixed four-slot `max_wanted`. Nothing iterates windows or holders.
 pub struct Store<M: Medium = Still> {
     entries: HashMap<ImageKey, Entry<M>>,
     dirty: Dirty,
@@ -670,7 +665,7 @@ impl<M: Medium> Store<M> {
         if want < have {
             // Freeing toward a lower tier is synchronous, EXCEPT demoting a full
             // texture to view, which is a re-upload at a smaller size (handled as an
-            // acquire below). Full/View -> InRam/Evicted just drops the GPU/RAM.
+            // acquire below). Full/View -> InRam/Evicted drops the GPU/RAM.
             if want == Tier::View && have == Tier::Full {
                 return self.acquire(key, Tier::View);
             }
@@ -708,10 +703,13 @@ impl<M: Medium> Store<M> {
                 path: entry.path.clone(),
                 source: entry.source.clone(),
             },
+            // Carry the currently resident resource so a full -> view demote can
+            // downscale that texture on the GPU rather than resizing RAM on the CPU.
             Some(ram) => Job::Upload {
                 key: key.clone(),
                 tier: target,
                 ram,
+                source: M::shared(&entry.state),
             },
         };
         entry.pending = Some(target);
@@ -720,8 +718,8 @@ impl<M: Medium> Store<M> {
 }
 
 /// Free an owned tier value down to `target` through the synchronous typestate
-/// transitions (full/view drop their texture to RAM; RAM evicts). Never produces a
-/// tier above its input, so the pipeline only ever runs forward.
+/// transitions (full/view drop their texture to RAM, and RAM evicts). It never
+/// produces a tier above its input, so the pipeline only ever runs forward.
 fn demote_to(mut state: CellState, target: Tier) -> CellState {
     while state.tier() > target {
         state = match state {
@@ -879,12 +877,33 @@ mod tests {
     fn lowering_demand_to_view_re_uploads_at_view_resolution() {
         let (mut store, lease) = resident_full();
         // The only holder decays Full -> View: the store re-uploads a smaller
-        // texture rather than just dropping (a view tier is a downscale, not a free).
+        // texture rather than dropping (a view tier is a downscale, not a free).
+        // The demote carries the resident full texture as `source`, so the app can
+        // downscale it on the GPU instead of resizing RAM.
         let out = store.retarget(&lease, Tier::View);
         assert!(matches!(
             out.jobs.as_slice(),
             [Job::Upload {
                 tier: Tier::View,
+                source: Some(_),
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn a_fresh_view_upload_carries_no_source_texture() {
+        // A first-time View request has no resident texture to render from, so its
+        // upload leaves `source` empty and the app falls back to a CPU downscale.
+        let mut store: Store = Store::default();
+        let (_lease, out) = store.request(key(), "a.png".into(), Source::Fs, Tier::View);
+        assert!(matches!(out.jobs.as_slice(), [Job::Decode { .. }]));
+        let out = store.on_decoded(key(), ram());
+        assert!(matches!(
+            out.jobs.as_slice(),
+            [Job::Upload {
+                tier: Tier::View,
+                source: None,
                 ..
             }]
         ));

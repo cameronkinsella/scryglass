@@ -89,6 +89,8 @@ semver = { version = "1", optional = true }
 interprocess = "2.4.2"
 humantime = "2.3.0"
 arc-swap = "1.9.2"
+rayon = "1.12.0"
+scryglass-shader-common = { version = "0.0.0", path = "shaders/common" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_Foundation", "Win32_System_Com", "Win32_System_Console", "Win32_System_Ole", "Win32_System_Registry", "Win32_System_ProcessStatus", "Win32_System_Threading"] }

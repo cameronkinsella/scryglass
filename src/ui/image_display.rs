@@ -54,7 +54,7 @@ pub(crate) fn display_math(
     let zoomed_w = img_w * zoom;
     let zoomed_h = img_h * zoom;
 
-    // The zoomed image fits the viewport: no crop, just scale the whole
+    // The zoomed image fits the viewport: no crop, scale the whole
     // texture to the zoomed size.
     if zoomed_w <= vp_w && zoomed_h <= vp_h {
         // ContentFit::Contain in a Fill layout shows the texture at
@@ -145,10 +145,9 @@ pub(crate) fn display_geometry(
 
 /// The downscale ratio in source texels per output pixel, per axis, for content
 /// placed at `dst` (normalized widget space) sampling `src` (texture UV) of a
-/// `tex_size`-texel texture into a `viewport`-pixel area. Above 1 means that axis is
-/// minified, so the shader widens its kernel to that footprint; at 1:1 it is 1 and
-/// the shader takes a single tap. Exact, so it never leans on screen-space
-/// derivatives.
+/// `tex_size`-texel texture into a `viewport`-pixel area. Above 1 means that axis
+/// is minified, so the shader widens its kernel to that footprint. At 1:1 the
+/// shader takes a single tap. Exact, so it never leans on screen-space derivatives.
 pub(crate) fn footprint(
     dst: [f32; 4],
     src: [f32; 4],
@@ -175,6 +174,88 @@ pub(crate) fn footprint(
     ]
 }
 
+/// How far above 1.0 a footprint still counts as 1:1. A demoted view-res copy is
+/// baked to the display size, so rounding leaves its footprint a hair over 1. This
+/// is well below any real downscale ratio, so a genuine shrink still gets the kernel.
+const NEAR_ONE_EPS: f32 = 0.03;
+
+/// Snap a footprint within [`NEAR_ONE_EPS`] above 1.0 down to exactly 1.0, so a
+/// view-res copy shown at its baked size takes the single exact tap instead of a
+/// redundant kernel pass that would soften it. Leaves magnification and real
+/// downscales untouched.
+pub(crate) fn snap_footprint_to_unit(footprint: f32) -> f32 {
+    if footprint <= 1.0 + NEAR_ONE_EPS {
+        footprint.min(1.0)
+    } else {
+        footprint
+    }
+}
+
+/// Whether both axes sit within [`NEAR_ONE_EPS`] of 1:1, so the surface is a
+/// near-exact copy (a demoted view-res at its baked size, or a 100%-zoom image)
+/// that should be pixel-snapped rather than a real min/magnification that keeps its
+/// kernel. Footprints past 1:1 are already snapped down, so this excludes them.
+pub(crate) fn near_one_to_one(footprint: [f32; 2]) -> bool {
+    (footprint[0] - 1.0).abs() <= NEAR_ONE_EPS && (footprint[1] - 1.0).abs() <= NEAR_ONE_EPS
+}
+
+/// Snap one axis so the display spans a whole number of physical pixels with its
+/// left/top on a pixel boundary, keeping the center. That puts every surface on
+/// one pixel grid. When `align_src`, also move the source window to cover exactly
+/// that many texels from a texel boundary, so each pixel center lands on a texel
+/// center and the single tap is exact (the near-1:1 copy). Otherwise the source
+/// is left as is (a real min/magnification keeps sampling the same span). Returns
+/// the new `(dst_start, dst_end, src_start, src_end)` in normalized units.
+fn snap_axis(
+    d0: f32,
+    d1: f32,
+    s0: f32,
+    s1: f32,
+    phys: f32,
+    tex: f32,
+    align_src: bool,
+) -> (f32, f32, f32, f32) {
+    // A magnified image is drawn larger than its texture, so its displayed pixel span
+    // legitimately exceeds `tex`. Only the near-1:1 copy caps at the texture, so its
+    // source window below stays within bounds. Capping a magnification would pin the
+    // image to a native-size box and crop it as the zoom grows.
+    let mut pixels = ((d1 - d0) * phys).round().max(1.0);
+    if align_src {
+        pixels = pixels.min(tex);
+    }
+    let center = (d0 + d1) * 0.5 * phys;
+    let a0 = (center - pixels * 0.5).round();
+    let (src0, src1) = if align_src {
+        let src_center = (s0 + s1) * 0.5 * tex;
+        let t0 = (src_center - pixels * 0.5).round().clamp(0.0, tex - pixels);
+        (t0 / tex, (t0 + pixels) / tex)
+    } else {
+        (s0, s1)
+    };
+    (a0 / phys, (a0 + pixels) / phys, src0, src1)
+}
+
+/// Snap `dst` to whole physical pixels so the surface sits on the pixel grid and a
+/// view-res demote never shifts it. When `align_src` (a near-1:1 copy) the source
+/// snaps to texel centers too, making the single tap a pixel-exact copy.
+/// `physical_viewport` is the image area in physical pixels.
+pub(crate) fn snap_placement_to_pixels(
+    dst: [f32; 4],
+    src: [f32; 4],
+    tex_size: (f32, f32),
+    physical_viewport: (f32, f32),
+    align_src: bool,
+) -> ([f32; 4], [f32; 4]) {
+    let (pw, ph) = physical_viewport;
+    let (tw, th) = tex_size;
+    if pw <= 0.0 || ph <= 0.0 || tw <= 0.0 || th <= 0.0 {
+        return (dst, src);
+    }
+    let (dx0, dx1, sx0, sx1) = snap_axis(dst[0], dst[2], src[0], src[2], pw, tw, align_src);
+    let (dy0, dy1, sy0, sy1) = snap_axis(dst[1], dst[3], src[1], src[3], ph, th, align_src);
+    ([dx0, dy0, dx1, dy1], [sx0, sy0, sx1, sy1])
+}
+
 /// Where a shader surface draws its content this frame: the destination and
 /// source-UV rects plus the sampling mode, resolved from the display geometry.
 /// `valid` is false for the degenerate case that draws nothing. The still and video
@@ -186,7 +267,10 @@ pub(crate) struct SurfacePlacement {
     pub dst: [f32; 4],
     /// Source rect in texture UV space: u0, v0, u1, v1.
     pub src: [f32; 4],
-    /// Nearest sampling when zoomed past 100% with crisp pixels on.
+    /// Nearest sampling when zoomed past 100% with crisp pixels on. Read by the
+    /// video surface. The still surface derives its own from the zoom, since it
+    /// resolves the placement at draw time and the sampler is picked before then.
+    #[cfg_attr(not(feature = "video"), allow(dead_code))]
     pub nearest: bool,
 }
 
@@ -224,11 +308,10 @@ impl SurfacePlacement {
 
 /// Render a thumbnail blur into exactly the rect the resident content will occupy.
 ///
-/// The destination rect and the source window come from the same [`display_geometry`]
-/// the still and video shaders use, so the blur lands pixel-for-pixel where the image
-/// will, with no resize when the full content swaps in. The thumbnail is then
-/// `ContentFit::Fill`-stretched into that rect, so its own (rounded) aspect is ignored,
-/// which is imperceptible on a blur.
+/// The destination rect and source window come from the same [`display_geometry`]
+/// the still and video shaders use, so the swap to full content never resizes or
+/// shifts. The thumbnail is `ContentFit::Fill`-stretched into that rect, so its
+/// own (rounded) aspect is ignored, which is imperceptible on a blur.
 ///
 /// * `handle`: the thumbnail texture.
 /// * `texture_size`: its dimensions, for mapping the source window into it.
@@ -263,14 +346,36 @@ pub fn image_display(
         width: (((src[2] - src[0]) * tw).round() as u32).max(1),
         height: (((src[3] - src[1]) * th).round() as u32).max(1),
     };
-    center(
+    // Snap to the same whole-pixel rect the shader gives the sharp image, both size
+    // and offset rounded the same way (`snap_placement_to_pixels`), so the swap
+    // between blur and sharp never shifts. `center` computes and floors the offset
+    // itself, drifting the blur up and left by a pixel. Positioning it explicitly at
+    // the rounded, already-integer offset leaves iced no fractional value to floor.
+    let scale = crate::ui::image_surface::current_scale_factor().max(1.0);
+    let axis = |d0: f32, d1: f32, vp: f32| {
+        let phys = vp * scale;
+        let pixels = ((d1 - d0) * phys).round().max(1.0);
+        let a0 = ((d0 + d1) * 0.5 * phys - pixels * 0.5).round();
+        (a0 / scale, pixels / scale)
+    };
+    let (left, w) = axis(dst[0], dst[2], vp_w);
+    let (top, h) = axis(dst[1], dst[3], vp_h);
+    container(
         image(handle.clone())
             .content_fit(ContentFit::Fill)
             .filter_method(filter)
             .crop(crop)
-            .width(Length::Fixed((dst[2] - dst[0]) * vp_w))
-            .height(Length::Fixed((dst[3] - dst[1]) * vp_h)),
+            .width(Length::Fixed(w))
+            .height(Length::Fixed(h)),
     )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .padding(iced::Padding {
+        top,
+        right: 0.0,
+        bottom: 0.0,
+        left,
+    })
     .into()
 }
 
@@ -519,5 +624,122 @@ mod tests {
     fn footprint_guards_a_degenerate_destination() {
         let fp = footprint([0.5, 0.5, 0.5, 0.5], [0.0, 0.0, 1.0, 1.0], (800, 600), VP);
         assert_eq!(fp, [1.0, 1.0]);
+    }
+
+    #[test]
+    fn snap_pulls_a_rounding_hair_over_one_to_a_single_tap() {
+        // 5333x3000 at 21%: view-res 1120px shown at 1119.93 -> 1.00006 -> 1.0.
+        assert_eq!(snap_footprint_to_unit(1120.0 / 1119.93), 1.0);
+        assert_eq!(snap_footprint_to_unit(1.02), 1.0);
+    }
+
+    #[test]
+    fn snap_leaves_magnification_and_real_downscales_alone() {
+        assert_eq!(snap_footprint_to_unit(0.5), 0.5);
+        assert_eq!(snap_footprint_to_unit(1.0), 1.0);
+        assert_eq!(snap_footprint_to_unit(1.5), 1.5);
+        assert_eq!(snap_footprint_to_unit(4.76), 4.76);
+    }
+
+    #[test]
+    fn near_one_to_one_covers_a_view_res_but_not_a_real_scale() {
+        // A demoted copy sits a hair either side of 1:1 after rounding.
+        assert!(near_one_to_one([1.0, 0.9997]));
+        assert!(near_one_to_one([1.0, 1.0]));
+        // Fit downscale and magnification keep their kernel.
+        assert!(!near_one_to_one([4.76, 4.76]));
+        assert!(!near_one_to_one([0.5, 0.5]));
+        assert!(!near_one_to_one([1.0, 0.5]));
+    }
+
+    #[test]
+    fn snap_fit_maps_the_whole_texture_one_to_one() {
+        // 200x100 texture shown at ~1:1 (dst spans 200x100 physical px): dst lands on
+        // whole pixels spanning exactly the texture, src stays the whole texture.
+        let (dst, src) = snap_placement_to_pixels(
+            [0.25, 0.25, 0.75, 0.75],
+            [0.0, 0.0, 1.0, 1.0],
+            (200.0, 100.0),
+            (400.0, 200.0),
+            true,
+        );
+        assert!(((dst[2] - dst[0]) * 400.0 - 200.0).abs() < 1e-3);
+        assert!(((dst[3] - dst[1]) * 200.0 - 100.0).abs() < 1e-3);
+        assert_eq!(src, [0.0, 0.0, 1.0, 1.0]);
+        assert!((dst[0] * 400.0).fract().abs() < 1e-3);
+    }
+
+    #[test]
+    fn snap_without_align_snaps_dst_but_keeps_source() {
+        // A real downscale (full-res at fit) still lands on the pixel grid so it
+        // shares the demote's position, but its source window is untouched.
+        let src_in = [0.0, 0.0, 1.0, 1.0];
+        let (dst, src) = snap_placement_to_pixels(
+            [0.1035, 0.0, 0.8965, 1.0],
+            src_in,
+            (5333.0, 3000.0),
+            (1415.0, 631.2),
+            false,
+        );
+        assert_eq!(src, src_in);
+        assert!((dst[0] * 1415.0).fract().abs() < 1e-3);
+        assert!((dst[2] * 1415.0).fract().abs() < 1e-3);
+    }
+
+    #[test]
+    fn snap_lets_a_magnified_image_grow_past_its_texture() {
+        // A 200x100 texture zoomed so its displayed span (300x150 physical px) exceeds
+        // the texture must keep that larger size, not clamp back into a native-size box
+        // (the zoom regression). Magnification is not a near-1:1 copy, so align_src is
+        // false.
+        let (dst, _src) = snap_placement_to_pixels(
+            [0.25, 0.25, 0.75, 0.75],
+            [0.0, 0.0, 1.0, 1.0],
+            (200.0, 100.0),
+            (600.0, 300.0),
+            false,
+        );
+        assert!(
+            ((dst[2] - dst[0]) * 600.0 - 300.0).abs() < 1e-3,
+            "x span should stay 300 px, got {}",
+            (dst[2] - dst[0]) * 600.0
+        );
+        assert!(
+            ((dst[3] - dst[1]) * 300.0 - 150.0).abs() < 1e-3,
+            "y span should stay 150 px, got {}",
+            (dst[3] - dst[1]) * 300.0
+        );
+    }
+
+    #[test]
+    fn snap_crop_shows_whole_texels_over_whole_pixels() {
+        // A 636-tall texture filling a 631.2px area (a slight overflow) shows a whole
+        // 631 texels over 631 pixels, the source snapped to a texel boundary.
+        let (dst, src) = snap_placement_to_pixels(
+            [0.0, 0.0, 1.0, 1.0],
+            [0.0, 0.002, 1.0, 0.998],
+            (1131.0, 636.0),
+            (1131.0, 631.2),
+            true,
+        );
+        let shown_px = (dst[3] - dst[1]) * 631.2;
+        let shown_tex = (src[3] - src[1]) * 636.0;
+        assert!((shown_px - 631.0).abs() < 1e-2, "shown_px {shown_px}");
+        assert!((shown_tex - 631.0).abs() < 1e-2, "shown_tex {shown_tex}");
+        assert!((src[1] * 636.0).fract().abs() < 1e-2);
+    }
+
+    #[test]
+    fn snap_placement_guards_degenerate_inputs() {
+        let dst = [0.1, 0.1, 0.9, 0.9];
+        let src = [0.0, 0.0, 1.0, 1.0];
+        assert_eq!(
+            snap_placement_to_pixels(dst, src, (200.0, 100.0), (0.0, 200.0), true),
+            (dst, src)
+        );
+        assert_eq!(
+            snap_placement_to_pixels(dst, src, (0.0, 0.0), (400.0, 200.0), true),
+            (dst, src)
+        );
     }
 }

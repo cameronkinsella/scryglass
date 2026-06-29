@@ -50,7 +50,7 @@ use std::time::Duration;
 
 use iced::{Size, Task};
 
-use super::{fire_load, fire_prefetch, run_jobs, try_start_shared_anim};
+use super::{fire_load, fire_prefetch, run_jobs_at, try_start_shared_anim};
 use crate::app::state::{DisplayedImage, Viewer};
 use crate::app::viewer_math::{clamp_pan, compute_zoom};
 use crate::app::{Message as AppMessage, Shared, Window, recalc_viewport};
@@ -323,11 +323,14 @@ fn retarget_displayed(
     let Some(path) = viewer.displayed_path.clone() else {
         return Task::none();
     };
+    // The view-res copy is sized to the current zoom, so a zoomed-in image stays as
+    // crisp as it is on screen rather than falling back to its fit resolution.
+    let zoom = viewer.zoom;
     let Some(lease) = viewer.cache.get(&path) else {
         return Task::none();
     };
     let outcome = shared.store.retarget(lease, tier);
-    run_jobs(outcome.jobs, pipeline, Lane::Prefetch, view)
+    run_jobs_at(outcome.jobs, pipeline, Lane::Prefetch, view, Some(zoom))
 }
 
 /// Re-evaluate the window's resource state after a focus or minimize change.

@@ -4,30 +4,44 @@
 //! animations, and video share one path and never diverge.
 
 use iced::widget::shader;
-use iced::{Element, Length, Rectangle, mouse, wgpu};
+use iced::{Element, Length, Rectangle, Size, mouse, wgpu};
 
 use super::pipeline::{ImagePipeline, Keepalive};
 use crate::app::Message;
-use crate::config::DownscaleKernel;
-use crate::ui::image_display::{self, SurfacePlacement};
+use crate::app::viewer_math::compute_zoom;
+use crate::config::{DownscaleKernel, ZoomMode};
+use crate::ui::image_display::{
+    self, SurfacePlacement, near_one_to_one, snap_footprint_to_unit, snap_placement_to_pixels,
+};
 
 /// Build the image surface element at the given zoom/pan, drawing the resident
 /// `texture` directly (read live from the store's shared cell for stills, or the
 /// current frame's keepalive for animations, so a black screen is impossible).
 /// `None` is the degenerate warmup case that draws nothing. Fills the image area
 /// like the placeholder and video paths do.
+///
+/// The geometry is resolved at draw time from iced's real widget size, not from the
+/// app's viewport estimate, so a fast resize never draws a frame-stale placement.
 #[allow(clippy::too_many_arguments)]
 pub fn view(
     texture: Option<Keepalive>,
     original: (u32, u32),
     zoom: f32,
     pan: (f32, f32),
-    viewport: (f32, f32),
     pixelated: bool,
     kernel: DownscaleKernel,
+    zoom_mode: ZoomMode,
+    manual_zoom: bool,
 ) -> Element<'static, Message> {
     shader::Shader::new(ImageSurface::new(
-        texture, original, zoom, pan, viewport, pixelated, kernel,
+        texture,
+        original,
+        zoom,
+        pan,
+        pixelated,
+        kernel,
+        zoom_mode,
+        manual_zoom,
     ))
     .width(Length::Fill)
     .height(Length::Fill)
@@ -43,17 +57,24 @@ pub fn warmup() -> Element<'static, Message> {
         .into()
 }
 
-/// The shader program: the texture to show, where to place it, and how to downscale.
+/// The shader program: the texture to show plus the raw zoom/pan inputs. The
+/// placement is resolved per frame in `prepare` from iced's real widget size, not
+/// stored here, so it can never lag the size actually being drawn into.
 struct ImageSurface {
     /// The resident texture to draw, or `None` for the warmup surface.
     texture: Option<Keepalive>,
-    placement: SurfacePlacement,
-    /// The downscale kernel and the per-axis footprint it is scaled by, plus the
-    /// texture's texel size, all passed straight into the shader uniform.
-    footprint: [f32; 2],
+    original: (u32, u32),
+    zoom: f32,
+    pan: (f32, f32),
+    pixelated: bool,
+    kernel: DownscaleKernel,
+    zoom_mode: ZoomMode,
+    manual_zoom: bool,
+    /// The resident texture's texel size, fed into the shader uniform.
     tex_size: [f32; 2],
-    kernel: u32,
-    bc: [f32; 2],
+    /// Crisp-pixel magnification, decided from the zoom (never above 1 for a fit),
+    /// so `draw` can pick the sampler without the render-time size.
+    nearest: bool,
 }
 
 impl ImageSurface {
@@ -63,28 +84,25 @@ impl ImageSurface {
         original: (u32, u32),
         zoom: f32,
         pan: (f32, f32),
-        viewport: (f32, f32),
         pixelated: bool,
         kernel: DownscaleKernel,
+        zoom_mode: ZoomMode,
+        manual_zoom: bool,
     ) -> Self {
-        let placement = SurfacePlacement::new(zoom, pan, viewport, original, pixelated);
-        // The footprint is measured against the resident texture's real size (a
-        // view-res copy is already smaller, so its footprint is nearer 1), falling
-        // back to the original dims for the tokenless test keepalive.
+        // The texel size comes from the resident texture (a view-res copy is already
+        // smaller), falling back to the original dims for the tokenless test keepalive.
         let tex_dims = texture.as_ref().and_then(|t| t.size()).unwrap_or(original);
-        let footprint = if placement.valid {
-            image_display::footprint(placement.dst, placement.src, tex_dims, viewport)
-        } else {
-            [1.0, 1.0]
-        };
-        let (selector, bc) = kernel.shader_params();
         Self {
             texture,
-            placement,
-            footprint,
+            original,
+            zoom,
+            pan,
+            pixelated,
+            kernel,
+            zoom_mode,
+            manual_zoom,
             tex_size: [tex_dims.0 as f32, tex_dims.1 as f32],
-            kernel: selector,
-            bc,
+            nearest: pixelated && zoom > 1.0,
         }
     }
 
@@ -92,11 +110,15 @@ impl ImageSurface {
     fn warmup() -> Self {
         Self {
             texture: None,
-            placement: SurfacePlacement::empty(),
-            footprint: [1.0, 1.0],
+            original: (0, 0),
+            zoom: 1.0,
+            pan: (0.0, 0.0),
+            pixelated: false,
+            kernel: DownscaleKernel::default(),
+            zoom_mode: ZoomMode::default(),
+            manual_zoom: false,
             tex_size: [1.0, 1.0],
-            kernel: 0,
-            bc: [0.0, 0.0],
+            nearest: false,
         }
     }
 }
@@ -113,11 +135,15 @@ impl<T> shader::Program<T> for ImageSurface {
     ) -> ImagePrimitive {
         ImagePrimitive {
             texture: self.texture.clone(),
-            placement: self.placement,
-            footprint: self.footprint,
-            tex_size: self.tex_size,
+            original: self.original,
+            zoom: self.zoom,
+            pan: self.pan,
+            pixelated: self.pixelated,
             kernel: self.kernel,
-            bc: self.bc,
+            zoom_mode: self.zoom_mode,
+            manual_zoom: self.manual_zoom,
+            tex_size: self.tex_size,
+            nearest: self.nearest,
         }
     }
 }
@@ -126,17 +152,38 @@ impl<T> shader::Program<T> for ImageSurface {
 pub struct ImagePrimitive {
     /// The resident texture to draw, owned for the whole frame.
     texture: Option<Keepalive>,
-    placement: SurfacePlacement,
-    footprint: [f32; 2],
+    original: (u32, u32),
+    zoom: f32,
+    pan: (f32, f32),
+    pixelated: bool,
+    kernel: DownscaleKernel,
+    zoom_mode: ZoomMode,
+    manual_zoom: bool,
     tex_size: [f32; 2],
-    kernel: u32,
-    bc: [f32; 2],
+    nearest: bool,
+}
+
+impl ImagePrimitive {
+    /// Resolve the placement for the render-time image-area size (`bounds`).
+    fn placement(&self, viewport: (f32, f32)) -> SurfacePlacement {
+        let zoom = if self.manual_zoom {
+            self.zoom
+        } else {
+            compute_zoom(
+                self.zoom_mode,
+                self.original.0,
+                self.original.1,
+                Size::new(viewport.0, viewport.1),
+            )
+        };
+        SurfacePlacement::new(zoom, self.pan, viewport, self.original, self.pixelated)
+    }
 }
 
 impl std::fmt::Debug for ImagePrimitive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ImagePrimitive")
-            .field("valid", &self.placement.valid)
+            .field("original", &self.original)
             .finish()
     }
 }
@@ -149,27 +196,48 @@ impl shader::Primitive for ImagePrimitive {
         pipeline: &mut ImagePipeline,
         _device: &wgpu::Device,
         queue: &wgpu::Queue,
-        _bounds: &Rectangle,
-        _viewport: &shader::Viewport,
+        bounds: &Rectangle,
+        viewport: &shader::Viewport,
     ) {
-        if self.placement.valid {
-            pipeline.write_uniforms(
-                queue,
-                self.placement.dst,
-                self.placement.src,
-                self.footprint,
-                self.tex_size,
-                self.kernel,
-                self.bc,
+        pipeline.record_scale_factor(viewport.scale_factor());
+        // Resolve the placement against iced's real widget size now, so the geometry
+        // matches the size actually being drawn into rather than the app's viewport
+        // estimate, which lags a frame behind during a resize.
+        let vp = (bounds.width, bounds.height);
+        let placement = self.placement(vp);
+        if placement.valid {
+            // The footprint is measured in logical pixels, but the framebuffer is
+            // physical, so divide by the scale factor to get texels per physical
+            // pixel. Snap a near-1:1 footprint to a single exact tap so a view-res
+            // copy shown at its baked size skips a redundant kernel pass.
+            let tex_dims = (self.tex_size[0] as u32, self.tex_size[1] as u32);
+            let raw = image_display::footprint(placement.dst, placement.src, tex_dims, vp);
+            let scale = viewport.scale_factor().max(1.0);
+            let footprint = [
+                snap_footprint_to_unit(raw[0] / scale),
+                snap_footprint_to_unit(raw[1] / scale),
+            ];
+            // Snap the placement to whole physical pixels so a view-res demote lands
+            // the image on the same grid as the full-res it replaces and never nudges
+            // it sideways. A near-1:1 copy (a demote at its baked size, or a 100%-zoom
+            // image) also snaps its source to texel centers, so the single tap is a
+            // pixel-exact copy instead of a sub-pixel resample that would soften it
+            // (worst on text). The image area is `bounds` in logical pixels, taken to
+            // physical by the scale factor.
+            let (dst, src) = snap_placement_to_pixels(
+                placement.dst,
+                placement.src,
+                (self.tex_size[0], self.tex_size[1]),
+                (bounds.width * scale, bounds.height * scale),
+                near_one_to_one(footprint),
             );
+            pipeline.write_uniforms(queue, dst, src, footprint, self.tex_size, self.kernel);
         }
     }
 
     fn draw(&self, pipeline: &ImagePipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
-        if self.placement.valid
-            && let Some(texture) = &self.texture
-        {
-            pipeline.draw_resident(render_pass, texture, self.placement.nearest);
+        if let Some(texture) = &self.texture {
+            pipeline.draw_resident(render_pass, texture, self.nearest);
         }
         true
     }

@@ -179,9 +179,10 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
                     *original_size,
                     viewer.zoom,
                     viewer.pan,
-                    viewport,
                     shared.config.crisp_pixels,
                     shared.config.downscale_kernel,
+                    shared.config.zoom_mode,
+                    viewer.manual_zoom,
                 ),
                 None => match path.and_then(|p| {
                     shared
@@ -213,9 +214,10 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
                     *original_size,
                     viewer.zoom,
                     viewer.pan,
-                    viewport,
                     shared.config.crisp_pixels,
                     shared.config.downscale_kernel,
+                    shared.config.zoom_mode,
+                    viewer.manual_zoom,
                 ),
                 None => match viewer.displayed_path.as_deref().and_then(|p| {
                     shared

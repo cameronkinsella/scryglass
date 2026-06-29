@@ -2,12 +2,15 @@
 //! per-draw uniform, and the dedicated upload thread. Textures themselves are
 //! app-owned `Keepalive`s drawn directly, not held here.
 
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use iced::wgpu;
 use iced::widget::image::Handle;
 use iced::widget::shader;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+
+use crate::config::DownscaleKernel;
 
 const UNIFORM_SIZE: u64 = 80;
 
@@ -18,6 +21,14 @@ const UNIFORM_SIZE: u64 = 80;
 struct UploadContext {
     jobs: UnboundedSender<Job>,
     max_dim: u32,
+    /// The kernel the last display draw used, so the off-thread view-res render
+    /// downscales with exactly what is on screen. Read by the render job, written
+    /// by every draw, so it tracks the live `downscale_kernel` with no plumbing
+    /// through the load/prefetch call graph.
+    kernel: AtomicU8,
+    /// The display scale factor the last draw reported (`f32` bits), so a view-res
+    /// copy is sized to the physical display rather than a fixed headroom guess.
+    scale_factor: AtomicU32,
 }
 
 /// Work for the upload thread. Upload creates a texture off the render thread;
@@ -29,6 +40,14 @@ enum Job {
         /// Resolved with the keepalive once the texture is resident. The app
         /// holds it for as long as it wants the image; dropping it frees the
         /// texture at once.
+        ready: tokio::sync::oneshot::Sender<Keepalive>,
+    },
+    /// Downscale a resident texture to `target` on the GPU through the display
+    /// shader, so a demoted view-res copy is generated with the very kernel the
+    /// full-res view uses and the swap is invisible.
+    RenderDownscale {
+        source: Keepalive,
+        target: (u32, u32),
         ready: tokio::sync::oneshot::Sender<Keepalive>,
     },
     Drop(GpuImage),
@@ -50,6 +69,12 @@ impl ResidentImage {
     /// keepalive. The downscale shader needs it to step taps by whole texels.
     pub fn size(&self) -> Option<(u32, u32)> {
         self.image.as_ref().map(|image| image.size)
+    }
+
+    /// The texture view to sample when rendering this image into another texture
+    /// (the view-res downscale), or `None` for the tokenless test keepalive.
+    fn input_view(&self) -> Option<&wgpu::TextureView> {
+        self.image.as_ref().map(|image| &image.view)
     }
 }
 
@@ -100,6 +125,8 @@ pub struct ImagePipeline {
 struct GpuImage {
     bind_linear: wgpu::BindGroup,
     bind_nearest: wgpu::BindGroup,
+    /// Kept so this texture can be sampled as the source of a view-res render.
+    view: wgpu::TextureView,
     size: (u32, u32),
 }
 
@@ -188,8 +215,48 @@ impl shader::Pipeline for ImagePipeline {
             cache: None,
         });
 
+        // A second pipeline that draws into an Rgba8Unorm texture, for baking a
+        // view-res copy through the same shader. Its target is not sRGB, so the
+        // shader is told to write sRGB-encoded values (like every stored image).
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scryglass image view-res pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("scryglass image uniforms"),
+            size: UNIFORM_SIZE,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // A separate uniform for the view-res render, since it runs on the upload
+        // thread while the display uniform is being written on the render thread.
+        let render_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scryglass image view-res uniforms"),
             size: UNIFORM_SIZE,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -203,18 +270,25 @@ impl shader::Pipeline for ImagePipeline {
         // jobs serially, and feeds finished textures to prepare via `receiver`.
         let (jobs, jobs_rx) = unbounded_channel();
         spawn_upload_thread(
-            device.clone(),
-            queue.clone(),
-            layout.clone(),
-            uniforms.clone(),
-            sampler_linear.clone(),
-            sampler_nearest.clone(),
+            UploadThread {
+                device: device.clone(),
+                queue: queue.clone(),
+                layout: layout.clone(),
+                uniforms: uniforms.clone(),
+                sampler_linear: sampler_linear.clone(),
+                sampler_nearest: sampler_nearest.clone(),
+                render_pipeline,
+                render_uniforms,
+                empty_bind: empty_bind.clone(),
+            },
             jobs_rx,
             jobs.clone(),
         );
         let _ = UPLOAD_CONTEXT.set(UploadContext {
             jobs,
             max_dim: device.limits().max_texture_dimension_2d,
+            kernel: AtomicU8::new(DownscaleKernel::default().to_u8()),
+            scale_factor: AtomicU32::new(1.0f32.to_bits()),
         });
 
         Self {
@@ -228,8 +302,8 @@ impl shader::Pipeline for ImagePipeline {
 
 impl ImagePipeline {
     /// Write the per-draw uniforms for the resident-texture draw path: the dst/src
-    /// rects plus the downscale kernel and the footprint it is scaled by.
-    #[allow(clippy::too_many_arguments)]
+    /// rects plus the downscale kernel and the footprint it is scaled by. Also
+    /// records the kernel so an off-thread view-res render bakes with the same one.
     pub(super) fn write_uniforms(
         &self,
         queue: &wgpu::Queue,
@@ -237,14 +311,26 @@ impl ImagePipeline {
         src: [f32; 4],
         footprint: [f32; 2],
         tex_size: [f32; 2],
-        kernel: u32,
-        bc: [f32; 2],
+        kernel: DownscaleKernel,
     ) {
+        if let Some(ctx) = UPLOAD_CONTEXT.get() {
+            ctx.kernel.store(kernel.to_u8(), Ordering::Relaxed);
+        }
+        let (selector, bc) = kernel.shader_params();
         queue.write_buffer(
             &self.uniforms,
             0,
-            &build_uniforms(dst, src, self.is_srgb, kernel, footprint, tex_size, bc),
+            &build_uniforms(dst, src, self.is_srgb, selector, footprint, tex_size, bc),
         );
+    }
+
+    /// Record the display scale factor a draw reported, so an off-thread view-res
+    /// render sizes its copy to the physical display.
+    pub(super) fn record_scale_factor(&self, scale_factor: f32) {
+        if let Some(ctx) = UPLOAD_CONTEXT.get() {
+            ctx.scale_factor
+                .store(scale_factor.to_bits(), Ordering::Relaxed);
+        }
     }
 
     /// Draw a resident image the caller already owns (its `Keepalive` keeps the
@@ -272,8 +358,20 @@ impl ImagePipeline {
     }
 }
 
-/// Create an empty RGBA texture sized `width` x `height`.
-fn create_rgba_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
+/// Create an empty RGBA texture sized `width` x `height`. `render` adds the
+/// render-attachment usage for a view-res downscale target (which is drawn into
+/// rather than copied into).
+fn create_rgba_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    render: bool,
+) -> wgpu::Texture {
+    let usage = if render {
+        wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT
+    } else {
+        wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST
+    };
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("scryglass image"),
         size: wgpu::Extent3d {
@@ -285,7 +383,7 @@ fn create_rgba_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        usage,
         view_formats: &[],
     })
 }
@@ -301,29 +399,35 @@ fn bind_texture(
     texture: &wgpu::Texture,
 ) -> GpuImage {
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let bind = |sampler: &wgpu::Sampler| {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("scryglass image bind group"),
-            layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniforms.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(sampler),
-                },
-            ],
-        })
+    // Scope the closure so its borrow of `view` ends before `view` moves into the
+    // struct (it is kept there to source a later view-res render).
+    let (bind_linear, bind_nearest) = {
+        let bind = |sampler: &wgpu::Sampler| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("scryglass image bind group"),
+                layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniforms.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(sampler),
+                    },
+                ],
+            })
+        };
+        (bind(sampler_linear), bind(sampler_nearest))
     };
     GpuImage {
-        bind_linear: bind(sampler_linear),
-        bind_nearest: bind(sampler_nearest),
+        bind_linear,
+        bind_nearest,
+        view,
         size: (texture.width(), texture.height()),
     }
 }
@@ -344,21 +448,80 @@ pub fn submit_upload(handle: Handle, ready: tokio::sync::oneshot::Sender<Keepali
     ctx.jobs.send(Job::Upload { handle, ready }).is_ok()
 }
 
-/// The dedicated upload thread, modeled on iced's image worker. It drains jobs
-/// one at a time and, after each upload, waits for the GPU on this thread so
-/// only one upload is ever in flight (back-pressure). The wait is off the render
-/// thread, so it never stalls a frame. Texture frees (Job::Drop) also run here.
-#[allow(clippy::too_many_arguments)]
-fn spawn_upload_thread(
+/// The display scale factor the most recent draw reported (`1.0` before any draw),
+/// so the view-res sizing can target physical display pixels.
+pub fn current_scale_factor() -> f32 {
+    UPLOAD_CONTEXT.get().map_or(1.0, |ctx| {
+        f32::from_bits(ctx.scale_factor.load(Ordering::Relaxed))
+    })
+}
+
+/// The downscale kernel the most recent draw used, so a CPU-built view-res copy
+/// (a fresh prefetch) is filtered with the very kernel the on-screen full-res is,
+/// exactly like the GPU render path a demote takes.
+pub fn current_kernel() -> DownscaleKernel {
+    UPLOAD_CONTEXT
+        .get()
+        .map_or_else(DownscaleKernel::default, |ctx| {
+            DownscaleKernel::from_u8(ctx.kernel.load(Ordering::Relaxed))
+        })
+}
+
+/// Queue a resident texture to be downscaled to `target` on the GPU through the
+/// display shader, resolving the receiver with the view-res keepalive. Returns
+/// `None` (the caller then falls back to a CPU downscale) when the pipeline is not
+/// built yet or the channel is closed.
+pub fn submit_render_downscale(
+    source: Keepalive,
+    target: (u32, u32),
+) -> Option<tokio::sync::oneshot::Receiver<Keepalive>> {
+    let ctx = UPLOAD_CONTEXT.get()?;
+    let (ready, rx) = tokio::sync::oneshot::channel();
+    ctx.jobs
+        .send(Job::RenderDownscale {
+            source,
+            target,
+            ready,
+        })
+        .ok()?;
+    Some(rx)
+}
+
+/// The GPU resources the upload thread owns: what it uploads with, plus the second
+/// pipeline and uniform it renders view-res copies with.
+struct UploadThread {
     device: wgpu::Device,
     queue: wgpu::Queue,
     layout: wgpu::BindGroupLayout,
     uniforms: wgpu::Buffer,
     sampler_linear: wgpu::Sampler,
     sampler_nearest: wgpu::Sampler,
+    render_pipeline: wgpu::RenderPipeline,
+    render_uniforms: wgpu::Buffer,
+    empty_bind: wgpu::BindGroup,
+}
+
+/// The dedicated upload thread, modeled on iced's image worker. It drains jobs
+/// one at a time and, after each upload, waits for the GPU on this thread so
+/// only one upload is ever in flight (back-pressure). The wait is off the render
+/// thread, so it never stalls a frame. View-res renders and texture frees
+/// (Job::Drop) also run here.
+fn spawn_upload_thread(
+    t: UploadThread,
     mut jobs: UnboundedReceiver<Job>,
     drop_tx: UnboundedSender<Job>,
 ) {
+    let UploadThread {
+        device,
+        queue,
+        layout,
+        uniforms,
+        sampler_linear,
+        sampler_nearest,
+        render_pipeline,
+        render_uniforms,
+        empty_bind,
+    } = t;
     std::thread::Builder::new()
         .name("scryglass-image-upload".into())
         .spawn(move || {
@@ -397,7 +560,7 @@ fn spawn_upload_thread(
                             staging_cap = total;
                         }
                         let staging_buf = staging.as_ref().expect("staging buffer");
-                        let texture = create_rgba_texture(&device, width, height);
+                        let texture = create_rgba_texture(&device, width, height, false);
                         let mut encoder =
                             device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                                 label: Some("scryglass image upload"),
@@ -455,6 +618,109 @@ fn spawn_upload_thread(
                         });
                         // The app holds this Arc (keeping the texture resident);
                         // dropping the last Arc frees the texture via `drop_tx`.
+                        let resident = Arc::new(ResidentImage {
+                            image: Some(image),
+                            drop_tx: Some(drop_tx.clone()),
+                        });
+                        let _ = ready.send(resident);
+                    }
+                    Job::RenderDownscale {
+                        source,
+                        target,
+                        ready,
+                    } => {
+                        // Skip the tokenless test keepalive; the caller then falls
+                        // back to its CPU downscale.
+                        let (Some(src_view), Some((sw, sh))) = (source.input_view(), source.size())
+                        else {
+                            continue;
+                        };
+                        let (tw, th) = (target.0.max(1), target.1.max(1));
+                        // Bake with the kernel the last display draw used, so this
+                        // copy matches the full-res view it replaces.
+                        let kernel = DownscaleKernel::from_u8(
+                            UPLOAD_CONTEXT
+                                .get()
+                                .map_or(DownscaleKernel::default().to_u8(), |c| {
+                                    c.kernel.load(Ordering::Relaxed)
+                                }),
+                        );
+                        let (selector, bc) = kernel.shader_params();
+                        let footprint = [sw as f32 / tw as f32, sh as f32 / th as f32];
+                        // The target is a plain Rgba8Unorm texture (not sRGB), so the
+                        // shader is told to write sRGB-encoded values, matching every
+                        // uploaded image. is_srgb = false does exactly that.
+                        queue.write_buffer(
+                            &render_uniforms,
+                            0,
+                            &build_uniforms(
+                                [0.0, 0.0, 1.0, 1.0],
+                                [0.0, 0.0, 1.0, 1.0],
+                                false,
+                                selector,
+                                footprint,
+                                [sw as f32, sh as f32],
+                                bc,
+                            ),
+                        );
+                        let out = create_rgba_texture(&device, tw, th, true);
+                        let out_view = out.create_view(&wgpu::TextureViewDescriptor::default());
+                        let in_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("scryglass view-res input"),
+                            layout: &layout,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: render_uniforms.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::TextureView(src_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: wgpu::BindingResource::Sampler(&sampler_linear),
+                                },
+                            ],
+                        });
+                        let mut encoder =
+                            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("scryglass view-res render"),
+                            });
+                        {
+                            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("scryglass view-res pass"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: &out_view,
+                                    depth_slice: None,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                depth_stencil_attachment: None,
+                                timestamp_writes: None,
+                                occlusion_query_set: None,
+                            });
+                            pass.set_pipeline(&render_pipeline);
+                            pass.set_bind_group(0, &empty_bind, &[]);
+                            pass.set_bind_group(1, &in_bind, &[]);
+                            pass.draw(0..6, 0..1);
+                        }
+                        let submission = queue.submit([encoder.finish()]);
+                        let image = bind_texture(
+                            &device,
+                            &layout,
+                            &uniforms,
+                            &sampler_linear,
+                            &sampler_nearest,
+                            &out,
+                        );
+                        let _ = device.poll(wgpu::PollType::Wait {
+                            submission_index: Some(submission),
+                            timeout: None,
+                        });
                         let resident = Arc::new(ResidentImage {
                             image: Some(image),
                             drop_tx: Some(drop_tx.clone()),

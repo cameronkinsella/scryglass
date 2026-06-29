@@ -130,6 +130,26 @@ impl DownscaleKernel {
             DownscaleKernel::Lanczos3 => (2, [0.0, 0.0]),
         }
     }
+
+    /// Round-trip as a small integer, so the live kernel can ride an atomic from
+    /// the display draw to the off-thread view-res render.
+    pub fn to_u8(self) -> u8 {
+        match self {
+            DownscaleKernel::Bilinear => 0,
+            DownscaleKernel::Mitchell => 1,
+            DownscaleKernel::CatmullRom => 2,
+            DownscaleKernel::Lanczos3 => 3,
+        }
+    }
+
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => DownscaleKernel::Bilinear,
+            2 => DownscaleKernel::CatmullRom,
+            3 => DownscaleKernel::Lanczos3,
+            _ => DownscaleKernel::Mitchell,
+        }
+    }
 }
 
 /// What resolution a focused window's prefetch neighbors are uploaded at.
