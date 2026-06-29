@@ -72,6 +72,15 @@ pub(crate) fn view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Messa
                 interactive.into()
             };
 
+            // Tag the image area with a stable id so its true laid-out size can be
+            // measured, keeping the viewport in step with what iced actually renders
+            // rather than the chrome estimate. A Fill container is layout-neutral.
+            let media: Element<'_, Message> = container(media)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .id(crate::app::measure::image_area_id(win.id))
+                .into();
+
             // Info panel sits beside the image (not over it).
             let image_cell: Element<'_, Message> = if !win.fullscreen && shared.config.show_info {
                 let file_name = viewer

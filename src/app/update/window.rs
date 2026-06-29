@@ -27,6 +27,15 @@ pub enum Message {
     /// is crisp without bringing the window forward.
     Reactivate,
     CloseRequested(iced::window::Id),
+    /// iced's laid-out size of this window's image area (`area`), measured after
+    /// layout for the window size `at`. Corrects the chrome-estimated viewport to the
+    /// true area, so the fit zoom and view-res bake match what is on screen and the
+    /// demote stays seamless. `at` is carried so a measurement the window has already
+    /// resized past is dropped rather than applied to a stale layout.
+    ImageAreaMeasured {
+        area: Size,
+        at: Size,
+    },
 }
 
 /// One stage of a backgrounded window's decay pipeline, run in this order
@@ -163,6 +172,45 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             }
             win.video_resumes_on_restore = resume;
             restart_decay(win, shared)
+        }
+
+        Message::ImageAreaMeasured { area: size, at } => {
+            // Drop a measurement the window has since resized past: it was taken for a
+            // stale layout, so applying it (or calibrating from it) would fight the
+            // live resize. A fresh one follows for the settled size.
+            if at != win.window_size {
+                return Task::none();
+            }
+            // Correct the chrome-estimated viewport to iced's true image area, so the
+            // fit zoom and the view-res bake match what is on screen and the demote
+            // stays seamless. Ignore a measurement that already agrees, so this does
+            // not re-fit every frame.
+            if (size.width - win.viewport_size.width).abs() < 0.5
+                && (size.height - win.viewport_size.height).abs() < 0.5
+            {
+                return Task::none();
+            }
+            // Calibrate the chrome estimate to iced's true layout, so a resize tracks
+            // the real area synchronously and this async measurement stops fighting
+            // the estimate frame to frame. Skip in fullscreen, where the image owns
+            // the whole window and there is no chrome to learn.
+            if !win.fullscreen {
+                win.chrome_pad.width += win.viewport_size.width - size.width;
+                win.chrome_pad.height += win.viewport_size.height - size.height;
+            }
+            win.viewport_size = size;
+            let zoom_mode = shared.config.zoom_mode;
+            if let Some(viewer) = win.viewer_mut()
+                && let Some((w, h)) = viewer.displayed.original_size()
+            {
+                if !viewer.manual_zoom {
+                    viewer.zoom = compute_zoom(zoom_mode, w, h, size);
+                }
+                let img_w = w as f32 * viewer.zoom;
+                let img_h = h as f32 * viewer.zoom;
+                viewer.pan = clamp_pan(viewer.pan, img_w, img_h, size);
+            }
+            Task::none()
         }
 
         Message::CloseRequested(id) => {

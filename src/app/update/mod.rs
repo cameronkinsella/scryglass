@@ -69,7 +69,21 @@ fn route(app: &mut App, envelope: Envelope) -> Task<Envelope> {
             let Some(win) = app.windows.get_mut(&id) else {
                 return Task::none();
             };
-            Envelope::wrap(id, dispatch(win, &mut app.shared, message))
+            let vp_before = win.viewport_size;
+            let window_before = win.window_size;
+            let shows_image = super::measure::displays_image(&message);
+            let task = dispatch(win, &mut app.shared, message);
+            // Remeasure the image area when an image lands on screen or a chrome toggle
+            // moves the viewport without a resize. Not during a resize: the calibrated
+            // estimate already tracks the true area there, and running the layout
+            // operation every resize frame fights iced's live resize (a visible pulse).
+            let toggled = win.viewport_size != vp_before && win.window_size == window_before;
+            let task = if shows_image || toggled {
+                Task::batch([task, super::measure::image_area(win)])
+            } else {
+                task
+            };
+            Envelope::wrap(id, task)
         }
         // Replay maximize/fullscreen now the window exists, not at open where it
         // races creation. Use the config: the window's own flag was reset by the

@@ -57,6 +57,7 @@ pub(crate) fn empty_app() -> TestApp {
             session: Session::Empty,
             open_menu: None,
             viewport_size: Size::new(800.0, 600.0),
+            chrome_pad: Size::ZERO,
             last_cursor_pos: iced::Point::ORIGIN,
             window_size: Size::new(800.0, 600.0),
             window_pos: iced::Point::ORIGIN,

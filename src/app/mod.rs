@@ -17,6 +17,7 @@
 //! driven by OS key-repeat events.
 
 mod boot;
+pub(crate) mod measure;
 mod message;
 mod shortcuts;
 pub mod state;
@@ -154,6 +155,11 @@ pub struct Window {
     /// Size of the viewport (content area below toolbar, above footer).
     /// Updated on every window resize.
     pub(crate) viewport_size: Size,
+    /// Extra chrome the config estimate misses (iced's spacing and padding around
+    /// the toolbar, strips, and footer), learned from the measured image area so
+    /// `recalc_viewport` tracks the true area during a resize without waiting on the
+    /// async measurement. Zero until the first measurement calibrates it.
+    pub(crate) chrome_pad: Size,
     /// Last known cursor position (updated on every CursorMoved event).
     pub(crate) last_cursor_pos: iced::Point,
     /// Last known window size (for recalculating viewport on layout toggles).
@@ -300,9 +306,11 @@ pub(crate) fn recalc_viewport(win: &mut Window, shared: &Shared) {
     if shared.config.show_footer {
         chrome_height += 25.0; // footer
     }
+    // Subtract the learned pad so the estimate matches iced's real layout, which the
+    // config heights alone miss by a few pixels of spacing.
     win.viewport_size = Size::new(
-        (win.window_size.width - chrome_width).max(1.0),
-        (win.window_size.height - chrome_height).max(1.0),
+        (win.window_size.width - chrome_width - win.chrome_pad.width).max(1.0),
+        (win.window_size.height - chrome_height - win.chrome_pad.height).max(1.0),
     );
 }
 

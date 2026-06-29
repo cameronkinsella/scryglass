@@ -133,6 +133,7 @@ pub(crate) fn new_window(id: window::Id, config: &AppConfig) -> Window {
         session: Session::Empty,
         open_menu: None,
         viewport_size: size,
+        chrome_pad: iced::Size::ZERO,
         last_cursor_pos: Point::ORIGIN,
         window_size: size,
         window_pos,
