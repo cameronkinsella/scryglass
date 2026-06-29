@@ -402,6 +402,45 @@ impl Pipeline {
             Ok(thumb)
         }
     }
+
+    /// Produce a video thumbnail from an already-extracted `file`, cached and
+    /// persisted under `source`/`entry`. An archive video has no real path of
+    /// its own, so its first open writes this temp file and the first frame is
+    /// grabbed from there, keyed by the entry like every other archive thumb.
+    /// A re-open hits the persisted copy instead of decoding again.
+    pub fn load_video_thumb_from_file(
+        &self,
+        file: PathBuf,
+        source: Source,
+        entry: PathBuf,
+    ) -> impl Future<Output = Result<ThumbData, MediaError>> + Send + 'static {
+        let disk = self.disk();
+
+        async move {
+            let (container, name) = cache_key(&source, &entry);
+
+            // Fastest path: a thumbnail persisted by an earlier open.
+            if let Some(disk) = disk.clone() {
+                let (c, n) = (container.clone(), name.clone());
+                let hit = tokio::task::spawn_blocking(move || disk.load(&c, &n))
+                    .await
+                    .ok()
+                    .flatten();
+                if let Some(thumb) = hit {
+                    return Ok(thumb);
+                }
+            }
+
+            let thumb = tokio::task::spawn_blocking(move || {
+                crate::video::first_frame_thumb(&file, super::THUMB_DIM)
+            })
+            .await
+            .map_err(|e| MediaError::Decode(e.to_string()))?
+            .ok_or(MediaError::Unsupported)?;
+            persist(&disk, &container, &name, &thumb).await;
+            Ok(thumb)
+        }
+    }
 }
 
 /// Read curated EXIF fields for the info panel from the file prefix.

@@ -12,6 +12,7 @@ use crate::config::ZoomMode;
 use crate::media::archive::ArchiveIndex;
 use crate::media::pipeline::Source;
 
+use super::media_tasks::fire_archive_video_thumb;
 use super::push_toast;
 use super::settings::save_config;
 use crate::app::{Shared, Window};
@@ -174,6 +175,7 @@ pub(crate) fn extracted(
             )
         }
         Ok(temp) => {
+            let guard = crate::video::TempFileGuard::new(temp.clone());
             let mut session = crate::video::VideoSession::open(
                 temp.clone(),
                 std::time::Duration::ZERO,
@@ -182,9 +184,11 @@ pub(crate) fn extracted(
                 video_loop,
                 hardware,
             );
-            session.temp = Some(crate::video::TempFileGuard::new(temp));
+            session.temp = Some(guard.clone());
             viewer.video.session = Some(session);
-            Task::none()
+            // The entry has no real path of its own, so grab its thumbnail from
+            // the file extracted for playback (none otherwise).
+            fire_archive_video_thumb(&shared.pipeline, &shared.thumbs, viewer, entry, temp, guard)
         }
     }
 }

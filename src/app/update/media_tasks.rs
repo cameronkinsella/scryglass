@@ -304,6 +304,49 @@ pub(crate) fn fire_thumb(
     })
 }
 
+/// Fire a first-frame thumbnail for an archive video from its just-extracted
+/// temp `file`, keyed under the archive `entry`. The entry has no real path for
+/// FFmpeg, so this reuses the file playback already wrote; `guard` keeps it
+/// alive through the decode. Skips when a thumbnail is cached, in flight, or
+/// known to fail. Background urgency, since the playing video covers the wait.
+pub(crate) fn fire_archive_video_thumb(
+    pipeline: &Pipeline,
+    thumbs: &ImageCache<Thumb>,
+    viewer: &mut Viewer,
+    entry: PathBuf,
+    file: PathBuf,
+    guard: std::sync::Arc<crate::video::TempFileGuard>,
+) -> Task<Message> {
+    if thumbs.contains(&thumb_key(&viewer.source, &entry))
+        || viewer.in_flight_thumbs.contains(&entry)
+        || viewer.failed_thumbs.contains(&entry)
+    {
+        return Task::none();
+    }
+
+    viewer.in_flight_thumbs.insert(entry.clone());
+    let load = pipeline.load_video_thumb_from_file(file, viewer.source.clone(), entry.clone());
+    Task::perform(
+        async move {
+            // Hold the temp file open until the first-frame decode finishes,
+            // even if playback navigated away and dropped its own guard.
+            let _guard = guard;
+            load.await
+        },
+        move |result| {
+            Message::Media(MediaMessage::ThumbLoaded {
+                path: entry.clone(),
+                urgency: ThumbUrgency::Background,
+                result: result.map(|data| Thumb {
+                    handle: Handle::from_rgba(data.width, data.height, data.pixels),
+                    size: (data.width, data.height),
+                    original_size: data.original_size,
+                }),
+            })
+        },
+    )
+}
+
 /// Start (or continue) background thumbnailing: up to `chains` jobs from the
 /// current [`thumb_focus`].
 pub(crate) fn fire_thumbnailer(
@@ -658,6 +701,44 @@ mod tests {
             panic!("expected rgba");
         };
         assert_eq!((width, height), (4, 4));
+    }
+
+    #[test]
+    fn archive_video_thumb_claims_the_slot_then_skips_when_present() {
+        use crate::app::test_support::{cache_thumb, viewing_app};
+
+        let mut app = viewing_app(&["clip.mp4"], 0);
+        let entry = PathBuf::from("clip.mp4");
+        let file = PathBuf::from("extracted.mp4");
+        let guard = crate::video::TempFileGuard::new(file.clone());
+
+        // Fresh entry: the thumb job claims the in-flight slot.
+        let _ = fire_archive_video_thumb(
+            &app.shared.pipeline,
+            &app.shared.thumbs,
+            app.window.viewer_mut().unwrap(),
+            entry.clone(),
+            file.clone(),
+            guard.clone(),
+        );
+        assert!(app.viewer().unwrap().in_flight_thumbs.contains(&entry));
+
+        // Clear the slot, cache a thumb, and confirm a second fire skips.
+        app.window
+            .viewer_mut()
+            .unwrap()
+            .in_flight_thumbs
+            .remove(&entry);
+        cache_thumb(&mut app, "clip.mp4", 4, 2);
+        let _ = fire_archive_video_thumb(
+            &app.shared.pipeline,
+            &app.shared.thumbs,
+            app.window.viewer_mut().unwrap(),
+            entry.clone(),
+            file,
+            guard,
+        );
+        assert!(!app.viewer().unwrap().in_flight_thumbs.contains(&entry));
     }
 
     #[test]
