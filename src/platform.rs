@@ -708,12 +708,6 @@ pub(crate) fn run_below_normal<T>(work: impl FnOnce() -> T) -> T {
     work()
 }
 
-/// Permanently drop the calling thread to below-normal priority, for
-/// dedicated background pool threads.
-pub(crate) fn lower_thread_priority() {
-    set_thread_priority(true);
-}
-
 fn set_thread_priority(lowered: bool) {
     #[cfg(windows)]
     {

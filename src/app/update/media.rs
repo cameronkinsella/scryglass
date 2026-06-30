@@ -53,13 +53,13 @@ pub enum Message {
     TilesSettled {
         epoch: u64,
     },
-    /// A tiled still's base layer was re-derived at `target`: swap it in.
-    /// `None` just releases that claim. A claim stolen for another size in
-    /// the meantime is left to its thief, whose own derive is in flight.
-    BaseReady {
+    /// An exact-scale tile finished: install it in the pyramid's exact
+    /// layer for `target`, or just release its claim on `None`.
+    ExactReady {
         key: ImageKey,
-        texture: Option<Keepalive>,
         target: (u32, u32),
+        tile: crate::media::tiles::TileKey,
+        texture: Option<Keepalive>,
         pyramid: Keepalive,
     },
     /// An upload could not reach the GPU after retries; clear the pending mark so
@@ -227,20 +227,18 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             }
         }
 
-        Message::BaseReady {
+        Message::ExactReady {
             key,
-            texture,
             target,
+            tile,
+            texture,
             pyramid,
         } => {
             if let Some(resident) = shared.store.shared(&key)
                 && std::sync::Arc::ptr_eq(&resident, &pyramid)
                 && let Some(tiles) = resident.tiles()
             {
-                match texture {
-                    Some(texture) => tiles.set_base(texture, target),
-                    None => tiles.settle_base(target),
-                }
+                tiles.settle_exact(target, tile, texture);
             }
             Task::none()
         }

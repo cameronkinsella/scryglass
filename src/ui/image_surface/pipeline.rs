@@ -144,13 +144,17 @@ impl ResidentImage {
             body: Resident::Tiled(TileSet {
                 original,
                 base: Mutex::new(base),
-                base_pending: Mutex::new(None),
+                exact: Mutex::new(ExactLayer {
+                    target: (0, 0),
+                    tiles: TileCache::new(MAX_EXACT_TILES),
+                    pending: std::collections::HashMap::new(),
+                }),
                 tiles: Mutex::new(TileCache::new(MAX_CACHED_TILES)),
                 pending: Mutex::new(std::collections::HashMap::new()),
                 wanted_lod: AtomicU32::new(0),
                 draw_lod: AtomicU32::new(DRAW_UNSTAMPED),
                 draw_scale: AtomicU32::new(1.0f32.to_bits()),
-                wanted_base: std::sync::atomic::AtomicU64::new(0),
+                draw_shown: std::sync::atomic::AtomicU64::new(0),
             }),
         })
     }
@@ -162,6 +166,22 @@ impl ResidentImage {
 /// from the RAM source on return.
 const MAX_CACHED_TILES: usize = 224;
 
+/// Most exact-scale tiles kept resident: the visible set plus pan margin
+/// (a 4K viewport at one texel per pixel shows ceil(3840/512+1) x
+/// ceil(2160/512+1) = 9x6 = 54). All drop together when the resting size
+/// changes.
+const MAX_EXACT_TILES: usize = 96;
+
+/// The exact-scale layer: tiles that are byte-exact crops of the one-pass
+/// downscale at `target`, keyed by grid position with `lod` fixed at 0.
+struct ExactLayer {
+    /// The whole-image size the tiles are exact for; (0, 0) before the
+    /// first rest.
+    target: (u32, u32),
+    tiles: TileCache<Keepalive>,
+    pending: std::collections::HashMap<TileKey, std::time::Instant>,
+}
+
 /// The resident form of a tiled still: its bounded tile cache plus the
 /// uncapped source size the tile grid maps. Shared cross-window inside one
 /// [`Keepalive`], with tiles streaming in through the mutex as they land.
@@ -171,12 +191,15 @@ pub struct TileSet {
     /// so it stays a one-pass copy (a fixed base redrawn through the kernel
     /// would be softer than the View tier it must match).
     base: Mutex<Keepalive>,
-    /// The in-flight base re-derive's claim time and target size. A demand
-    /// pass wanting a DIFFERENT size steals the slot at once (the old derive
-    /// dies at its next row), so contending windows never deadlock or churn
-    /// through refires: the last thief simply wins. Expires like a tile
-    /// claim, so a lost settle can never block re-derives for good.
-    base_pending: Mutex<Option<(std::time::Instant, (u32, u32))>>,
+    /// Exact-scale tiles for the resting display size: byte-exact crops of
+    /// the one-pass whole-image downscale, produced for the visible region
+    /// only, so a rest costs viewport work instead of whole-image work.
+    /// Replaced whole when the resting size changes.
+    exact: Mutex<ExactLayer>,
+    /// The displayed size the last tiled draw spanned, packed `w << 32 | h`.
+    /// The demand pass targets exactly this, so the draw's size test and
+    /// the produced tiles can never disagree by a rounding step.
+    draw_shown: std::sync::atomic::AtomicU64,
     tiles: Mutex<TileCache<Keepalive>>,
     /// Tiles requested but not yet landed, with their claim time, so a pan or
     /// zoom repeating its demand pass never produces the same tile twice. A
@@ -195,11 +218,8 @@ pub struct TileSet {
     /// [`DRAW_BASE_ONLY`] when the base layer alone sufficed.
     draw_lod: AtomicU32,
     /// The scale factor of the last tiled draw (`f32` bits), so the demand
-    /// pass sizes base re-derives for the window actually drawing.
+    /// pass works in the physical pixels of the window actually drawing.
     draw_scale: AtomicU32,
-    /// The base size the latest demand pass wants, packed `w << 32 | h`.
-    /// A queued derive for any other size bails before its resample.
-    wanted_base: std::sync::atomic::AtomicU64,
 }
 
 /// Most tiles one demand pass may claim: what one frame can draw.
@@ -236,41 +256,73 @@ impl TileSet {
         self.base.lock().ok().map(|base| base.clone())
     }
 
-    /// Swap in a base re-derived at `target`, releasing that claim.
-    pub fn set_base(&self, base: Keepalive, target: (u32, u32)) {
-        if let Ok(mut slot) = self.base.lock() {
-            *slot = base;
+    /// Ready the exact layer for `target`, dropping tiles of any other size
+    /// (their VRAM frees off-thread as the keepalives drop).
+    pub fn ensure_exact(&self, target: (u32, u32)) {
+        if let Ok(mut layer) = self.exact.lock()
+            && layer.target != target
+        {
+            layer.target = target;
+            layer.tiles = TileCache::new(MAX_EXACT_TILES);
+            layer.pending.clear();
         }
-        self.settle_base(target);
     }
 
-    /// Claim the base re-derive slot for `target`: true when no live claim
-    /// exists, or the live claim is for another size (stolen: the old
-    /// derive is superseded and dies at its next cancel check). A live
-    /// same-size claim holds. An expired claim counts as free.
-    pub fn try_claim_base(&self, target: (u32, u32)) -> bool {
-        self.base_pending
+    /// The size the exact layer currently serves.
+    pub fn exact_target(&self) -> (u32, u32) {
+        self.exact
             .lock()
-            .map(|mut slot| match *slot {
-                Some((claimed, wanted)) if wanted == target && claimed.elapsed() < CLAIM_TTL => {
-                    false
+            .map(|layer| layer.target)
+            .unwrap_or((0, 0))
+    }
+
+    /// Claim one exact tile for production: false when it is resident, in
+    /// flight (unexpired), or the layer moved to another size.
+    pub fn try_claim_exact(&self, target: (u32, u32), key: TileKey) -> bool {
+        self.exact
+            .lock()
+            .map(|mut layer| {
+                if layer.target != target || layer.tiles.contains(key) {
+                    return false;
                 }
-                _ => {
-                    *slot = Some((std::time::Instant::now(), target));
-                    true
+                match layer.pending.get(&key) {
+                    Some(claimed) if claimed.elapsed() < CLAIM_TTL => false,
+                    _ => {
+                        layer.pending.insert(key, std::time::Instant::now());
+                        true
+                    }
                 }
             })
             .unwrap_or(false)
     }
 
-    /// A derive for `target` finished (either way): release the slot, unless
-    /// a thief re-claimed it for another size in the meantime.
-    pub fn settle_base(&self, target: (u32, u32)) {
-        if let Ok(mut slot) = self.base_pending.lock()
-            && matches!(*slot, Some((_, wanted)) if wanted == target)
+    /// A production for `target` finished: release its claim and install the
+    /// texture, unless the layer moved to another size in the meantime.
+    pub fn settle_exact(&self, target: (u32, u32), key: TileKey, texture: Option<Keepalive>) {
+        if let Ok(mut layer) = self.exact.lock()
+            && layer.target == target
         {
-            *slot = None;
+            layer.pending.remove(&key);
+            if let Some(texture) = texture {
+                layer.tiles.insert(key, texture);
+            }
         }
+    }
+
+    /// A resident exact tile for `target`, refreshing its recency.
+    fn exact_get(&self, target: (u32, u32), key: TileKey) -> Option<Keepalive> {
+        self.exact.lock().ok().and_then(|mut layer| {
+            if layer.target != target {
+                return None;
+            }
+            layer.tiles.get(key).cloned()
+        })
+    }
+
+    /// The displayed size the last tiled draw spanned.
+    pub fn draw_shown(&self) -> (u32, u32) {
+        let packed = self.draw_shown.load(Ordering::Relaxed);
+        ((packed >> 32) as u32, packed as u32)
     }
 
     /// Production started: restart the tile's claim clock, so the TTL
@@ -281,29 +333,6 @@ impl TileSet {
         {
             *claimed = std::time::Instant::now();
         }
-    }
-
-    /// A derive for `target` started: restart its claim clock, unless the
-    /// slot was stolen for another size while it queued.
-    pub fn refresh_base_claim(&self, target: (u32, u32)) {
-        if let Ok(mut slot) = self.base_pending.lock()
-            && matches!(*slot, Some((_, wanted)) if wanted == target)
-        {
-            *slot = Some((std::time::Instant::now(), target));
-        }
-    }
-
-    /// Record the base size the current view wants; stale derives bail.
-    pub fn set_wanted_base(&self, target: (u32, u32)) {
-        let packed = (u64::from(target.0) << 32) | u64::from(target.1);
-        self.wanted_base
-            .store(packed, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Whether `target` is still the base size the view wants.
-    pub fn base_wanted(&self, target: (u32, u32)) -> bool {
-        let packed = (u64::from(target.0) << 32) | u64::from(target.1);
-        self.wanted_base.load(std::sync::atomic::Ordering::Relaxed) == packed
     }
 
     /// The scale factor of the last tiled draw.
@@ -683,6 +712,22 @@ impl ImagePipeline {
         self.tile_draws.clear();
         let original = set.original();
         set.draw_scale.store(scale.to_bits(), Ordering::Relaxed);
+        // The physical size the WHOLE image is displayed at; demand targets
+        // it. When zoomed in, `dst` is clipped to the viewport and `src`
+        // holds the visible fraction, so the full extent is their ratio.
+        let src_span = (src[2] - src[0], src[3] - src[1]);
+        let shown = if src_span.0 > 0.0 && src_span.1 > 0.0 {
+            (
+                ((dst[2] - dst[0]) * viewport_phys.0 / src_span.0).round() as u32,
+                ((dst[3] - dst[1]) * viewport_phys.1 / src_span.1).round() as u32,
+            )
+        } else {
+            (0, 0)
+        };
+        set.draw_shown.store(
+            (u64::from(shown.0) << 32) | u64::from(shown.1),
+            Ordering::Relaxed,
+        );
         // Texels per physical pixel of the substrate; its inverse is the
         // physical zoom the LOD is chosen for.
         let footprint = [raw_footprint[0] / scale, raw_footprint[1] / scale];
@@ -713,6 +758,59 @@ impl ImagePipeline {
                 kernel,
             );
             self.tile_draws.push((Arc::downgrade(&base), 0));
+            // Exact-scale tiles cover the base wherever they have landed:
+            // each is a byte-exact crop of the one-pass downscale at the
+            // shown size, placed on integer pixels and drawn as aligned
+            // single taps, indistinguishable from a whole exact base. The
+            // placement is re-snapped against the exact grid itself, so a
+            // panned view still lands taps on texel centers, and each tile
+            // maps through the visible `src` window (dst only spans the
+            // viewport when zoomed in).
+            if shown != (0, 0) && set.exact_target() == shown {
+                let (edst, esrc) = crate::ui::image_display::snap_placement_to_pixels(
+                    dst,
+                    src,
+                    (shown.0 as f32, shown.1 as f32),
+                    viewport_phys,
+                    true,
+                );
+                let espan = (edst[2] - edst[0], edst[3] - edst[1]);
+                let esrc_span = ((esrc[2] - esrc[0]).max(1e-6), (esrc[3] - esrc[1]).max(1e-6));
+                let mut slot = 1u32;
+                for (col, row) in tiles::window_tiles(esrc, shown) {
+                    if u64::from(slot) >= UNIFORM_SLOTS {
+                        break;
+                    }
+                    let key = TileKey { lod: 0, col, row };
+                    let Some(tile) = set.exact_get(shown, key) else {
+                        continue;
+                    };
+                    let (x, y, w, h) = tiles::tile_rect(shown, col, row);
+                    let fx =
+                        |v: f32| edst[0] + (v / shown.0 as f32 - esrc[0]) / esrc_span.0 * espan.0;
+                    let fy =
+                        |v: f32| edst[1] + (v / shown.1 as f32 - esrc[1]) / esrc_span.1 * espan.1;
+                    let tdst = [
+                        fx(x as f32),
+                        fy(y as f32),
+                        fx((x + w) as f32),
+                        fy((y + h) as f32),
+                    ];
+                    self.write_uniforms(
+                        queue,
+                        slot,
+                        tdst,
+                        [0.0, 0.0, 1.0, 1.0],
+                        [1.0, 1.0],
+                        [w as f32, h as f32],
+                        kernel,
+                    );
+                    self.tile_draws.push((Arc::downgrade(&tile), slot));
+                    slot += 1;
+                }
+                set.draw_lod.store(DRAW_BASE_ONLY, Ordering::Relaxed);
+                return;
+            }
             // The base covers the view when it is at least as fine as the
             // display OR within the near-1:1 band: float dust leaves an
             // exact base a hair either side of 1.0, and the snap only caps

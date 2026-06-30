@@ -88,6 +88,13 @@ pub fn visible_tiles(
     lod: u32,
 ) -> impl Iterator<Item = TileKey> {
     let level = level_size(original, lod);
+    window_tiles(src, level).map(move |(col, row)| TileKey { lod, col, row })
+}
+
+/// The tiles of a `level`-sized grid overlapping the normalized window
+/// `src`, as (col, row) pairs. The exact-scale layer uses this directly
+/// with the resting display size as the grid.
+pub fn window_tiles(src: [f32; 4], level: (u32, u32)) -> impl Iterator<Item = (u32, u32)> {
     let (cols, rows) = grid(level);
     let span = |a: f32, b: f32, size: u32, count: u32| -> std::ops::Range<u32> {
         let px0 = (a.max(0.0) as f64 * size as f64).floor();
@@ -101,7 +108,7 @@ pub fn visible_tiles(
     };
     let col_span = span(src[0], src[2], level.0, cols);
     let row_span = span(src[1], src[3], level.1, rows);
-    row_span.flat_map(move |row| col_span.clone().map(move |col| TileKey { lod, col, row }))
+    row_span.flat_map(move |row| col_span.clone().map(move |col| (col, row)))
 }
 
 /// A count-capped tile cache: recently used tiles stay, the stalest goes

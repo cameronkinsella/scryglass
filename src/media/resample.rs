@@ -1,13 +1,10 @@
 //! Exact CPU port of the image shader's factor-aware downscale (`shaders/image` `fs`).
 //!
 //! A prefetched neighbor has no full-res GPU texture to render its view-res copy
-//! from, so that copy is built on the CPU. To make it indistinguishable from the
-//! on-screen full-res (and from the GPU-baked copy a decay produces), this
-//! reproduces the shader byte for byte: the same kernel weights (`shaders/common`),
-//! the same fixed 13x13 tap grid, gamma-space bilinear taps with clamp-to-edge,
-//! premultiplied-alpha averaging in linear light, and the same sRGB transfer. A
-//! plain resize (the old path) averaged sRGB bytes with a fixed Catmull-Rom, which
-//! is visibly softer and muddier than the linear-light shader kernel.
+//! from, so that copy is built on the CPU. Reproducing the shader byte for byte
+//! (kernel weights from `shaders/common`, the fixed 13x13 tap grid, gamma-space
+//! bilinear taps, premultiplied-alpha averaging in linear light, the same sRGB
+//! transfer) keeps the result indistinguishable from the GPU output.
 
 use rayon::prelude::*;
 use scryglass_shader_common::{cubic_weight, lanczos3_weight};
@@ -139,17 +136,85 @@ pub(crate) fn downscale(
     downscale_region(pixels, src, (0, 0, src.0, src.1), target, kernel)
 }
 
-/// [`downscale`], abandoned mid-pass when `cancel` turns true. A large exact
-/// pass is seconds of taps; the check is one call per output row, so a
-/// superseded result stops costing within milliseconds.
-pub(crate) fn downscale_cancellable(
+/// One `window` (x, y, w, h in TARGET pixels) of the whole-image downscale to
+/// `target`: byte-identical to that crop of [`downscale`]'s output, since every
+/// texel runs the same arithmetic and only the iterated rectangle changes. This
+/// cuts an exact-scale tile at viewport cost instead of whole-image cost.
+pub(crate) fn downscale_window(
     pixels: &[u8],
     src: (u32, u32),
     target: (u32, u32),
+    window: (u32, u32, u32, u32),
     kernel: DownscaleKernel,
-    cancel: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<u8>> {
-    downscale_region_inner(pixels, src, (0, 0, src.0, src.1), target, kernel, cancel)
+) -> Vec<u8> {
+    let (sw, sh) = (src.0 as usize, src.1 as usize);
+    let (tw, th) = (target.0.max(1) as usize, target.1.max(1) as usize);
+    let (wx, wy) = (window.0 as usize, window.1 as usize);
+    let (ww, wh) = (window.2.max(1) as usize, window.3.max(1) as usize);
+    let (selector, bc) = kernel.shader_params();
+
+    let mut out = vec![0u8; ww * wh * 4];
+
+    if selector == 0 {
+        out.par_chunks_mut(ww * 4)
+            .enumerate()
+            .for_each(|(oy, row)| {
+                let vy = (wy as f32 + oy as f32 + 0.5) / th as f32;
+                for (ox, px) in row.chunks_mut(4).enumerate() {
+                    let vx = (wx as f32 + ox as f32 + 0.5) / tw as f32;
+                    let s = bilinear(pixels, sw, sh, vx, vy);
+                    for c in 0..4 {
+                        px[c] = (s[c] * 255.0).round() as u8;
+                    }
+                }
+            });
+        return out;
+    }
+
+    let radius = if selector == 2 { 3.0 } else { 2.0 };
+    let taps_x = axis_taps(selector, bc, radius, tw);
+    let taps_y = axis_taps(selector, bc, radius, th);
+    let wsum: f32 =
+        taps_x.iter().map(|t| t.w).sum::<f32>() * taps_y.iter().map(|t| t.w).sum::<f32>();
+    static SRGB_LUT: std::sync::LazyLock<SrgbLut> = std::sync::LazyLock::new(SrgbLut::new);
+    let lut = &*SRGB_LUT;
+
+    out.par_chunks_mut(ww * 4)
+        .enumerate()
+        .for_each(|(oy, row)| {
+            let vy = (wy as f32 + oy as f32 + 0.5) / th as f32;
+            for (ox, px) in row.chunks_mut(4).enumerate() {
+                let vx = (wx as f32 + ox as f32 + 0.5) / tw as f32;
+                let mut acc = [0.0f32; 3];
+                let mut acc_a = 0.0f32;
+                for ty in &taps_y {
+                    let sy = vy + ty.uv_off;
+                    for tx in &taps_x {
+                        let s = bilinear(pixels, sw, sh, vx + tx.uv_off, sy);
+                        let wa = tx.w * ty.w * s[3];
+                        acc[0] += lut.get(s[0]) * wa;
+                        acc[1] += lut.get(s[1]) * wa;
+                        acc[2] += lut.get(s[2]) * wa;
+                        acc_a += wa;
+                    }
+                }
+                let alpha = if wsum > 0.0 {
+                    (acc_a / wsum).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                for c in 0..3 {
+                    let lin = if acc_a > 0.0 {
+                        (acc[c] / acc_a).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    px[c] = (linear_to_srgb(lin) * 255.0).round() as u8;
+                }
+                px[3] = (alpha * 255.0).round() as u8;
+            }
+        });
+    out
 }
 
 /// Downscale one `region` (x, y, w, h in source pixels) of `pixels` to `target`,
@@ -165,17 +230,6 @@ pub(crate) fn downscale_region(
     target: (u32, u32),
     kernel: DownscaleKernel,
 ) -> Vec<u8> {
-    downscale_region_inner(pixels, src, region, target, kernel, &|| false).expect("never cancelled")
-}
-
-fn downscale_region_inner(
-    pixels: &[u8],
-    src: (u32, u32),
-    region: (i64, i64, u32, u32),
-    target: (u32, u32),
-    kernel: DownscaleKernel,
-    cancel: &(dyn Fn() -> bool + Sync),
-) -> Option<Vec<u8>> {
     let (sw, sh) = (src.0 as usize, src.1 as usize);
     let (tw, th) = (target.0.max(1) as usize, target.1.max(1) as usize);
     let (selector, bc) = kernel.shader_params();
@@ -191,9 +245,6 @@ fn downscale_region_inner(
         let left = (-x0).clamp(0, tw as i64) as usize;
         let in_end = (sw as i64 - x0).clamp(left as i64, tw as i64) as usize;
         for (oy, row) in out.chunks_mut(tw * 4).enumerate() {
-            if cancel() {
-                return None;
-            }
             let sy = (region.1 + oy as i64).clamp(0, sh as i64 - 1) as usize;
             let src_row = &pixels[sy * sw * 4..(sy + 1) * sw * 4];
             for px in row[..left * 4].chunks_mut(4) {
@@ -208,7 +259,7 @@ fn downscale_region_inner(
                 px.copy_from_slice(&src_row[(sw - 1) * 4..]);
             }
         }
-        return Some(out);
+        return out;
     }
 
     // The region's frame in full-image UV: an output texel at region UV `v`
@@ -226,10 +277,7 @@ fn downscale_region_inner(
     if selector == 0 {
         out.par_chunks_mut(tw * 4)
             .enumerate()
-            .try_for_each(|(oy, row)| {
-                if cancel() {
-                    return Err(());
-                }
+            .for_each(|(oy, row)| {
                 let vy = off_y + (oy as f32 + 0.5) / th as f32 * span_y;
                 for (ox, px) in row.chunks_mut(4).enumerate() {
                     let vx = off_x + (ox as f32 + 0.5) / tw as f32 * span_x;
@@ -238,10 +286,8 @@ fn downscale_region_inner(
                         px[c] = (s[c] * 255.0).round() as u8;
                     }
                 }
-                Ok(())
-            })
-            .ok()?;
-        return Some(out);
+            });
+        return out;
     }
 
     let radius = if selector == 2 { 3.0 } else { 2.0 };
@@ -263,10 +309,7 @@ fn downscale_region_inner(
 
     out.par_chunks_mut(tw * 4)
         .enumerate()
-        .try_for_each(|(oy, row)| {
-            if cancel() {
-                return Err(());
-            }
+        .for_each(|(oy, row)| {
             let vy = off_y + (oy as f32 + 0.5) / th as f32 * span_y;
             for (ox, px) in row.chunks_mut(4).enumerate() {
                 let vx = off_x + (ox as f32 + 0.5) / tw as f32 * span_x;
@@ -300,10 +343,8 @@ fn downscale_region_inner(
                 }
                 px[3] = (alpha * 255.0).round() as u8;
             }
-            Ok(())
-        })
-        .ok()?;
-    Some(out)
+        });
+    out
 }
 
 #[cfg(test)]
@@ -322,14 +363,24 @@ mod tests {
     }
 
     #[test]
-    fn a_cancelled_downscale_stops_and_an_uncancelled_one_matches() {
-        let px = solid(64, 64, [10, 200, 30, 255]);
+    fn windows_reassemble_the_whole_downscale_exactly() {
+        // A gradient so every texel differs. Windows tile the target unevenly.
+        let px: Vec<u8> = (0..64u32 * 48)
+            .flat_map(|i| [(i % 251) as u8, (i % 83) as u8, (i % 199) as u8, 255])
+            .collect();
         for kernel in KERNELS {
-            let plain = downscale(&px, (64, 64), (16, 16), kernel);
-            let same = downscale_cancellable(&px, (64, 64), (16, 16), kernel, &|| false);
-            assert_eq!(same.as_deref(), Some(plain.as_slice()));
-            let stopped = downscale_cancellable(&px, (64, 64), (16, 16), kernel, &|| true);
-            assert!(stopped.is_none());
+            let whole = downscale(&px, (64, 48), (23, 17), kernel);
+            let mut stitched = vec![0u8; 23 * 17 * 4];
+            for (wx, wy, ww, wh) in [(0, 0, 10, 9), (10, 0, 13, 9), (0, 9, 10, 8), (10, 9, 13, 8)] {
+                let win = downscale_window(&px, (64, 48), (23, 17), (wx, wy, ww, wh), kernel);
+                for row in 0..wh as usize {
+                    let dst = ((wy as usize + row) * 23 + wx as usize) * 4;
+                    let src = row * ww as usize * 4;
+                    stitched[dst..dst + ww as usize * 4]
+                        .copy_from_slice(&win[src..src + ww as usize * 4]);
+                }
+            }
+            assert_eq!(stitched, whole, "window stitch differs for {kernel:?}");
         }
     }
 

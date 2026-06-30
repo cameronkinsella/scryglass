@@ -698,36 +698,41 @@ pub(crate) fn fire_tiles(win: &Window, shared: &Shared) -> Task<Message> {
         return Task::none();
     };
     if displayed.0 <= max && displayed.1 <= max {
-        let target = view_target(original, substrate_zoom, scale);
-        // Stamped before the exact-match return, so the cell always names
-        // the resting size and never keeps a stale (0, 0) from a tiled
-        // excursion. Queued derives for other sizes bail once it is stored.
-        set.set_wanted_base(target);
+        // Demand targets the size the draw actually spanned, so the drawn
+        // grid and the produced tiles can never disagree by a rounding
+        // step. Before the first tiled draw, the settle that follows the
+        // mint brings demand back here.
+        let target = set.draw_shown();
+        if target == (0, 0) {
+            return Task::none();
+        }
+        // A base already at the shown size is the exact copy by itself.
         if set.base().and_then(|base| base.size()) == Some(target) {
             return Task::none();
         }
-        let mut jobs = Vec::new();
-        // Before the first tiled draw the scale is a process-global guess,
-        // so the claim waits for the settle that follows the mint, which
-        // derives with this window's stamped scale.
-        if !matches!(set.draw_want(), DrawWant::Unknown) && set.try_claim_base(target) {
-            jobs.push(refresh_base(
-                key.clone(),
-                &ram.handle,
-                resident.clone(),
-                target,
-            ));
-        }
-        // A large exact base takes seconds; tiles sharpen the visible region
-        // in the meantime and stop drawing once it lands.
-        if let DrawWant::Level(lod) = set.draw_want() {
-            jobs.extend(claim_tiles(&key, &ram, &resident, set, src, original, lod));
-        }
+        set.ensure_exact(target);
+        // Visible exact tiles plus half a tile of pan margin, capped at
+        // what one frame can draw (an 8K-plus viewport degrades to the
+        // base past the cap instead of churning).
+        let margin = (
+            tiles::TILE_SIZE as f32 / (2.0 * target.0 as f32),
+            tiles::TILE_SIZE as f32 / (2.0 * target.1 as f32),
+        );
+        let wanted = [
+            src[0] - margin.0,
+            src[1] - margin.1,
+            src[2] + margin.0,
+            src[3] + margin.1,
+        ];
+        let jobs: Vec<Task<Message>> = tiles::window_tiles(wanted, target)
+            .map(|(col, row)| tiles::TileKey { lod: 0, col, row })
+            .take(crate::ui::image_surface::MAX_TILE_DRAWS)
+            .filter(|tile| set.try_claim_exact(target, *tile))
+            .map(|tile| produce_exact(key.clone(), &ram.handle, resident.clone(), target, tile))
+            .collect();
         return Task::batch(jobs);
     }
-    // Past one texture's worth of display, tiles are the only way. No base
-    // size is wanted here, which aborts any in-flight derive mid-pass.
-    set.set_wanted_base((0, 0));
+    // Past one texture's worth of display, tiles are the only way.
     let lod = match set.draw_want() {
         DrawWant::Level(lod) => lod,
         DrawWant::BaseOnly | DrawWant::Unknown => tiles::lod_for_zoom(substrate_zoom * scale),
@@ -787,99 +792,64 @@ pub(crate) fn settle_tiles(win: &mut Window) -> Task<Message> {
     })
 }
 
-/// Re-derive a tiled still's base layer at `target`: one direct pass from the
-/// substrate, exactly how the View tier builds its copy, swapped into the
-/// pyramid when it lands.
-fn refresh_base(
+/// Produce one exact-scale tile: a byte-exact crop of the one-pass
+/// downscale at `target`, cut for the visible region only.
+fn produce_exact(
     key: ImageKey,
     handle: &Handle,
     pyramid: crate::ui::image_surface::Keepalive,
     target: (u32, u32),
+    tile: crate::media::tiles::TileKey,
 ) -> Task<Message> {
     let handle = handle.clone();
     Task::future(async move {
-        let _permit = RESIZE_GATE.acquire().await.ok();
-        // A rest at another size supersedes this derive; bail before paying
-        // for a whole-substrate resample nobody will draw.
-        if pyramid.tiles().is_none_or(|set| !set.base_wanted(target)) {
-            return Message::Media(MediaMessage::BaseReady {
-                key,
-                texture: None,
-                target,
-                pyramid,
-            });
-        }
-        // Restart the claim clock past the gate wait, like a tile production.
-        if let Some(set) = pyramid.tiles() {
-            set.refresh_base_claim(target);
-        }
-        let watcher = pyramid.clone();
-        let derived = tokio::task::spawn_blocking(move || {
-            // Half the cores: an exact base for a large display is seconds
-            // of kernel taps, and taking every core throttles the whole app.
-            BASE_POOL.install(|| {
-                // Abandoned row by row once another rest wants a different
-                // size, so a superseded derive stops costing immediately.
-                let cancel = || watcher.tiles().is_none_or(|set| !set.base_wanted(target));
-                downscale_or_cancel(&handle, target, &cancel)
+        let _permit = TILE_GATE.acquire().await.ok();
+        use crate::media::tiles;
+        // Bail when the rest moved to another size while this sat queued.
+        let stale = pyramid
+            .tiles()
+            .is_none_or(|set| set.exact_target() != target);
+        let produced = if stale {
+            None
+        } else {
+            let kernel = crate::ui::image_surface::current_kernel();
+            tokio::task::spawn_blocking(move || {
+                let Handle::Rgba {
+                    width,
+                    height,
+                    pixels,
+                    ..
+                } = &handle
+                else {
+                    return None;
+                };
+                let rect = tiles::tile_rect(target, tile.col, tile.row);
+                let cut = crate::media::resample::downscale_window(
+                    pixels.as_ref(),
+                    (*width, *height),
+                    target,
+                    rect,
+                    kernel,
+                );
+                Some(Handle::from_rgba(rect.2, rect.3, cut))
             })
-        })
-        .await;
-        let texture = match derived {
-            Ok(Some(derived)) => submit_and_wait(derived).await,
-            Ok(None) | Err(_) => None,
+            .await
+            .ok()
+            .flatten()
         };
-        Message::Media(MediaMessage::BaseReady {
+        let texture = match produced {
+            Some(cut) => submit_and_wait(cut).await,
+            None => None,
+        };
+        Message::Media(MediaMessage::ExactReady {
             key,
-            texture,
             target,
+            tile,
+            texture,
             pyramid,
         })
     })
 }
-
-/// [`downscale`], abandoned when `cancel` turns true.
-fn downscale_or_cancel(
-    handle: &Handle,
-    target: (u32, u32),
-    cancel: &(dyn Fn() -> bool + Sync),
-) -> Option<Handle> {
-    let Handle::Rgba {
-        width,
-        height,
-        pixels,
-        ..
-    } = handle
-    else {
-        return Some(handle.clone());
-    };
-    if target.0 >= *width && target.1 >= *height {
-        return Some(handle.clone());
-    }
-    let resized = crate::media::resample::downscale_cancellable(
-        pixels.as_ref(),
-        (*width, *height),
-        target,
-        crate::ui::image_surface::current_kernel(),
-        cancel,
-    )?;
-    Some(Handle::from_rgba(target.0, target.1, resized))
-}
-
-/// Runs whole-substrate base derives on half the cores at below-normal
-/// priority, so a seconds-long exact resample never saturates the machine
-/// and always yields to the UI and foreground work.
-static BASE_POOL: std::sync::LazyLock<rayon::ThreadPool> = std::sync::LazyLock::new(|| {
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(
-            std::thread::available_parallelism()
-                .map(|n| (n.get() / 2).max(1))
-                .unwrap_or(1),
-        )
-        .start_handler(|_| crate::platform::lower_thread_priority())
-        .build()
-        .expect("static thread pool config is valid")
-});
 
 /// Submit `handle` to the upload thread and wait for its keepalive.
 async fn submit_and_wait(handle: Handle) -> Option<crate::ui::image_surface::Keepalive> {
