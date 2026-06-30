@@ -76,13 +76,13 @@ impl Nav {
         seen.insert(self.cursor); // exclude current
         let mut result = Vec::new();
 
+        // Interleaved outward (+1, -1, +2, -2, ...): loads start in this
+        // order, so the neighbors most likely to be shown next warm first.
         for offset in 1..=depth {
             let fwd = (self.cursor + offset) % len;
             if seen.insert(fwd) {
                 result.push(self.files[fwd].clone());
             }
-        }
-        for offset in 1..=depth {
             let bwd = (self.cursor + len - (offset % len)) % len;
             if seen.insert(bwd) {
                 result.push(self.files[bwd].clone());
@@ -316,11 +316,12 @@ mod tests {
         let files: Vec<PathBuf> = (0..10).map(|i| PathBuf::from(format!("{i}.png"))).collect();
         let nav = Nav::new(files, Path::new("3.png")).unwrap();
         let around = nav.peek_around(2);
-        // Forward: 4, 5. Backward: 2, 1.
-        assert!(around.contains(&PathBuf::from("4.png")));
-        assert!(around.contains(&PathBuf::from("5.png")));
-        assert!(around.contains(&PathBuf::from("2.png")));
-        assert!(around.contains(&PathBuf::from("1.png")));
+        // Interleaved outward, nearest first: +1, -1, +2, -2.
+        let expect: Vec<PathBuf> = ["4.png", "2.png", "5.png", "1.png"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        assert_eq!(around, expect);
         assert!(!around.contains(&PathBuf::from("3.png"))); // current excluded
     }
 
