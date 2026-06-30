@@ -11,6 +11,8 @@ crate-type = ["dylib"]
 spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", tag = "v0.10.0-alpha.1" }
 # Pin to match rust-gpu.
 glam = { version = "=0.31.0", default-features = false, features = ["libm"] }
+# Shared resampling-kernel weights (also used by shaders/image).
+scryglass-shader-common = { path = "../common" }
 
 # Unoptimized build scripts are painfully slow.
 [profile.dev.build-override]

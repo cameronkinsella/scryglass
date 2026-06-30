@@ -47,6 +47,7 @@ Durations are written as readable strings: `"15s"`, `"200ms"`, `"1m30s"`, or
 | `video_muted` | bool | `false` | Start muted. |
 | `video_loop` | bool | `false` | Loop playback. |
 | `hardware_decode` | bool | `true` | Use the GPU video decoder when available, falling back to software. |
+| `video_high_quality_scaling` | bool | `true` | Downscale a minified (shrunk-to-fit) video with the factor-aware kernel, matching still-image quality, instead of one bilinear tap. Turn off to cut the per-frame GPU cost. Video at or above its native size is unaffected. |
 
 ## Chrome visibility
 

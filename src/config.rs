@@ -529,6 +529,10 @@ pub struct AppConfig {
     /// Decode video on the GPU when the platform and codec support it,
     /// falling back to software automatically. Disable to force software.
     pub hardware_decode: bool,
+    /// Downscale a minified video with the factor-aware kernel (matching the
+    /// still-image quality) instead of one bilinear tap. Disable to cut the
+    /// per-frame GPU cost on a shrunk-to-fit video.
+    pub video_high_quality_scaling: bool,
     /// Whether the toolbar is visible.
     pub show_toolbar: bool,
     /// Whether the filmstrip is visible.
@@ -569,6 +573,7 @@ impl Default for AppConfig {
             video_muted: false,
             video_loop: false,
             hardware_decode: true,
+            video_high_quality_scaling: true,
             show_toolbar: true,
             show_filmstrip: true,
             show_slider: true,
@@ -810,6 +815,7 @@ mod tests {
             video_muted: true,
             video_loop: true,
             hardware_decode: false,
+            video_high_quality_scaling: false,
             show_toolbar: false,
             show_filmstrip: true,
             show_slider: false,

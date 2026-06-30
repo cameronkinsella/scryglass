@@ -10,28 +10,38 @@ use iced::{Element, Length, Rectangle, mouse, wgpu};
 
 use super::pipeline::VideoPipeline;
 use crate::app::Message;
-use crate::ui::image_display::SurfacePlacement;
+use crate::ui::image_display::{self, SurfacePlacement, snap_footprint_to_unit};
 use crate::video::VideoFrame;
 
-/// Build the video surface element for the current frame at the given
-/// zoom/pan. Fills the image area like the still-image widget does.
+/// Build the video surface element for the current frame at the given zoom/pan.
+/// `high_quality` selects the factor-aware downscale for a minified frame. Fills the
+/// image area like the still-image widget does.
 pub fn view(
     frame: Arc<VideoFrame>,
     zoom: f32,
     pan: (f32, f32),
     viewport: (f32, f32),
     pixelated: bool,
+    high_quality: bool,
 ) -> Element<'static, Message> {
-    shader::Shader::new(VideoSurface::new(frame, zoom, pan, viewport, pixelated))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    shader::Shader::new(VideoSurface::new(
+        frame,
+        zoom,
+        pan,
+        viewport,
+        pixelated,
+        high_quality,
+    ))
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
 
 /// The shader program: holds the frame to show and where to put it.
 struct VideoSurface {
     frame: Arc<VideoFrame>,
     placement: SurfacePlacement,
+    high_quality: bool,
 }
 
 impl VideoSurface {
@@ -41,11 +51,13 @@ impl VideoSurface {
         pan: (f32, f32),
         viewport: (f32, f32),
         pixelated: bool,
+        high_quality: bool,
     ) -> Self {
         let original = (frame.width, frame.height);
         Self {
             frame,
             placement: SurfacePlacement::new(zoom, pan, viewport, original, pixelated),
+            high_quality,
         }
     }
 }
@@ -63,6 +75,7 @@ impl<T> shader::Program<T> for VideoSurface {
         VideoPrimitive {
             frame: self.frame.clone(),
             placement: self.placement,
+            high_quality: self.high_quality,
         }
     }
 }
@@ -71,6 +84,7 @@ impl<T> shader::Program<T> for VideoSurface {
 pub struct VideoPrimitive {
     frame: Arc<VideoFrame>,
     placement: SurfacePlacement,
+    high_quality: bool,
 }
 
 impl std::fmt::Debug for VideoPrimitive {
@@ -90,23 +104,36 @@ impl shader::Primitive for VideoPrimitive {
         pipeline: &mut VideoPipeline,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        _bounds: &Rectangle,
-        _viewport: &shader::Viewport,
+        bounds: &Rectangle,
+        viewport: &shader::Viewport,
     ) {
         if self.placement.valid {
+            // Downscale ratio for the frame placed in the real widget area, taken to
+            // physical pixels by the scale factor (matching the still shader). A
+            // near-1:1 frame snaps to a single tap, so 1:1 playback pays no kernel.
+            let vp = (bounds.width, bounds.height);
+            let tex_dims = (self.frame.width, self.frame.height);
+            let raw =
+                image_display::footprint(self.placement.dst, self.placement.src, tex_dims, vp);
+            let scale = viewport.scale_factor().max(1.0);
+            let footprint = [
+                snap_footprint_to_unit(raw[0] / scale),
+                snap_footprint_to_unit(raw[1] / scale),
+            ];
             pipeline.prepare(
                 device,
                 queue,
                 &self.frame,
                 self.placement.dst,
                 self.placement.src,
+                footprint,
             );
         }
     }
 
     fn draw(&self, pipeline: &VideoPipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
         if self.placement.valid {
-            pipeline.draw(render_pass, self.placement.nearest);
+            pipeline.draw(render_pass, self.placement.nearest, self.high_quality);
         }
         true
     }

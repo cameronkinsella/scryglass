@@ -15,6 +15,7 @@ use super::audio::send_audio_frame;
 use super::frame::copy_plane;
 use super::hw::{download_frame, is_hw_frame, try_init_hw};
 use super::{VideoFrame, YuvFormat, YuvMatrix, YuvRange, init_ffmpeg};
+use crate::media::registry::MAX_TEXTURE_DIM;
 
 /// Items sent to a decode thread. `Loop` is the in-band boundary marker the
 /// demuxer inserts after a seek back to the start, so post-seek packets can
@@ -328,6 +329,19 @@ fn stream_duration_secs(ts: i64, time_base: f64) -> f64 {
     if ts > 0 { ts as f64 * time_base } else { 0.0 }
 }
 
+/// A frame size capped to `cap` on its longer side, preserving aspect, so a frame
+/// past the GPU texture limit (>8K, very rare) still fits one plane texture.
+/// Dimensions round to even so the 4:2:0 chroma planes stay whole. A frame within
+/// the limit is returned unchanged.
+fn cap_dimensions(width: u32, height: u32, cap: u32) -> (u32, u32) {
+    if width.max(height) <= cap {
+        return (width, height);
+    }
+    let scale = cap as f64 / width.max(height) as f64;
+    let even = |v: f64| ((v.round() as u32) & !1).max(2);
+    (even(width as f64 * scale), even(height as f64 * scale))
+}
+
 /// Whether to loop at end of stream: only with looping on and a known period.
 /// An unknown period falls back to the reopen path at the call site.
 fn should_loop(looping: bool, period_secs: f64) -> bool {
@@ -419,13 +433,16 @@ fn send_video_frame(
 ) -> Result<(), ()> {
     use ffmpeg::format::Pixel;
 
-    // I420 (software) and NV12 (hardware download) upload straight to the
-    // GPU. Anything else (10-bit, 4:2:2, 4:4:4) converts once into I420,
-    // far cheaper than the old full RGBA conversion and rare in practice.
+    // I420 (software) and NV12 (hardware download) that fit a texture upload
+    // straight to the GPU. Anything else (10-bit, 4:2:2, 4:4:4) or any frame past
+    // the texture limit converts once into I420 at the capped size, far cheaper
+    // than the old full RGBA conversion and rare in practice.
+    let (out_w, out_h) = cap_dimensions(frame.width(), frame.height(), MAX_TEXTURE_DIM);
+    let oversized = (out_w, out_h) != (frame.width(), frame.height());
     let mut converted = ffmpeg::frame::Video::empty();
     let (src, format) = match frame.format() {
-        Pixel::YUV420P => (frame, YuvFormat::I420),
-        Pixel::NV12 => (frame, YuvFormat::Nv12),
+        Pixel::YUV420P if !oversized => (frame, YuvFormat::I420),
+        Pixel::NV12 if !oversized => (frame, YuvFormat::Nv12),
         _ => {
             if scaler.is_none() {
                 *scaler = ffmpeg::software::scaling::Context::get(
@@ -433,8 +450,8 @@ fn send_video_frame(
                     frame.width(),
                     frame.height(),
                     Pixel::YUV420P,
-                    frame.width(),
-                    frame.height(),
+                    out_w,
+                    out_h,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 )
                 .ok();
@@ -586,6 +603,19 @@ mod tests {
     #[test]
     fn without_a_seek_all_audio_plays() {
         assert!(audio_reached_target(0.0, 0.0));
+    }
+
+    #[test]
+    fn cap_dimensions_passes_a_small_frame_and_shrinks_an_oversized_one() {
+        // Within the texture limit: unchanged.
+        assert_eq!(cap_dimensions(1920, 1080, 8192), (1920, 1080));
+        assert_eq!(cap_dimensions(8192, 8192, 8192), (8192, 8192));
+        // Past the limit: the longer side hits the cap, aspect is kept, and both
+        // dimensions stay even for the 4:2:0 chroma planes.
+        assert_eq!(cap_dimensions(10000, 4000, 8192), (8192, 3276));
+        let (w, h) = cap_dimensions(16000, 9000, 8192);
+        assert_eq!(w, 8192);
+        assert!(h <= 8192 && h % 2 == 0);
     }
 
     #[test]

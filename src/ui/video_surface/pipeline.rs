@@ -11,8 +11,12 @@ use crate::video::{VideoFrame, YuvFormat, YuvMatrix, YuvRange};
 /// Persistent GPU state shared by every video frame.
 pub struct VideoPipeline {
     pipeline: wgpu::RenderPipeline,
+    /// The factor-aware Mitchell downscale pipeline (`fs_hq`), selected when
+    /// high-quality scaling is on. Built once alongside `pipeline` so the toggle is
+    /// a pipeline swap at draw time, not a per-frame branch.
+    pipeline_hq: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
-    /// Bound at slot 0; the real bindings are at set 1.
+    /// Bound at slot 0. The real bindings are at set 1.
     empty_bind: wgpu::BindGroup,
     uniforms: wgpu::Buffer,
     sampler_linear: wgpu::Sampler,
@@ -40,7 +44,7 @@ struct YuvTextures {
     bind_nearest: wgpu::BindGroup,
 }
 
-const UNIFORM_SIZE: u64 = 48;
+const UNIFORM_SIZE: u64 = 64;
 
 impl shader::Pipeline for VideoPipeline {
     fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
@@ -91,34 +95,40 @@ impl shader::Pipeline for VideoPipeline {
             push_constant_ranges: &[],
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("scryglass video pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs"),
-                buffers: &[],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+        // Both fragment entry points share the vertex stage, layout, and target. The
+        // HQ toggle picks between them at draw time.
+        let make_pipeline = |entry: &'static str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("scryglass video pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some(entry),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            })
+        };
+        let pipeline = make_pipeline("fs");
+        let pipeline_hq = make_pipeline("fs_hq");
 
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("scryglass video uniforms"),
@@ -129,6 +139,7 @@ impl shader::Pipeline for VideoPipeline {
 
         Self {
             pipeline,
+            pipeline_hq,
             layout,
             empty_bind,
             uniforms,
@@ -150,6 +161,7 @@ impl VideoPipeline {
         frame: &VideoFrame,
         dst: [f32; 4],
         src: [f32; 4],
+        footprint: [f32; 2],
     ) {
         // Hold the memory clock up once decode has stuttered. See
         // `gpu_keepalive`.
@@ -220,7 +232,7 @@ impl VideoPipeline {
         queue.write_buffer(
             &self.uniforms,
             0,
-            &build_uniforms(dst, src, frame, self.is_srgb),
+            &build_uniforms(dst, src, frame, self.is_srgb, footprint),
         );
     }
 
@@ -268,7 +280,7 @@ impl VideoPipeline {
                     "scryglass video v",
                 ),
             ),
-            // NV12: interleaved UV in one Rg8 texture; v is an unused stub.
+            // NV12: interleaved UV in one Rg8 texture. v is an unused stub.
             YuvFormat::Nv12 => (
                 plane_texture(
                     device,
@@ -327,7 +339,12 @@ impl VideoPipeline {
         }
     }
 
-    pub(super) fn draw(&self, render_pass: &mut wgpu::RenderPass<'_>, nearest: bool) {
+    pub(super) fn draw(
+        &self,
+        render_pass: &mut wgpu::RenderPass<'_>,
+        nearest: bool,
+        high_quality: bool,
+    ) {
         let Some(textures) = &self.textures else {
             return;
         };
@@ -336,7 +353,12 @@ impl VideoPipeline {
         } else {
             &textures.bind_linear
         };
-        render_pass.set_pipeline(&self.pipeline);
+        let pipeline = if high_quality {
+            &self.pipeline_hq
+        } else {
+            &self.pipeline
+        };
+        render_pass.set_pipeline(pipeline);
         render_pass.set_bind_group(0, &self.empty_bind, &[]);
         render_pass.set_bind_group(1, bind, &[]);
         render_pass.draw(0..6, 0..1);
@@ -421,10 +443,17 @@ fn sampler_desc(filter: wgpu::FilterMode) -> wgpu::SamplerDescriptor<'static> {
     }
 }
 
-/// Pack the per-frame uniform block: geometry rects plus color parameters.
-/// Layout matches the WGSL `Uniforms` struct exactly (48 bytes).
-fn build_uniforms(dst: [f32; 4], src: [f32; 4], frame: &VideoFrame, is_srgb: bool) -> [u8; 48] {
-    let mut buf = [0u8; 48];
+/// Pack the per-frame uniform block: geometry rects, color parameters, and the
+/// downscale footprint plus luma plane size that `fs_hq` reads. Layout matches the
+/// shader `Uniforms` struct exactly (64 bytes).
+fn build_uniforms(
+    dst: [f32; 4],
+    src: [f32; 4],
+    frame: &VideoFrame,
+    is_srgb: bool,
+    footprint: [f32; 2],
+) -> [u8; 64] {
+    let mut buf = [0u8; 64];
     let floats = [
         dst[0], dst[1], dst[2], dst[3], src[0], src[1], src[2], src[3],
     ];
@@ -447,6 +476,10 @@ fn build_uniforms(dst: [f32; 4], src: [f32; 4], frame: &VideoFrame, is_srgb: boo
     buf[36..40].copy_from_slice(&full.to_le_bytes());
     buf[40..44].copy_from_slice(&(is_srgb as u32).to_le_bytes());
     buf[44..48].copy_from_slice(&format.to_le_bytes());
+    buf[48..52].copy_from_slice(&footprint[0].to_le_bytes());
+    buf[52..56].copy_from_slice(&footprint[1].to_le_bytes());
+    buf[56..60].copy_from_slice(&(frame.width as f32).to_le_bytes());
+    buf[60..64].copy_from_slice(&(frame.height as f32).to_le_bytes());
     buf
 }
 
@@ -475,16 +508,16 @@ mod tests {
         }
     }
 
-    fn u32_at(buf: &[u8; 48], offset: usize) -> u32 {
+    fn u32_at(buf: &[u8; 64], offset: usize) -> u32 {
         u32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap())
     }
 
-    fn f32_at(buf: &[u8; 48], offset: usize) -> f32 {
+    fn f32_at(buf: &[u8; 64], offset: usize) -> f32 {
         f32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap())
     }
 
     #[test]
-    fn packs_dst_then_src_floats_then_flags() {
+    fn packs_dst_src_flags_then_footprint_and_luma_size() {
         let dst = [0.1, 0.2, 0.3, 0.4];
         let src = [0.5, 0.6, 0.7, 0.8];
         let buf = build_uniforms(
@@ -492,6 +525,7 @@ mod tests {
             src,
             &frame(YuvMatrix::Bt709, YuvRange::Full, YuvFormat::Nv12),
             true,
+            [1.5, 2.0],
         );
         for (i, v) in dst.iter().chain(src.iter()).enumerate() {
             assert_eq!(f32_at(&buf, i * 4), *v);
@@ -500,6 +534,11 @@ mod tests {
         assert_eq!(u32_at(&buf, 36), 1, "full range");
         assert_eq!(u32_at(&buf, 40), 1, "srgb target");
         assert_eq!(u32_at(&buf, 44), 1, "nv12");
+        assert_eq!(f32_at(&buf, 48), 1.5, "footprint x");
+        assert_eq!(f32_at(&buf, 52), 2.0, "footprint y");
+        // Luma plane size comes from the frame (2x2 in the fixture).
+        assert_eq!(f32_at(&buf, 56), 2.0, "luma width");
+        assert_eq!(f32_at(&buf, 60), 2.0, "luma height");
     }
 
     #[test]
@@ -509,6 +548,7 @@ mod tests {
             [0.0; 4],
             &frame(YuvMatrix::Bt601, YuvRange::Limited, YuvFormat::I420),
             false,
+            [1.0, 1.0],
         );
         assert_eq!(u32_at(&buf, 32), 0);
         assert_eq!(u32_at(&buf, 36), 0);

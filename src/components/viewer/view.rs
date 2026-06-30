@@ -266,6 +266,7 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
                 viewer.pan,
                 (win.viewport_size.width, win.viewport_size.height),
                 shared.config.crisp_pixels,
+                shared.config.video_high_quality_scaling,
             ),
             _ => ui::image_display::empty_viewport(),
         },
