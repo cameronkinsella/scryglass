@@ -83,7 +83,10 @@ pub struct Pipeline {
     /// jumps so stale filmstrip work yields to the new neighborhood.
     thumb_generation: Arc<AtomicU64>,
     current_lane: Arc<Semaphore>,
-    prefetch_lane: Arc<Semaphore>,
+    /// Swapped whole when `prefetch_parallelism` changes: loads already
+    /// holding old permits finish under the old cap, new loads queue on the
+    /// new one. Cloned pipelines share the cell.
+    prefetch_lane: Arc<std::sync::Mutex<Arc<Semaphore>>>,
     thumb_lane: Arc<Semaphore>,
     urgent_thumb_lane: Arc<Semaphore>,
     /// Persistent thumbnail store, `None` when disabled by build or
@@ -95,14 +98,14 @@ pub struct Pipeline {
 
 impl Pipeline {
     pub fn new(disk: Option<DiskThumbs>) -> Self {
-        let prefetch_permits = std::thread::available_parallelism()
-            .map(|n| (n.get() / 2).max(2))
-            .unwrap_or(2);
+        let prefetch_permits = crate::config::PrefetchParallelism::default().resolve();
         Self {
             generation: Arc::new(AtomicU64::new(0)),
             thumb_generation: Arc::new(AtomicU64::new(0)),
             current_lane: Arc::new(Semaphore::new(2)),
-            prefetch_lane: Arc::new(Semaphore::new(prefetch_permits)),
+            prefetch_lane: Arc::new(std::sync::Mutex::new(Arc::new(Semaphore::new(
+                prefetch_permits,
+            )))),
             thumb_lane: Arc::new(Semaphore::new(2)),
             // Bounded so a long key-hold can't flood the I/O pool.
             urgent_thumb_lane: Arc::new(Semaphore::new(8)),
@@ -120,6 +123,14 @@ impl Pipeline {
     }
 
     /// Adopt a changed RAM budget (config edit); takes effect on the next decode.
+    /// Adopt the configured prefetch decode cap (boot and config changes).
+    /// Loads already holding old permits finish under the old cap.
+    pub fn set_prefetch_parallelism(&self, parallelism: crate::config::PrefetchParallelism) {
+        if let Ok(mut lane) = self.prefetch_lane.lock() {
+            *lane = Arc::new(Semaphore::new(parallelism.resolve()));
+        }
+    }
+
     pub fn set_ram_budget(&self, bytes: u64) {
         self.ram_budget.store(bytes, Ordering::Relaxed);
     }
@@ -171,7 +182,11 @@ impl Pipeline {
         let live = self.generation.clone();
         let semaphore = match lane {
             Lane::Current => self.current_lane.clone(),
-            Lane::Prefetch => self.prefetch_lane.clone(),
+            Lane::Prefetch => self
+                .prefetch_lane
+                .lock()
+                .map(|lane| lane.clone())
+                .unwrap_or_else(|_| Arc::new(Semaphore::new(2))),
         };
 
         let disk = self.disk();

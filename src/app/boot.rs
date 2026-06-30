@@ -46,6 +46,7 @@ pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Envelope>) {
             .resolve(crate::config::total_system_ram()),
     );
     crate::app::update::set_prefetch_scaler(config.resource.prefetch_scaler);
+    pipeline.set_prefetch_parallelism(config.resource.prefetch_parallelism);
 
     let mut shared = Shared {
         config,

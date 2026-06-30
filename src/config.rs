@@ -165,6 +165,64 @@ pub enum PrefetchVram {
     None,
 }
 
+/// How many prefetch neighbors decode at once: `"auto"` (half the logical
+/// cores, at least 2) or a fixed count. Bounds the CPU burst and the peak
+/// transient RAM of in-flight decodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PrefetchParallelism {
+    #[default]
+    Auto,
+    Fixed(u32),
+}
+
+impl PrefetchParallelism {
+    /// The concrete permit count for this machine.
+    pub fn resolve(&self) -> usize {
+        match self {
+            Self::Auto => std::thread::available_parallelism()
+                .map(|n| (n.get() / 2).max(2))
+                .unwrap_or(2),
+            Self::Fixed(n) => (*n).max(1) as usize,
+        }
+    }
+}
+
+impl std::fmt::Display for PrefetchParallelism {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => write!(f, "auto"),
+            Self::Fixed(n) => write!(f, "{n}"),
+        }
+    }
+}
+
+impl std::str::FromStr for PrefetchParallelism {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        if s.eq_ignore_ascii_case("auto") {
+            return Ok(Self::Auto);
+        }
+        s.parse::<u32>()
+            .map(Self::Fixed)
+            .map_err(|_| format!("expected \"auto\" or a count, got {s:?}"))
+    }
+}
+
+impl Serialize for PrefetchParallelism {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for PrefetchParallelism {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 /// Where a prefetch neighbor's view-resolution copy is produced. A GPU bake
 /// and the CPU resample give identical pixels; they trade transient VRAM
 /// against seconds of background CPU.
@@ -557,6 +615,8 @@ pub struct ResourceConfig {
     pub prefetch_vram: PrefetchVram,
     /// Where a prefetch neighbor's view-res copy is produced (GPU or CPU).
     pub prefetch_scaler: PrefetchScaler,
+    /// How many prefetch neighbors decode at once: `"auto"` or a count.
+    pub prefetch_parallelism: PrefetchParallelism,
     /// Ceiling for one image's decoded bytes: `"50%"` of RAM or `"2GB"`.
     /// Kept before the sub-tables so the TOML serializer accepts it.
     pub large_image_ram_budget: RamBudget,
@@ -574,6 +634,7 @@ impl Default for ResourceConfig {
         Self {
             prefetch_vram: PrefetchVram::ViewRes,
             prefetch_scaler: PrefetchScaler::default(),
+            prefetch_parallelism: PrefetchParallelism::default(),
             large_image_ram_budget: RamBudget::default(),
             unfocused: StateDecay {
                 still: DecayPipeline {
@@ -1063,6 +1124,7 @@ mod tests {
             resource: ResourceConfig {
                 prefetch_vram: PrefetchVram::FullRes,
                 prefetch_scaler: PrefetchScaler::Cpu,
+                prefetch_parallelism: PrefetchParallelism::Fixed(3),
                 large_image_ram_budget: RamBudget::Bytes(2_000_000_000),
                 unfocused: StateDecay {
                     still: DecayPipeline {
@@ -1164,6 +1226,24 @@ mod tests {
     fn present_mode_parses_kebab_case() {
         let cfg = AppConfig::from_toml("[startup]\npresent_mode = \"fifo-relaxed\"\n");
         assert_eq!(cfg.startup.present_mode, PresentMode::FifoRelaxed);
+    }
+
+    #[test]
+    fn prefetch_parallelism_parses_auto_and_counts() {
+        assert_eq!("auto".parse(), Ok(PrefetchParallelism::Auto));
+        assert_eq!("Auto".parse(), Ok(PrefetchParallelism::Auto));
+        assert_eq!(" 4 ".parse(), Ok(PrefetchParallelism::Fixed(4)));
+        assert!("four".parse::<PrefetchParallelism>().is_err());
+        assert!("-1".parse::<PrefetchParallelism>().is_err());
+    }
+
+    #[test]
+    fn prefetch_parallelism_resolves_and_displays() {
+        assert!(PrefetchParallelism::Auto.resolve() >= 2);
+        assert_eq!(PrefetchParallelism::Fixed(0).resolve(), 1);
+        assert_eq!(PrefetchParallelism::Fixed(3).resolve(), 3);
+        assert_eq!(PrefetchParallelism::Auto.to_string(), "auto");
+        assert_eq!(PrefetchParallelism::Fixed(3).to_string(), "3");
     }
 
     #[test]

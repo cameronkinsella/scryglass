@@ -132,6 +132,9 @@ fn apply_config(app: &mut App, config: AppConfig) -> Task<Envelope> {
             .resolve(crate::config::total_system_ram()),
     );
     set_prefetch_scaler(config.resource.prefetch_scaler);
+    app.shared
+        .pipeline
+        .set_prefetch_parallelism(config.resource.prefetch_parallelism);
     app.shared.config = config;
     let mut tasks = Vec::new();
     for (id, win) in app.windows.iter_mut() {
