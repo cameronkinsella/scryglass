@@ -21,6 +21,7 @@ pub mod registry;
 pub mod resample;
 pub mod store;
 pub mod thumbs;
+pub mod tiles;
 
 /// Longest side of generated thumbnails, in pixels.
 pub const THUMB_DIM: u32 = 256;

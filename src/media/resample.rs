@@ -136,9 +136,31 @@ pub(crate) fn downscale(
     target: (u32, u32),
     kernel: DownscaleKernel,
 ) -> Vec<u8> {
+    downscale_region(pixels, src, (0, 0, src.0, src.1), target, kernel)
+}
+
+/// Downscale one `region` (x, y, w, h in source pixels) of `pixels` to `target`,
+/// producing a tile of the same downscale a whole-image pass would give. Taps near
+/// the region's border sample the full image, not a crop, so adjacent tiles
+/// reassemble without seams and no multi-gigabyte crop is ever copied.
+pub(crate) fn downscale_region(
+    pixels: &[u8],
+    src: (u32, u32),
+    region: (u32, u32, u32, u32),
+    target: (u32, u32),
+    kernel: DownscaleKernel,
+) -> Vec<u8> {
     let (sw, sh) = (src.0 as usize, src.1 as usize);
     let (tw, th) = (target.0.max(1) as usize, target.1.max(1) as usize);
     let (selector, bc) = kernel.shader_params();
+
+    // The region's frame in full-image UV: an output texel at region UV `v`
+    // sits at `off + v * span` of the image, and a tap offset in region UV
+    // scales by `span`.
+    let span_x = region.2 as f32 / src.0 as f32;
+    let span_y = region.3 as f32 / src.1 as f32;
+    let off_x = region.0 as f32 / src.0 as f32;
+    let off_y = region.1 as f32 / src.1 as f32;
 
     let mut out = vec![0u8; tw * th * 4];
 
@@ -148,9 +170,9 @@ pub(crate) fn downscale(
         out.par_chunks_mut(tw * 4)
             .enumerate()
             .for_each(|(oy, row)| {
-                let vy = (oy as f32 + 0.5) / th as f32;
+                let vy = off_y + (oy as f32 + 0.5) / th as f32 * span_y;
                 for (ox, px) in row.chunks_mut(4).enumerate() {
-                    let vx = (ox as f32 + 0.5) / tw as f32;
+                    let vx = off_x + (ox as f32 + 0.5) / tw as f32 * span_x;
                     let s = bilinear(pixels, sw, sh, vx, vy);
                     for c in 0..4 {
                         px[c] = (s[c] * 255.0).round() as u8;
@@ -161,8 +183,14 @@ pub(crate) fn downscale(
     }
 
     let radius = if selector == 2 { 3.0 } else { 2.0 };
-    let taps_x = axis_taps(selector, bc, radius, tw);
-    let taps_y = axis_taps(selector, bc, radius, th);
+    let mut taps_x = axis_taps(selector, bc, radius, tw);
+    let mut taps_y = axis_taps(selector, bc, radius, th);
+    for tap in &mut taps_x {
+        tap.uv_off *= span_x;
+    }
+    for tap in &mut taps_y {
+        tap.uv_off *= span_y;
+    }
     // The kernel is separable, so the grid's weight sum is the product of the axes'.
     let wsum: f32 =
         taps_x.iter().map(|t| t.w).sum::<f32>() * taps_y.iter().map(|t| t.w).sum::<f32>();
@@ -171,9 +199,9 @@ pub(crate) fn downscale(
     out.par_chunks_mut(tw * 4)
         .enumerate()
         .for_each(|(oy, row)| {
-            let vy = (oy as f32 + 0.5) / th as f32;
+            let vy = off_y + (oy as f32 + 0.5) / th as f32 * span_y;
             for (ox, px) in row.chunks_mut(4).enumerate() {
-                let vx = (ox as f32 + 0.5) / tw as f32;
+                let vx = off_x + (ox as f32 + 0.5) / tw as f32 * span_x;
                 // Sum bilinear taps across the widened kernel support in linear light with
                 // premultiplied alpha, so transparent texels never bleed color.
                 let mut acc = [0.0f32; 3]; // sum of weight * alpha * linear-rgb
@@ -260,6 +288,60 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    /// A deterministic non-uniform test image: per-pixel gradients with a
+    /// diagonal edge, so seams and offsets cannot hide.
+    fn gradient(w: u32, h: u32) -> Vec<u8> {
+        let mut px = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let edge = if x + y < (w + h) / 2 { 255 } else { 40 };
+                px.extend_from_slice(&[
+                    (x * 255 / w.max(1)) as u8,
+                    (y * 255 / h.max(1)) as u8,
+                    edge,
+                    255,
+                ]);
+            }
+        }
+        px
+    }
+
+    #[test]
+    fn full_region_matches_the_whole_image_downscale() {
+        let src = gradient(32, 24);
+        for kernel in KERNELS {
+            let whole = downscale(&src, (32, 24), (11, 7), kernel);
+            let region = downscale_region(&src, (32, 24), (0, 0, 32, 24), (11, 7), kernel);
+            assert_eq!(whole, region, "{kernel:?}");
+        }
+    }
+
+    #[test]
+    fn tiles_reassemble_the_whole_downscale_without_seams() {
+        // Downscale a 64x32 image 2x whole, then as two 16x16 tiles from the
+        // left and right halves. Taps near the split sample the full image in
+        // both passes, so the tiles must reproduce the whole result exactly.
+        let src = gradient(64, 32);
+        for kernel in KERNELS {
+            let whole = downscale(&src, (64, 32), (32, 16), kernel);
+            let left = downscale_region(&src, (64, 32), (0, 0, 32, 32), (16, 16), kernel);
+            let right = downscale_region(&src, (64, 32), (32, 0, 32, 32), (16, 16), kernel);
+            for row in 0..16 {
+                let want = &whole[row * 32 * 4..(row + 1) * 32 * 4];
+                assert_eq!(
+                    &left[row * 16 * 4..(row + 1) * 16 * 4],
+                    &want[..16 * 4],
+                    "{kernel:?} left row {row}"
+                );
+                assert_eq!(
+                    &right[row * 16 * 4..(row + 1) * 16 * 4],
+                    &want[16 * 4..],
+                    "{kernel:?} right row {row}"
+                );
             }
         }
     }

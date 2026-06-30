@@ -21,6 +21,9 @@ use crate::media::registry::DecodeOpts;
 
 /// Shared decode tail: reduce an oversized decode to the texture limit and
 /// the RAM budget, derive a thumbnail, and convert to RGBA8.
+// TODO: the budget bounds what stays resident, not the decode: the full-size
+// image exists in RAM transiently before this clamp. Bounding the peak too
+// needs format-aware scaled decoding (JPEG IDCT scaling and friends).
 pub(crate) fn finish(img: DynamicImage, opts: &DecodeOpts) -> DecodedImage {
     let original_size = (img.width(), img.height());
 
