@@ -4,7 +4,8 @@ scryglass keeps its settings in `config.toml` (open it from **Settings → Open
 Advanced Settings**, or find it next to the app in portable mode, otherwise under
 your OS config directory). Most settings have an in-app control; the ones here can
 only be changed by editing the file. Saved edits apply live across all open windows,
-with no relaunch (decay-pipeline changes take effect on the next image). Every key
+with no relaunch (decay-pipeline changes take effect on the next image); the one
+exception is the `[startup]` section, which needs a full restart. Every key
 has a sensible default, so you only set what you want to change. Unknown keys are
 ignored and missing keys fall back to their default, so the file is safe to evolve
 and hand-edit; a syntax error is reported and the previous settings are kept.
@@ -70,6 +71,38 @@ closed; you normally don't edit them by hand.
 | `window_x`, `window_y` | float (optional) | Restored windowed position. |
 | `window_maximized` | bool | Reopen maximized. |
 | `window_fullscreen` | bool | Reopen fullscreen. |
+
+## Startup (`[startup]`)
+
+Unlike everything above, these are read once when scryglass starts and are fixed
+for the life of the process. Changing one takes effect after a full restart: close
+every scryglass window, then launch again. Opening a file while scryglass is
+already running joins the existing process, which keeps its startup settings.
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `present_mode` | enum | `"mailbox"` on Windows, `"auto"` elsewhere | How rendered frames are handed to the display; values below. |
+
+| Value | Meaning |
+|---|---|
+| `"auto"` | iced's default: vsync through the first synced mode the driver offers. |
+| `"mailbox"` | Synced to the display refresh without blocking: tear-free playback, and live window resizes stay clean where the blocking modes flicker at the window edge on Windows ([wgpu#5374](https://github.com/gfx-rs/wgpu/issues/5374)). |
+| `"fifo"` | The classic vsync queue. The only mode every driver must support ([Vulkan spec, VkPresentModeKHR](https://docs.vulkan.org/refpages/latest/refpages/source/VkPresentModeKHR.html)). |
+| `"fifo-relaxed"` | Vsync that tears instead of stalling when a frame misses the vertical blank. |
+| `"immediate"` | No sync at all: the lowest latency, may tear anywhere. |
+| `"no-vsync"` | Vsync off with graceful fallback (`immediate` where offered, else `mailbox`, else `fifo`), so it works on any driver. |
+
+Not every driver offers every mode; notably, AMD's Windows Vulkan driver has no
+mailbox. Requesting a missing mode would fail at launch, so on Windows scryglass
+probes the driver first and quietly falls back to `"auto"` when the requested mode
+is absent. `"auto"`, `"fifo"`, and `"no-vsync"` can never be missing. On other
+platforms the value is passed through as-is. The probe's answer is cached
+(`present-probe.toml`, stored like the thumbnail cache) and refreshed whenever the
+GPU or its driver changes, so it costs one launch per driver, not every launch.
+
+The `ICED_PRESENT_MODE` environment variable (values `vsync`, `no_vsync`,
+`immediate`, `fifo`, `fifo_relaxed`, `mailbox`) overrides this setting without
+validation, which is handy for a quick experiment.
 
 ## Resource model (`[resource]`)
 
