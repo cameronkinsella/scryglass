@@ -143,6 +143,7 @@ pub fn is_menu_message(msg: &Message) -> bool {
             | Message::Media(
                 media::Message::Decoded { .. }
                     | media::Message::TextureReady { .. }
+                    | media::Message::TileReady { .. }
                     | media::Message::MintFailed { .. }
                     | media::Message::DecodeFailed { .. }
                     | media::Message::AnimDecoded { .. }
@@ -191,6 +192,7 @@ pub fn is_context_menu_message(msg: &Message) -> bool {
             | Message::Media(
                 media::Message::Decoded { .. }
                     | media::Message::TextureReady { .. }
+                    | media::Message::TileReady { .. }
                     | media::Message::MintFailed { .. }
                     | media::Message::DecodeFailed { .. }
                     | media::Message::AnimDecoded { .. }

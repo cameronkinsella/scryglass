@@ -28,6 +28,14 @@ pub enum Message {
         tier: Tier,
         texture: Keepalive,
     },
+    /// A produced tile of a tiled still finished uploading: install it in the
+    /// resident pyramid. `None` means production failed; the next demand pass
+    /// re-requests the tile.
+    TileReady {
+        key: ImageKey,
+        tile: crate::media::tiles::TileKey,
+        texture: Option<Keepalive>,
+    },
     /// An upload could not reach the GPU after retries; clear the pending mark so
     /// a later pass can try again.
     MintFailed {
@@ -149,6 +157,19 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             let pipeline = shared.pipeline.clone();
             let outcome = shared.store.on_mint_failed(&key);
             run_jobs(outcome.jobs, &pipeline, Lane::Current, viewport)
+        }
+
+        Message::TileReady { key, tile, texture } => {
+            // Install into the shared pyramid; every window leasing this image
+            // sees the tile on its next frame. A failed production is dropped
+            // here and re-requested by the next demand pass.
+            if let Some(texture) = texture
+                && let Some(resident) = shared.store.shared(&key)
+                && let Some(tiles) = resident.tiles()
+            {
+                tiles.insert(tile, texture);
+            }
+            Task::none()
         }
 
         Message::AnimDecoded {

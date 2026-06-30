@@ -604,6 +604,12 @@ impl<M: Medium> Store<M> {
         self.entries.get(key).and_then(|e| M::ram(&e.state))
     }
 
+    /// The image's shared resident resource (its texture, or a tiled still's
+    /// pyramid), if any tier currently holds one.
+    pub fn shared(&self, key: &ImageKey) -> Option<Arc<M::Shared>> {
+        self.entries.get(key).and_then(|e| M::shared(&e.state))
+    }
+
     /// The image's current resident tier, or `Evicted` if the store is not
     /// tracking it.
     pub fn tier(&self, key: &ImageKey) -> Tier {

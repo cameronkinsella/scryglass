@@ -3,7 +3,7 @@
 //! app-owned `Keepalive`s drawn directly, not held here.
 
 use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use iced::wgpu;
 use iced::widget::image::Handle;
@@ -11,6 +11,7 @@ use iced::widget::shader;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::config::DownscaleKernel;
+use crate::media::tiles::{TileCache, TileKey};
 
 const UNIFORM_SIZE: u64 = 80;
 
@@ -59,14 +60,20 @@ static UPLOAD_CONTEXT: OnceLock<UploadContext> = OnceLock::new();
 /// the last reference frees the texture off the render thread immediately, so a
 /// minimized or closed window reclaims its VRAM at once rather than waiting for
 /// some later frame to sweep it.
+///
+/// A still too large for one texture is resident as a [`TileSet`] instead of a
+/// single texture; its tiles are small resident images themselves, so upload
+/// and off-thread VRAM release work the same way tile by tile.
 pub struct ResidentImage {
     image: Option<GpuImage>,
     drop_tx: Option<UnboundedSender<Job>>,
+    tiles: Option<TileSet>,
 }
 
 impl ResidentImage {
-    /// The resident texture's size in texels, or `None` for the tokenless test
-    /// keepalive. The downscale shader needs it to step taps by whole texels.
+    /// The resident texture's size in texels, or `None` for a tile pyramid or
+    /// the tokenless test keepalive. The downscale shader needs it to step
+    /// taps by whole texels.
     pub fn size(&self) -> Option<(u32, u32)> {
         self.image.as_ref().map(|image| image.size)
     }
@@ -75,6 +82,68 @@ impl ResidentImage {
     /// (the view-res downscale), or `None` for the tokenless test keepalive.
     fn input_view(&self) -> Option<&wgpu::TextureView> {
         self.image.as_ref().map(|image| &image.view)
+    }
+
+    /// The tile pyramid, when this resident is a tiled still.
+    pub fn tiles(&self) -> Option<&TileSet> {
+        self.tiles.as_ref()
+    }
+
+    /// A fresh, empty tile pyramid for an `original`-sized still. Purely
+    /// CPU-side bookkeeping: the VRAM arrives tile by tile as each one is
+    /// produced and uploaded like any small image.
+    pub fn tiled(original: (u32, u32)) -> Keepalive {
+        Arc::new(ResidentImage {
+            image: None,
+            drop_tx: None,
+            tiles: Some(TileSet {
+                original,
+                tiles: Mutex::new(TileCache::new(MAX_CACHED_TILES)),
+            }),
+        })
+    }
+}
+
+/// Most tiles a pyramid keeps resident: a window's worth at the active level
+/// plus pan margin, matching ImageGlass 10's cache bound. Older tiles drop
+/// (freeing their VRAM) and are re-produced from the RAM source on return.
+const MAX_CACHED_TILES: usize = 100;
+
+/// The resident form of a tiled still: its bounded tile cache plus the
+/// uncapped source size the tile grid maps. Shared cross-window inside one
+/// [`Keepalive`]; tiles stream in through the mutex as they are produced.
+pub struct TileSet {
+    original: (u32, u32),
+    tiles: Mutex<TileCache<Keepalive>>,
+}
+
+impl TileSet {
+    /// The uncapped source dimensions the pyramid maps.
+    #[expect(dead_code, reason = "read by the tile draw loop, landing next")]
+    pub fn original(&self) -> (u32, u32) {
+        self.original
+    }
+
+    /// Install a produced tile, evicting the stalest past the cap.
+    pub fn insert(&self, key: TileKey, tile: Keepalive) {
+        if let Ok(mut tiles) = self.tiles.lock() {
+            tiles.insert(key, tile);
+        }
+    }
+
+    /// The tile for `key`, freshly marked as used.
+    #[expect(dead_code, reason = "read by the tile draw loop, landing next")]
+    pub fn get(&self, key: TileKey) -> Option<Keepalive> {
+        self.tiles.lock().ok()?.get(key).cloned()
+    }
+
+    /// Whether `key` is resident, without touching its recency.
+    #[expect(dead_code, reason = "read by the tile demand pass, landing next")]
+    pub fn contains(&self, key: TileKey) -> bool {
+        self.tiles
+            .lock()
+            .map(|tiles| tiles.contains(key))
+            .unwrap_or(false)
     }
 }
 
@@ -110,6 +179,7 @@ pub fn test_keepalive() -> Keepalive {
     Arc::new(ResidentImage {
         image: None,
         drop_tx: None,
+        tiles: None,
     })
 }
 
@@ -621,6 +691,7 @@ fn spawn_upload_thread(
                         let resident = Arc::new(ResidentImage {
                             image: Some(image),
                             drop_tx: Some(drop_tx.clone()),
+                            tiles: None,
                         });
                         let _ = ready.send(resident);
                     }
@@ -724,6 +795,7 @@ fn spawn_upload_thread(
                         let resident = Arc::new(ResidentImage {
                             image: Some(image),
                             drop_tx: Some(drop_tx.clone()),
+                            tiles: None,
                         });
                         let _ = ready.send(resident);
                     }

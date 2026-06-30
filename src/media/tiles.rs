@@ -125,6 +125,11 @@ impl<T> TileCache<T> {
         self.entries.is_empty()
     }
 
+    /// Whether `key` is resident, without touching its recency.
+    pub fn contains(&self, key: TileKey) -> bool {
+        self.entries.contains_key(&key)
+    }
+
     /// Fetch a tile, marking it as freshly used.
     pub fn get(&mut self, key: TileKey) -> Option<&T> {
         self.clock += 1;

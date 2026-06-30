@@ -75,7 +75,13 @@ static RESIZE_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2
 /// neighbor targets its fit zoom, since it is shown fit when navigated to.
 pub(crate) fn view_target(original: (u32, u32), zoom: f32, scale_factor: f32) -> (u32, u32) {
     let (w, h) = (original.0.max(1) as f32, original.1.max(1) as f32);
-    let scale = (zoom * scale_factor.max(1.0)).clamp(0.0, 1.0);
+    // A tiled-regime source is larger than one texture, and the view copy
+    // must always fit one; past this cap the tile pyramid carries the zoom.
+    let max = crate::media::registry::MAX_TEXTURE_DIM as f32;
+    let scale = (zoom * scale_factor.max(1.0))
+        .clamp(0.0, 1.0)
+        .min(max / w)
+        .min(max / h);
     (
         ((w * scale).round() as u32).max(1),
         ((h * scale).round() as u32).max(1),
@@ -578,7 +584,7 @@ fn run_job(
             // the very first upload, which may race that setup, still lands.
             for _ in 0..30 {
                 let texture = if tier >= Tier::Full {
-                    upload_at_res(&ram.handle, ram.original_size, 1.0, true).await
+                    full_texture(&ram.handle, ram.original_size).await
                 } else {
                     let zoom = zoom_override.unwrap_or_else(|| fit_zoom(ram.original_size, view));
                     view_res_texture(source.clone(), &ram.handle, ram.original_size, zoom).await
@@ -591,6 +597,82 @@ fn run_job(
             Message::Media(MediaMessage::MintFailed { key })
         }),
     }
+}
+
+/// The Full-tier resident for a decoded still: one full-res texture when the
+/// substrate fits the device limit, else an empty tile pyramid the demand
+/// passes fill from the RAM source as the view moves.
+async fn full_texture(
+    handle: &Handle,
+    original_size: (u32, u32),
+) -> Option<crate::ui::image_surface::Keepalive> {
+    if let Handle::Rgba { width, height, .. } = handle
+        && width.max(height) > &crate::media::registry::MAX_TEXTURE_DIM
+    {
+        return Some(crate::ui::image_surface::ResidentImage::tiled((
+            *width, *height,
+        )));
+    }
+    upload_at_res(handle, original_size, 1.0, true).await
+}
+
+/// Caps concurrent tile productions. Each is one small resample, but a demand
+/// pass requests a viewport's worth at once and the resampler is itself
+/// parallel, so two at a time keeps latency low without saturating the CPU.
+static TILE_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+/// Produce and upload one tile of a tiled still. The tile is cut from the RAM
+/// substrate with the region resampler, whose border taps read the whole
+/// image, so adjacent tiles reassemble seamlessly; the finished tile uploads
+/// like any small image.
+#[expect(dead_code, reason = "fired by the tile demand pass, landing next")]
+pub(crate) fn produce_tile(
+    key: ImageKey,
+    handle: &Handle,
+    tile: crate::media::tiles::TileKey,
+) -> Task<Message> {
+    let Handle::Rgba {
+        width,
+        height,
+        pixels,
+        ..
+    } = handle
+    else {
+        return Task::none();
+    };
+    let (w, h) = (*width, *height);
+    let pixels = pixels.clone();
+    Task::future(async move {
+        let _permit = TILE_GATE.acquire().await.ok();
+        let kernel = crate::ui::image_surface::current_kernel();
+        let produced = tokio::task::spawn_blocking(move || {
+            let level = crate::media::tiles::level_size((w, h), tile.lod);
+            let (_, _, tw, th) = crate::media::tiles::tile_rect(level, tile.col, tile.row);
+            let region = crate::media::tiles::source_rect((w, h), tile);
+            let out = crate::media::resample::downscale_region(
+                pixels.as_ref(),
+                (w, h),
+                region,
+                (tw, th),
+                kernel,
+            );
+            Handle::from_rgba(tw, th, out)
+        })
+        .await
+        .ok();
+        let texture = match produced {
+            Some(tile_handle) => {
+                let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                if crate::ui::image_surface::submit_upload(tile_handle, ready_tx) {
+                    ready_rx.await.ok()
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+        Message::Media(MediaMessage::TileReady { key, tile, texture })
+    })
 }
 
 /// Produce the view-resolution texture for `zoom`. When a full-res texture is still
@@ -724,6 +806,15 @@ mod tests {
         // 4000x1000 in 800x600: width binds at 0.2 zoom -> 800x200 at 100% scaling.
         let zoom = fit_zoom((4000, 1000), Size::new(800.0, 600.0));
         assert_eq!(view_target((4000, 1000), zoom, 1.0), (800, 200));
+    }
+
+    #[test]
+    fn view_target_never_exceeds_one_texture() {
+        // A tiled-regime (uncapped) source at high zoom caps the view copy to
+        // the texture limit, aspect preserved; tiles carry the rest.
+        let max = crate::media::registry::MAX_TEXTURE_DIM;
+        assert_eq!(view_target((20000, 10000), 1.0, 1.0), (max, max / 2));
+        assert_eq!(view_target((20000, 10000), 0.1, 1.0), (2000, 1000));
     }
 
     #[test]
