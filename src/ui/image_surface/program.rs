@@ -90,8 +90,13 @@ impl ImageSurface {
         manual_zoom: bool,
     ) -> Self {
         // The texel size comes from the resident texture (a view-res copy is already
-        // smaller), falling back to the original dims for the tokenless test keepalive.
-        let tex_dims = texture.as_ref().and_then(|t| t.size()).unwrap_or(original);
+        // smaller) or a pyramid's substrate (a budget-clamped decode is smaller than
+        // the true dims), falling back to the original dims for the tokenless test
+        // keepalive.
+        let tex_dims = texture
+            .as_ref()
+            .and_then(|t| t.size().or_else(|| t.tiles().map(|set| set.original())))
+            .unwrap_or(original);
         Self {
             texture,
             original,
@@ -231,13 +236,27 @@ impl shader::Primitive for ImagePrimitive {
                 (bounds.width * scale, bounds.height * scale),
                 near_one_to_one(footprint),
             );
-            pipeline.write_uniforms(queue, dst, src, footprint, self.tex_size, self.kernel);
+            // A tiled still resolves a per-tile draw list instead of one quad;
+            // its `tex_size` is the substrate, so the footprint above already
+            // measures substrate texels per pixel.
+            if let Some(set) = self.texture.as_ref().and_then(|t| t.tiles()) {
+                pipeline.prepare_tiles(queue, set, dst, src, raw, scale, self.kernel);
+                return;
+            }
+            pipeline.clear_tiles();
+            pipeline.write_uniforms(queue, 0, dst, src, footprint, self.tex_size, self.kernel);
+        } else {
+            pipeline.clear_tiles();
         }
     }
 
     fn draw(&self, pipeline: &ImagePipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
         if let Some(texture) = &self.texture {
-            pipeline.draw_resident(render_pass, texture, self.nearest);
+            if texture.tiles().is_some() {
+                pipeline.draw_tiles(render_pass, self.nearest);
+            } else {
+                pipeline.draw_resident(render_pass, texture, self.nearest);
+            }
         }
         true
     }

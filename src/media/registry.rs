@@ -21,6 +21,10 @@ pub struct DecodeOpts {
     /// Ceiling for the decoded RGBA bytes kept in RAM. A decode past it is
     /// downscaled to fit (see [`super::regime`]).
     pub ram_budget: u64,
+    /// Whether the consumer can display past `max_dimension` through the tile
+    /// pyramid. The display path can, so its over-limit decodes keep their
+    /// full size; a thumbnail decode cannot and takes the plain cap.
+    pub tile_capable: bool,
 }
 
 impl Default for DecodeOpts {
@@ -31,6 +35,7 @@ impl Default for DecodeOpts {
             max_dimension: MAX_TEXTURE_DIM,
             ram_budget: crate::config::RamBudget::default()
                 .resolve(crate::config::total_system_ram()),
+            tile_capable: true,
         }
     }
 }

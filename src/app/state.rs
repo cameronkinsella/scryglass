@@ -184,6 +184,9 @@ pub struct Viewer {
     pub zoom: f32,
     /// Whether the user has manually adjusted zoom (scroll wheel).
     pub manual_zoom: bool,
+    /// Bumped on every zoom change, so only the settle timer of the LAST
+    /// change in a gesture fires the tile demand pass.
+    pub tile_epoch: u64,
     /// Pan offset in logical pixels (applied when image overflows viewport).
     pub pan: (f32, f32),
     /// Mouse drag state for panning.
@@ -240,6 +243,7 @@ impl Viewer {
             current_file_size: None,
             zoom: 1.0,
             manual_zoom: false,
+            tile_epoch: 0,
             pan: (0.0, 0.0),
             drag: None,
             filmstrip_scroll_x: 0.0,

@@ -523,8 +523,8 @@ impl<'de> Deserialize<'de> for RamBudget {
     }
 }
 
-/// Total physical RAM in bytes, queried once. Zero when the query fails;
-/// [`RamBudget::resolve`] treats that as no limit.
+/// Total physical RAM in bytes, queried once. Zero when the query fails,
+/// which [`RamBudget::resolve`] treats as no limit.
 pub fn total_system_ram() -> u64 {
     static TOTAL: LazyLock<u64> = LazyLock::new(|| {
         let mut system = sysinfo::System::new();

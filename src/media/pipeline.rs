@@ -89,7 +89,7 @@ pub struct Pipeline {
     /// Persistent thumbnail store, `None` when disabled by build or
     /// config. Swappable at runtime (settings toggle).
     disk: Arc<std::sync::RwLock<Option<DiskThumbs>>>,
-    /// Resolved decode RAM budget in bytes; a live config edit updates it.
+    /// Resolved decode RAM budget in bytes, updated by live config edits.
     ram_budget: Arc<AtomicU64>,
 }
 
@@ -337,6 +337,8 @@ impl Pipeline {
                     .ok_or(MediaError::Unsupported)?;
                 let opts = DecodeOpts {
                     max_dimension: super::THUMB_DIM,
+                    // A thumbnail wants the plain cap, never a full-size keep.
+                    tile_capable: false,
                     ..DecodeOpts::default()
                 };
                 match format.decode(&bytes, &opts)? {

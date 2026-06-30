@@ -10,6 +10,17 @@ use crate::ui::image_surface::Keepalive;
 
 use crate::app::state::{Session, Thumb};
 
+/// How one tile production ended.
+#[derive(Debug, Clone)]
+pub enum TileOutcome {
+    /// Uploaded and ready to install.
+    Ready(Keepalive),
+    /// Bailed before the resample: the view moved to another level.
+    Canceled,
+    /// The resample or upload failed; the next demand pass retries.
+    Failed,
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     /// A still decoded to RAM, from a store decode job. Install it in the store
@@ -28,13 +39,17 @@ pub enum Message {
         tier: Tier,
         texture: Keepalive,
     },
-    /// A produced tile of a tiled still finished uploading: install it in the
-    /// resident pyramid. `None` means production failed; the next demand pass
-    /// re-requests the tile.
+    /// A tile production finished: install it in the resident pyramid, or
+    /// release its claim.
     TileReady {
         key: ImageKey,
         tile: crate::media::tiles::TileKey,
-        texture: Option<Keepalive>,
+        outcome: TileOutcome,
+    },
+    /// A zoom gesture's settle timer fired: run the tile demand pass if no
+    /// later zoom change superseded it.
+    TilesSettled {
+        epoch: u64,
     },
     /// An upload could not reach the GPU after retries; clear the pending mark so
     /// a later pass can try again.
@@ -128,6 +143,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             let viewport = win.viewport_size;
             let zoom_mode = shared.config.zoom_mode;
             let pipeline = shared.pipeline.clone();
+            let tiled = texture.tiles().is_some();
             // Swap the shared cell; every window leasing this image now draws it.
             let outcome = shared.store.on_minted(key.clone(), tier, texture);
             // If the on-screen image is still standing in with its blur, promote it
@@ -149,7 +165,12 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                     show_loaded(viewer, &path, ram.original_size, zoom_mode, viewport);
                 }
             }
-            run_jobs(outcome.jobs, &pipeline, Lane::Current, viewport)
+            let jobs = run_jobs(outcome.jobs, &pipeline, Lane::Current, viewport);
+            if tiled {
+                // A freshly minted pyramid is empty: fill its visible set now.
+                return Task::batch([jobs, super::media_tasks::fire_tiles(win, shared)]);
+            }
+            jobs
         }
 
         Message::MintFailed { key } => {
@@ -159,17 +180,34 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             run_jobs(outcome.jobs, &pipeline, Lane::Current, viewport)
         }
 
-        Message::TileReady { key, tile, texture } => {
+        Message::TileReady { key, tile, outcome } => {
             // Install into the shared pyramid; every window leasing this image
-            // sees the tile on its next frame. A failed production is dropped
-            // here and re-requested by the next demand pass.
-            if let Some(texture) = texture
-                && let Some(resident) = shared.store.shared(&key)
+            // sees the tile on its next frame.
+            if let Some(resident) = shared.store.shared(&key)
                 && let Some(tiles) = resident.tiles()
             {
-                tiles.insert(tile, texture);
+                tiles.settle(tile);
+                match outcome {
+                    TileOutcome::Ready(texture) => tiles.insert(tile, texture),
+                    // A cancel for the level the view wants right now was
+                    // doomed by a zoom the user already undid, so re-request
+                    // it. The level guard stops cross-window ping-pong, and
+                    // a failure never re-fires, so nothing can loop.
+                    TileOutcome::Canceled if tiles.wanted_lod() == tile.lod => {
+                        return super::media_tasks::fire_tiles(win, shared);
+                    }
+                    TileOutcome::Canceled | TileOutcome::Failed => {}
+                }
             }
             Task::none()
+        }
+
+        Message::TilesSettled { epoch } => {
+            if win.viewer().is_some_and(|v| v.tile_epoch == epoch) {
+                super::media_tasks::fire_tiles(win, shared)
+            } else {
+                Task::none()
+            }
         }
 
         Message::AnimDecoded {

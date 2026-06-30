@@ -12,8 +12,21 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::config::DownscaleKernel;
 use crate::media::tiles::{TileCache, TileKey};
+use crate::ui::image_display::snap_footprint_to_unit;
 
 const UNIFORM_SIZE: u64 = 80;
+
+/// Uniform slots one frame can draw: slot 0 for the single texture (or a tile
+/// pyramid's base layer), the rest for visible tiles. The LOD floor leaves up
+/// to 2 level texels per physical pixel, so a 4K viewport can show
+/// ceil(3840*2/512)+1 x ceil(2160*2/512)+1 = 16x10 tiles, 17x11 with the
+/// demand margin. 192 covers that with headroom; a larger display degrades to
+/// the base layer past the cap.
+const UNIFORM_SLOTS: u64 = 192;
+
+/// Byte stride between slots: the WebGPU default limit for
+/// `minUniformBufferOffsetAlignment`, https://www.w3.org/TR/webgpu/#limits
+const UNIFORM_STRIDE: u64 = 256;
 
 /// Hands decoded images to the single dedicated upload thread (set up on the
 /// pipeline's first build, the only place wgpu gives us the device). One thread
@@ -91,37 +104,90 @@ impl ResidentImage {
 
     /// A fresh, empty tile pyramid for an `original`-sized still. Purely
     /// CPU-side bookkeeping: the VRAM arrives tile by tile as each one is
-    /// produced and uploaded like any small image.
-    pub fn tiled(original: (u32, u32)) -> Keepalive {
+    /// produced and uploaded like any small image. `base` is the view-quality
+    /// texture drawn stretched beneath the tiles, so a not-yet-produced tile
+    /// shows a softer image instead of a hole.
+    pub fn tiled(original: (u32, u32), base: Option<Keepalive>) -> Keepalive {
         Arc::new(ResidentImage {
             image: None,
             drop_tx: None,
             tiles: Some(TileSet {
                 original,
+                base,
                 tiles: Mutex::new(TileCache::new(MAX_CACHED_TILES)),
+                pending: Mutex::new(std::collections::HashMap::new()),
+                wanted_lod: AtomicU32::new(0),
+                draw_lod: AtomicU32::new(DRAW_UNSTAMPED),
             }),
         })
     }
 }
 
-/// Most tiles a pyramid keeps resident: a window's worth at the active level
-/// plus pan margin, matching ImageGlass 10's cache bound. Older tiles drop
-/// (freeing their VRAM) and are re-produced from the RAM source on return.
-const MAX_CACHED_TILES: usize = 100;
+/// Most tiles a pyramid keeps resident: a 4K viewport's worst-case wanted set
+/// (see [`UNIFORM_SLOTS`]) plus headroom, so a demand wave never evicts tiles
+/// it just produced. Older tiles drop (freeing their VRAM) and are re-produced
+/// from the RAM source on return.
+const MAX_CACHED_TILES: usize = 224;
 
 /// The resident form of a tiled still: its bounded tile cache plus the
 /// uncapped source size the tile grid maps. Shared cross-window inside one
-/// [`Keepalive`]; tiles stream in through the mutex as they are produced.
+/// [`Keepalive`], with tiles streaming in through the mutex as they land.
 pub struct TileSet {
     original: (u32, u32),
+    /// The view-quality texture drawn beneath the tiles, so the image is
+    /// never blank where a tile is missing.
+    base: Option<Keepalive>,
     tiles: Mutex<TileCache<Keepalive>>,
+    /// Tiles requested but not yet landed, with their claim time, so a pan or
+    /// zoom repeating its demand pass never produces the same tile twice. A
+    /// claim whose settle message was lost (its window closed mid-production)
+    /// expires rather than blocking the tile for the pyramid's lifetime.
+    pending: Mutex<std::collections::HashMap<TileKey, std::time::Instant>>,
+    /// The mip level the latest demand pass asked for. A queued production
+    /// for another level bails before its resample: a zoom that keeps moving
+    /// obsoletes whole waves of tiles, and this is what stops them from
+    /// being produced anyway.
+    wanted_lod: AtomicU32,
+    /// What the last tiled draw actually selected, stamped by `prepare_tiles`
+    /// and read by the demand pass, so production always targets the level
+    /// the real placement samples (one source of truth for scale and
+    /// rounding). Holds [`DRAW_UNSTAMPED`] before any tiled draw and
+    /// [`DRAW_BASE_ONLY`] when the base layer alone sufficed.
+    draw_lod: AtomicU32,
+}
+
+/// Most tiles one demand pass may claim: what one frame can draw.
+pub const MAX_TILE_DRAWS: usize = UNIFORM_SLOTS as usize - 1;
+
+/// `draw_lod` sentinel: no tiled draw has resolved a level yet.
+const DRAW_UNSTAMPED: u32 = u32::MAX;
+/// `draw_lod` sentinel: the last draw needed no tiles at all.
+const DRAW_BASE_ONLY: u32 = u32::MAX - 1;
+
+/// How long a tile claim blocks re-requests before it is presumed lost. Far
+/// past any real produce plus upload, so it only fires for a settle message
+/// that will never arrive.
+const CLAIM_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What the demand pass should do, read back from the last real draw.
+pub enum DrawWant {
+    /// No tiled draw has happened; the caller derives the level itself.
+    Unknown,
+    /// The base layer sufficed; no tiles are needed.
+    BaseOnly,
+    /// The draw sampled this level.
+    Level(u32),
 }
 
 impl TileSet {
     /// The uncapped source dimensions the pyramid maps.
-    #[expect(dead_code, reason = "read by the tile draw loop, landing next")]
     pub fn original(&self) -> (u32, u32) {
         self.original
+    }
+
+    /// The view-quality layer beneath the tiles.
+    pub fn base(&self) -> Option<&Keepalive> {
+        self.base.as_ref()
     }
 
     /// Install a produced tile, evicting the stalest past the cap.
@@ -132,18 +198,59 @@ impl TileSet {
     }
 
     /// The tile for `key`, freshly marked as used.
-    #[expect(dead_code, reason = "read by the tile draw loop, landing next")]
     pub fn get(&self, key: TileKey) -> Option<Keepalive> {
         self.tiles.lock().ok()?.get(key).cloned()
     }
 
-    /// Whether `key` is resident, without touching its recency.
-    #[expect(dead_code, reason = "read by the tile demand pass, landing next")]
-    pub fn contains(&self, key: TileKey) -> bool {
-        self.tiles
+    /// Claim `key` for production: true when it is neither resident nor
+    /// already in flight, marking it in flight. An expired claim (its settle
+    /// message was lost) counts as absent.
+    pub fn try_claim(&self, key: TileKey) -> bool {
+        let resident = self
+            .tiles
             .lock()
             .map(|tiles| tiles.contains(key))
+            .unwrap_or(true);
+        if resident {
+            return false;
+        }
+        self.pending
+            .lock()
+            .map(|mut pending| match pending.get(&key) {
+                Some(claimed) if claimed.elapsed() < CLAIM_TTL => false,
+                _ => {
+                    pending.insert(key, std::time::Instant::now());
+                    true
+                }
+            })
             .unwrap_or(false)
+    }
+
+    /// A production for `key` finished (either way); its claim is released.
+    pub fn settle(&self, key: TileKey) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(&key);
+        }
+    }
+
+    /// Record the level the current view wants; stale productions bail.
+    pub fn set_wanted_lod(&self, lod: u32) {
+        self.wanted_lod.store(lod, Ordering::Relaxed);
+    }
+
+    /// The level the latest demand pass asked for.
+    pub fn wanted_lod(&self) -> u32 {
+        self.wanted_lod.load(Ordering::Relaxed)
+    }
+
+    /// What the last real draw wanted, so demand and draw cannot disagree on
+    /// scale or rounding.
+    pub fn draw_want(&self) -> DrawWant {
+        match self.draw_lod.load(Ordering::Relaxed) {
+            DRAW_UNSTAMPED => DrawWant::Unknown,
+            DRAW_BASE_ONLY => DrawWant::BaseOnly,
+            lod => DrawWant::Level(lod),
+        }
     }
 }
 
@@ -190,6 +297,11 @@ pub struct ImagePipeline {
     empty_bind: wgpu::BindGroup,
     uniforms: wgpu::Buffer,
     is_srgb: bool,
+    /// The tiled draw list `prepare` resolved for this frame: each entry is a
+    /// resident tile (or the base layer) and the uniform slot holding its
+    /// rects. Holding the keepalives here keeps every tile alive through the
+    /// draw. One image primitive draws per frame, so one list suffices.
+    tile_draws: Vec<(Keepalive, u32)>,
 }
 
 struct GpuImage {
@@ -215,8 +327,11 @@ impl shader::Pipeline for ImagePipeline {
                     visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                        // A tiled draw issues one draw per tile from the same
+                        // pass, each reading its own slot of the uniform
+                        // buffer via a dynamic offset.
+                        has_dynamic_offset: true,
+                        min_binding_size: wgpu::BufferSize::new(UNIFORM_SIZE),
                     },
                     count: None,
                 },
@@ -319,7 +434,7 @@ impl shader::Pipeline for ImagePipeline {
 
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("scryglass image uniforms"),
-            size: UNIFORM_SIZE,
+            size: UNIFORM_STRIDE * UNIFORM_SLOTS,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -366,6 +481,7 @@ impl shader::Pipeline for ImagePipeline {
             empty_bind,
             uniforms,
             is_srgb: format.is_srgb(),
+            tile_draws: Vec::new(),
         }
     }
 }
@@ -374,9 +490,11 @@ impl ImagePipeline {
     /// Write the per-draw uniforms for the resident-texture draw path: the dst/src
     /// rects plus the downscale kernel and the footprint it is scaled by. Also
     /// records the kernel so an off-thread view-res render bakes with the same one.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn write_uniforms(
         &self,
         queue: &wgpu::Queue,
+        slot: u32,
         dst: [f32; 4],
         src: [f32; 4],
         footprint: [f32; 2],
@@ -389,7 +507,7 @@ impl ImagePipeline {
         let (selector, bc) = kernel.shader_params();
         queue.write_buffer(
             &self.uniforms,
-            0,
+            slot as u64 * UNIFORM_STRIDE,
             &build_uniforms(dst, src, self.is_srgb, selector, footprint, tex_size, bc),
         );
     }
@@ -423,9 +541,148 @@ impl ImagePipeline {
         };
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.empty_bind, &[]);
-        render_pass.set_bind_group(1, bind, &[]);
+        render_pass.set_bind_group(1, bind, &[0]);
         render_pass.draw(0..6, 0..1);
     }
+
+    /// Resolve this frame's draw list for a tiled still: the base layer first
+    /// (stretched under everything, so a missing tile shows the view-quality
+    /// copy instead of a hole), then every resident visible tile at the
+    /// zoom's level, each in its own uniform slot. Stamps what it selected on
+    /// the set, making the draw the single authority the demand pass follows.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_tiles(
+        &mut self,
+        queue: &wgpu::Queue,
+        set: &TileSet,
+        dst: [f32; 4],
+        src: [f32; 4],
+        raw_footprint: [f32; 2],
+        scale: f32,
+        kernel: DownscaleKernel,
+    ) {
+        use crate::media::tiles;
+        self.tile_draws.clear();
+        let original = set.original();
+        // Texels per physical pixel of the substrate; its inverse is the
+        // physical zoom the LOD is chosen for.
+        let footprint = [raw_footprint[0] / scale, raw_footprint[1] / scale];
+        if let Some(base) = set.base()
+            && let Some((bw, bh)) = base.size()
+        {
+            let base_fp = [
+                footprint[0] * bw as f32 / original.0 as f32,
+                footprint[1] * bh as f32 / original.1 as f32,
+            ];
+            self.write_uniforms(
+                queue,
+                0,
+                dst,
+                src,
+                [
+                    snap_footprint_to_unit(base_fp[0]),
+                    snap_footprint_to_unit(base_fp[1]),
+                ],
+                [bw as f32, bh as f32],
+                kernel,
+            );
+            self.tile_draws.push((base.clone(), 0));
+            // The base alone is the whole answer while it still has a texel
+            // per display pixel; tiles take over past its resolution.
+            if base_fp[0] >= 1.0 && base_fp[1] >= 1.0 {
+                set.draw_lod.store(DRAW_BASE_ONLY, Ordering::Relaxed);
+                return;
+            }
+        }
+        let lod = tiles::lod_for_zoom(1.0 / footprint[0].max(footprint[1]));
+        set.draw_lod.store(lod, Ordering::Relaxed);
+        let level = tiles::level_size(original, lod);
+        let tile_fp = [
+            snap_footprint_to_unit(footprint[0] * level.0 as f32 / original.0 as f32),
+            snap_footprint_to_unit(footprint[1] * level.1 as f32 / original.1 as f32),
+        ];
+        let mut slot = 1u32;
+        for key in tiles::visible_tiles(src, original, lod) {
+            if u64::from(slot) >= UNIFORM_SLOTS {
+                break;
+            }
+            let Some(tile) = set.get(key) else {
+                continue;
+            };
+            let Some(tex) = tile.size() else {
+                continue;
+            };
+            let (tdst, tsrc) = tile_placement(dst, src, level, key, tex);
+            self.write_uniforms(
+                queue,
+                slot,
+                tdst,
+                tsrc,
+                tile_fp,
+                [tex.0 as f32, tex.1 as f32],
+                kernel,
+            );
+            self.tile_draws.push((tile, slot));
+            slot += 1;
+        }
+    }
+
+    /// Release the previous frame's tile draw list. Called by the non-tiled
+    /// prepare paths, else the last tiled image's tiles stay pinned in VRAM
+    /// after navigating away.
+    pub(super) fn clear_tiles(&mut self) {
+        self.tile_draws.clear();
+    }
+
+    /// Draw the list `prepare_tiles` resolved: base first, tiles over it.
+    pub(super) fn draw_tiles(&self, render_pass: &mut wgpu::RenderPass<'_>, nearest: bool) {
+        if self.tile_draws.is_empty() {
+            return;
+        }
+        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_bind_group(0, &self.empty_bind, &[]);
+        for (tile, slot) in &self.tile_draws {
+            let Some(image) = tile.image.as_ref() else {
+                continue;
+            };
+            let bind = if nearest {
+                &image.bind_nearest
+            } else {
+                &image.bind_linear
+            };
+            render_pass.set_bind_group(1, bind, &[*slot * UNIFORM_STRIDE as u32]);
+            render_pass.draw(0..6, 0..1);
+        }
+    }
+}
+
+/// Where one tile lands on screen and what part of its padded texture shows:
+/// the tile's payload rectangle mapped from level space through the image's
+/// placement, and the source rect inset past the gutter.
+fn tile_placement(
+    dst: [f32; 4],
+    src: [f32; 4],
+    level: (u32, u32),
+    key: crate::media::tiles::TileKey,
+    tex: (u32, u32),
+) -> ([f32; 4], [f32; 4]) {
+    use crate::media::tiles::GUTTER;
+    let (x, y, w, h) = crate::media::tiles::tile_rect(level, key.col, key.row);
+    // The payload's rect in image UV, then through the placement's linear
+    // src -> dst map. Adjacent tiles share exact edge coordinates, so the
+    // rasterizer leaves no cracks.
+    let (lw, lh) = (level.0 as f32, level.1 as f32);
+    let map = |v: f32, s0: f32, s1: f32, d0: f32, d1: f32| d0 + (v - s0) / (s1 - s0) * (d1 - d0);
+    let tdst = [
+        map(x as f32 / lw, src[0], src[2], dst[0], dst[2]),
+        map(y as f32 / lh, src[1], src[3], dst[1], dst[3]),
+        map((x + w) as f32 / lw, src[0], src[2], dst[0], dst[2]),
+        map((y + h) as f32 / lh, src[1], src[3], dst[1], dst[3]),
+    ];
+    let (tw, th) = (tex.0 as f32, tex.1 as f32);
+    let g = GUTTER as f32;
+    let tsrc = [g / tw, g / th, (g + w as f32) / tw, (g + h as f32) / th];
+    (tdst, tsrc)
 }
 
 /// Create an empty RGBA texture sized `width` x `height`. `render` adds the
@@ -479,7 +736,12 @@ fn bind_texture(
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: uniforms.as_entire_binding(),
+                        // One slot's worth; the dynamic offset picks which.
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: uniforms,
+                            offset: 0,
+                            size: wgpu::BufferSize::new(UNIFORM_SIZE),
+                        }),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -742,7 +1004,11 @@ fn spawn_upload_thread(
                             entries: &[
                                 wgpu::BindGroupEntry {
                                     binding: 0,
-                                    resource: render_uniforms.as_entire_binding(),
+                                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                        buffer: &render_uniforms,
+                                        offset: 0,
+                                        size: wgpu::BufferSize::new(UNIFORM_SIZE),
+                                    }),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 1,
@@ -776,7 +1042,7 @@ fn spawn_upload_thread(
                             });
                             pass.set_pipeline(&render_pipeline);
                             pass.set_bind_group(0, &empty_bind, &[]);
-                            pass.set_bind_group(1, &in_bind, &[]);
+                            pass.set_bind_group(1, &in_bind, &[0]);
                             pass.draw(0..6, 0..1);
                         }
                         let submission = queue.submit([encoder.finish()]);

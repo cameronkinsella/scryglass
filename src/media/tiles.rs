@@ -1,14 +1,7 @@
 //! Tile and LOD-pyramid math for stills too large for one texture: the image
-//! is drawn as a grid of small tiles cut from a mip level chosen by zoom, so
-//! VRAM scales with the window, not the image. Pure math only; producing and
+//! is drawn as a grid of tiles cut from a mip level chosen by zoom, so VRAM
+//! scales with the window, not the image. Pure math only. Producing and
 //! drawing tiles lives with the store and the surface.
-//!
-//! Modeled on ImageGlass 10's `MipmapTileCache` (512 px tiles, mip level
-//! `clamp(log2(1/zoom), 0, 6)`, bounded tile cache, visible tiles only):
-//! https://github.com/d2phap/ImageGlass
-
-// Remove once the tile store and draw loop consume this module.
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 
@@ -61,17 +54,29 @@ pub fn tile_rect(level: (u32, u32), col: u32, row: u32) -> (u32, u32, u32, u32) 
     (x, y, TILE_SIZE.min(level.0 - x), TILE_SIZE.min(level.1 - y))
 }
 
-/// The original-resolution rectangle a tile is produced from: its level rect
-/// scaled back up, clamped to the image. Downscaling this region by `2^lod`
-/// yields the tile's pixels.
-pub fn source_rect(original: (u32, u32), key: TileKey) -> (u32, u32, u32, u32) {
+/// Gutter of duplicated neighbor pixels around each tile texture. Near a quad's
+/// edges the display kernel taps past its source rect (at most `radius x
+/// footprint` plus a bilinear texel, about 7 with Lanczos at the 2x residual
+/// the LOD floor allows). Without true neighbor data those taps clamp to the
+/// tile border and seam. The standard texture-atlas padding fix:
+/// https://download.nvidia.com/developer/NVTextureSuite/Atlas_Tools/Texture_Atlas_Whitepaper.pdf
+pub const GUTTER: u32 = 8;
+
+/// What to cut and upload for one tile: the gutter-padded source rectangle
+/// (signed, since padding may reach past the image, where sampling clamps to
+/// the edge exactly like a single texture would) and the padded output size.
+/// The tile's payload sits [`GUTTER`] deep inside on every side.
+pub fn production(original: (u32, u32), key: TileKey) -> ((i64, i64, u32, u32), (u32, u32)) {
     let level = level_size(original, key.lod);
     let (x, y, w, h) = tile_rect(level, key.col, key.row);
-    let sx = (x as u64) << key.lod;
-    let sy = (y as u64) << key.lod;
-    let sw = ((w as u64) << key.lod).min(original.0 as u64 - sx);
-    let sh = ((h as u64) << key.lod).min(original.1 as u64 - sy);
-    (sx as u32, sy as u32, sw as u32, sh as u32)
+    let pad = |v: u32| ((v + 2 * GUTTER) as u64) << key.lod;
+    let region = (
+        ((x as i64) - GUTTER as i64) << key.lod,
+        ((y as i64) - GUTTER as i64) << key.lod,
+        pad(w) as u32,
+        pad(h) as u32,
+    );
+    (region, (w + 2 * GUTTER, h + 2 * GUTTER))
 }
 
 /// The tiles overlapping a visible region, given as the normalized source
@@ -91,7 +96,7 @@ pub fn visible_tiles(
             return 0..0;
         }
         let first = (px0 as u32) / TILE_SIZE;
-        let last = (px1.ceil() as u32).div_ceil(TILE_SIZE).min(count);
+        let last = (px1 as u32).div_ceil(TILE_SIZE).min(count);
         first..last
     };
     let col_span = span(src[0], src[2], level.0, cols);
@@ -117,12 +122,9 @@ impl<T> TileCache<T> {
         }
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
     }
 
     /// Whether `key` is resident, without touching its recency.
@@ -154,11 +156,6 @@ impl<T> TileCache<T> {
         {
             self.entries.remove(&stalest);
         }
-    }
-
-    /// Drop every cached tile (the pyramid's source changed or went away).
-    pub fn clear(&mut self) {
-        self.entries.clear();
     }
 }
 
@@ -201,23 +198,28 @@ mod tests {
     }
 
     #[test]
-    fn source_rect_scales_back_to_the_original() {
+    fn production_pads_the_source_region_by_the_gutter() {
         let original = (10000, 5000);
-        let key = TileKey {
-            lod: 2,
-            col: 4,
-            row: 2,
-        };
-        // Level 2 is 2500x1250; its edge tile (2048,1024,452,226) maps to
-        // the original at 4x.
-        assert_eq!(source_rect(original, key), (8192, 4096, 1808, 904));
-        // A full interior tile covers exactly 2048 original pixels.
+        // Level 2 is 2500x1250. The first tile's 512x512 payload plus an
+        // 8 px gutter is a 528x528 output cut from a 4x padded region that
+        // reaches 32 px past the top-left edge (sampling clamps there).
         let key = TileKey {
             lod: 2,
             col: 0,
             row: 0,
         };
-        assert_eq!(source_rect(original, key), (0, 0, 2048, 2048));
+        let (region, out) = production(original, key);
+        assert_eq!(out, (528, 528));
+        assert_eq!(region, (-32, -32, 2112, 2112));
+        // The edge tile (452x226 payload) pads the same way.
+        let key = TileKey {
+            lod: 2,
+            col: 4,
+            row: 2,
+        };
+        let (region, out) = production(original, key);
+        assert_eq!(out, (468, 242));
+        assert_eq!(region, (8192 - 32, 4096 - 32, 1872, 968));
     }
 
     #[test]

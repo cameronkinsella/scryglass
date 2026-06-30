@@ -142,17 +142,47 @@ pub(crate) fn downscale(
 /// Downscale one `region` (x, y, w, h in source pixels) of `pixels` to `target`,
 /// producing a tile of the same downscale a whole-image pass would give. Taps near
 /// the region's border sample the full image, not a crop, so adjacent tiles
-/// reassemble without seams and no multi-gigabyte crop is ever copied.
+/// reassemble without seams and no multi-gigabyte crop is ever copied. The origin
+/// is signed: a gutter-padded region may start past the image edge, where samples
+/// clamp exactly as a single texture's edge would.
 pub(crate) fn downscale_region(
     pixels: &[u8],
     src: (u32, u32),
-    region: (u32, u32, u32, u32),
+    region: (i64, i64, u32, u32),
     target: (u32, u32),
     kernel: DownscaleKernel,
 ) -> Vec<u8> {
     let (sw, sh) = (src.0 as usize, src.1 as usize);
     let (tw, th) = (target.0.max(1) as usize, target.1.max(1) as usize);
     let (selector, bc) = kernel.shader_params();
+
+    // A native-size cut (a level-0 tile) is an exact clamped copy, mirroring
+    // the shader's collapse of a unit footprint to one exact tap: no kernel
+    // softening at 100 percent, and no kernel cost for the most common tiles.
+    // Interior columns are one straight memcpy per row. Only the gutter
+    // columns past the image edge replicate pixel by pixel.
+    if region.2 as usize == tw && region.3 as usize == th {
+        let mut out = vec![0u8; tw * th * 4];
+        let x0 = region.0;
+        let left = (-x0).clamp(0, tw as i64) as usize;
+        let in_end = (sw as i64 - x0).clamp(left as i64, tw as i64) as usize;
+        for (oy, row) in out.chunks_mut(tw * 4).enumerate() {
+            let sy = (region.1 + oy as i64).clamp(0, sh as i64 - 1) as usize;
+            let src_row = &pixels[sy * sw * 4..(sy + 1) * sw * 4];
+            for px in row[..left * 4].chunks_mut(4) {
+                px.copy_from_slice(&src_row[..4]);
+            }
+            if in_end > left {
+                let sx = (x0 + left as i64) as usize;
+                row[left * 4..in_end * 4]
+                    .copy_from_slice(&src_row[sx * 4..(sx + in_end - left) * 4]);
+            }
+            for px in row[in_end * 4..].chunks_mut(4) {
+                px.copy_from_slice(&src_row[(sw - 1) * 4..]);
+            }
+        }
+        return out;
+    }
 
     // The region's frame in full-image UV: an output texel at region UV `v`
     // sits at `off + v * span` of the image, and a tap offset in region UV
@@ -194,7 +224,10 @@ pub(crate) fn downscale_region(
     // The kernel is separable, so the grid's weight sum is the product of the axes'.
     let wsum: f32 =
         taps_x.iter().map(|t| t.w).sum::<f32>() * taps_y.iter().map(|t| t.w).sum::<f32>();
-    let lut = SrgbLut::new();
+    // Built once: tile production calls this per tile, and the table is a
+    // constant.
+    static SRGB_LUT: std::sync::LazyLock<SrgbLut> = std::sync::LazyLock::new(SrgbLut::new);
+    let lut = &*SRGB_LUT;
 
     out.par_chunks_mut(tw * 4)
         .enumerate()
@@ -317,6 +350,64 @@ mod tests {
             let whole = downscale(&src, (32, 24), (11, 7), kernel);
             let region = downscale_region(&src, (32, 24), (0, 0, 32, 24), (11, 7), kernel);
             assert_eq!(whole, region, "{kernel:?}");
+        }
+    }
+
+    #[test]
+    fn a_native_size_region_is_an_exact_clamped_copy() {
+        // A level-0 tile must be the source bytes themselves, with reads past
+        // the image edge replicating it, for every kernel.
+        let src = gradient(16, 12);
+        for kernel in KERNELS {
+            let out = downscale_region(&src, (16, 12), (4, 3, 8, 6), (8, 6), kernel);
+            for row in 0..6 {
+                let want = &src[((3 + row) * 16 + 4) * 4..((3 + row) * 16 + 12) * 4];
+                assert_eq!(&out[row * 8 * 4..(row + 1) * 8 * 4], want, "{kernel:?}");
+            }
+            // A gutter reaching past the top-left clamps to the edge texel.
+            let out = downscale_region(&src, (16, 12), (-2, -2, 4, 4), (4, 4), kernel);
+            assert_eq!(&out[..4], &src[..4], "{kernel:?} corner");
+            assert_eq!(&out[4..8], &src[..4], "{kernel:?} clamped x");
+        }
+    }
+
+    #[test]
+    fn a_padded_region_strips_to_the_unpadded_result() {
+        // A tile's gutter must not disturb its payload: pad the region by one
+        // output texel's worth of source (footprint 2), produce, strip the
+        // ring, and the payload matches the unpadded tile byte for byte.
+        let src = gradient(40, 40);
+        for kernel in KERNELS {
+            let plain = downscale_region(&src, (40, 40), (8, 8, 24, 24), (12, 12), kernel);
+            let padded = downscale_region(&src, (40, 40), (6, 6, 28, 28), (14, 14), kernel);
+            for row in 0..12 {
+                let inner = &padded[((row + 1) * 14 + 1) * 4..((row + 1) * 14 + 13) * 4];
+                assert_eq!(
+                    inner,
+                    &plain[row * 12 * 4..(row + 1) * 12 * 4],
+                    "{kernel:?} row {row}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_region_past_the_edge_clamps_like_a_border() {
+        // A padded region reaching outside the image must replicate the edge,
+        // matching what a single texture's clamp-to-edge sampling would show.
+        let src = solid(16, 16, [30, 60, 90, 255]);
+        let out = downscale_region(
+            &src,
+            (16, 16),
+            (-8, -8, 24, 24),
+            (12, 12),
+            DownscaleKernel::Mitchell,
+        );
+        let want: [i32; 4] = [30, 60, 90, 255];
+        for px in out.chunks(4) {
+            for ch in 0..4 {
+                assert!((px[ch] as i32 - want[ch]).abs() <= 1);
+            }
         }
     }
 

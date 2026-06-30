@@ -75,8 +75,8 @@ static RESIZE_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2
 /// neighbor targets its fit zoom, since it is shown fit when navigated to.
 pub(crate) fn view_target(original: (u32, u32), zoom: f32, scale_factor: f32) -> (u32, u32) {
     let (w, h) = (original.0.max(1) as f32, original.1.max(1) as f32);
-    // A tiled-regime source is larger than one texture, and the view copy
-    // must always fit one; past this cap the tile pyramid carries the zoom.
+    // The view copy must always fit one texture. Past this cap the tile
+    // pyramid carries the zoom.
     let max = crate::media::registry::MAX_TEXTURE_DIM as f32;
     let scale = (zoom * scale_factor.max(1.0))
         .clamp(0.0, 1.0)
@@ -583,10 +583,10 @@ fn run_job(
             // The upload thread is built by the warmup surface; retry briefly so
             // the very first upload, which may race that setup, still lands.
             for _ in 0..30 {
+                let zoom = zoom_override.unwrap_or_else(|| fit_zoom(ram.original_size, view));
                 let texture = if tier >= Tier::Full {
-                    full_texture(&ram.handle, ram.original_size).await
+                    full_texture(&ram.handle, ram.original_size, source.clone(), zoom).await
                 } else {
-                    let zoom = zoom_override.unwrap_or_else(|| fit_zoom(ram.original_size, view));
                     view_res_texture(source.clone(), &ram.handle, ram.original_size, zoom).await
                 };
                 if let Some(texture) = texture {
@@ -600,18 +600,30 @@ fn run_job(
 }
 
 /// The Full-tier resident for a decoded still: one full-res texture when the
-/// substrate fits the device limit, else an empty tile pyramid the demand
-/// passes fill from the RAM source as the view moves.
+/// substrate fits the device limit, else a tile pyramid the demand passes
+/// fill from the RAM source as the view moves. The pyramid keeps a
+/// view-quality base layer beneath its tiles (the texture it is promoted
+/// from, or one derived here), so it is never blank while tiles arrive.
 async fn full_texture(
     handle: &Handle,
     original_size: (u32, u32),
+    source: Option<crate::ui::image_surface::Keepalive>,
+    zoom: f32,
 ) -> Option<crate::ui::image_surface::Keepalive> {
     if let Handle::Rgba { width, height, .. } = handle
         && width.max(height) > &crate::media::registry::MAX_TEXTURE_DIM
     {
-        return Some(crate::ui::image_surface::ResidentImage::tiled((
-            *width, *height,
-        )));
+        // A failed base upload fails the mint, so the caller's retry loop
+        // covers the upload-thread warmup race and a pyramid is never minted
+        // without its never-blank layer.
+        let base = match source {
+            Some(view) => view,
+            None => upload_at_res(handle, original_size, zoom, false).await?,
+        };
+        return Some(crate::ui::image_surface::ResidentImage::tiled(
+            (*width, *height),
+            Some(base),
+        ));
     }
     upload_at_res(handle, original_size, 1.0, true).await
 }
@@ -621,14 +633,103 @@ async fn full_texture(
 /// parallel, so two at a time keeps latency low without saturating the CPU.
 static TILE_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
+/// Request the tiles a tiled on-screen still is missing for its current view:
+/// the visible set at the zoom's level, inflated half a tile for pan headroom.
+/// A no-op for ordinary stills and for views whose tiles are all resident or
+/// in flight, so it is cheap to call after any view change.
+pub(crate) fn fire_tiles(win: &Window, shared: &Shared) -> Task<Message> {
+    use crate::media::tiles;
+    use crate::ui::image_surface::DrawWant;
+    let Some(viewer) = win.viewer() else {
+        return Task::none();
+    };
+    // Only a still past the texture limit can be tiled: a cheap gate, so the
+    // per-message calls for ordinary images cost no allocation or lookup.
+    let true_size = match viewer.displayed.original_size() {
+        Some(size) if size.0.max(size.1) > crate::media::registry::MAX_TEXTURE_DIM => size,
+        _ => return Task::none(),
+    };
+    let Some(path) = viewer.displayed_path.as_ref() else {
+        return Task::none();
+    };
+    let key = ImageKey::new(&viewer.source, path);
+    let Some(resident) = shared.store.shared(&key) else {
+        return Task::none();
+    };
+    let Some(set) = resident.tiles() else {
+        return Task::none();
+    };
+    let Some(ram) = shared.store.ram(&key) else {
+        return Task::none();
+    };
+    let original = set.original();
+    let viewport = win.viewport_size;
+    let zoom = if viewer.manual_zoom {
+        viewer.zoom
+    } else {
+        compute_zoom(shared.config.zoom_mode, true_size.0, true_size.1, viewport)
+    };
+    // The draw is the authority on the level (it knows the real placement,
+    // scale, and base coverage); before the first tiled draw, derive it the
+    // same way in substrate texels (a budget-clamped substrate is smaller
+    // than the displayed size, so the zoom converts).
+    let lod = match set.draw_want() {
+        DrawWant::BaseOnly => return Task::none(),
+        DrawWant::Level(lod) => lod,
+        DrawWant::Unknown => {
+            let scale = crate::ui::image_surface::current_scale_factor().max(1.0);
+            let substrate_zoom = zoom * true_size.0 as f32 / original.0 as f32;
+            if let Some((bw, bh)) = set.base().and_then(|base| base.size())
+                && bw as f32 >= original.0 as f32 * substrate_zoom * scale
+                && bh as f32 >= original.1 as f32 * substrate_zoom * scale
+            {
+                return Task::none();
+            }
+            tiles::lod_for_zoom(substrate_zoom * scale)
+        }
+    };
+    // The placement geometry runs in displayed coordinates, like the draw's.
+    let Some((_, src)) = crate::ui::image_display::display_geometry(
+        zoom,
+        viewer.pan,
+        (viewport.width, viewport.height),
+        true_size,
+    ) else {
+        return Task::none();
+    };
+    let level = tiles::level_size(original, lod);
+    // Queued productions for any other level bail once this is stored.
+    set.set_wanted_lod(lod);
+    // Half a tile of pan margin on every side.
+    let margin = (
+        tiles::TILE_SIZE as f32 / (2.0 * level.0 as f32),
+        tiles::TILE_SIZE as f32 / (2.0 * level.1 as f32),
+    );
+    let wanted = [
+        src[0] - margin.0,
+        src[1] - margin.1,
+        src[2] + margin.0,
+        src[3] + margin.1,
+    ];
+    // Claims are capped at what one frame can draw, so a display larger than
+    // the slot budget degrades to the base layer instead of producing and
+    // evicting tiles in a loop.
+    let jobs: Vec<Task<Message>> = tiles::visible_tiles(wanted, original, lod)
+        .filter(|tile| set.try_claim(*tile))
+        .take(crate::ui::image_surface::MAX_TILE_DRAWS)
+        .map(|tile| produce_tile(key.clone(), &ram.handle, resident.clone(), tile))
+        .collect();
+    Task::batch(jobs)
+}
+
 /// Produce and upload one tile of a tiled still. The tile is cut from the RAM
 /// substrate with the region resampler, whose border taps read the whole
 /// image, so adjacent tiles reassemble seamlessly; the finished tile uploads
 /// like any small image.
-#[expect(dead_code, reason = "fired by the tile demand pass, landing next")]
 pub(crate) fn produce_tile(
     key: ImageKey,
     handle: &Handle,
+    pyramid: crate::ui::image_surface::Keepalive,
     tile: crate::media::tiles::TileKey,
 ) -> Task<Message> {
     let Handle::Rgba {
@@ -644,11 +745,25 @@ pub(crate) fn produce_tile(
     let pixels = pixels.clone();
     Task::future(async move {
         let _permit = TILE_GATE.acquire().await.ok();
+        // The view may have crossed to another mip level while this sat in
+        // the queue (a stutter of zooms claims a wave per rest). Bail before
+        // the expensive resample. The cancel releases the claim so a later
+        // pass at this level can re-request it.
+        if pyramid
+            .tiles()
+            .is_none_or(|set| set.wanted_lod() != tile.lod)
+        {
+            return Message::Media(MediaMessage::TileReady {
+                key,
+                tile,
+                outcome: crate::app::update::media::TileOutcome::Canceled,
+            });
+        }
         let kernel = crate::ui::image_surface::current_kernel();
         let produced = tokio::task::spawn_blocking(move || {
-            let level = crate::media::tiles::level_size((w, h), tile.lod);
-            let (_, _, tw, th) = crate::media::tiles::tile_rect(level, tile.col, tile.row);
-            let region = crate::media::tiles::source_rect((w, h), tile);
+            // Gutter-padded: the payload sits GUTTER deep inside, so the
+            // display kernel's edge taps read true neighbor pixels.
+            let (region, (tw, th)) = crate::media::tiles::production((w, h), tile);
             let out = crate::media::resample::downscale_region(
                 pixels.as_ref(),
                 (w, h),
@@ -660,18 +775,21 @@ pub(crate) fn produce_tile(
         })
         .await
         .ok();
-        let texture = match produced {
+        use crate::app::update::media::TileOutcome;
+        let outcome = match produced {
             Some(tile_handle) => {
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 if crate::ui::image_surface::submit_upload(tile_handle, ready_tx) {
-                    ready_rx.await.ok()
+                    ready_rx
+                        .await
+                        .map_or(TileOutcome::Failed, TileOutcome::Ready)
                 } else {
-                    None
+                    TileOutcome::Failed
                 }
             }
-            None => None,
+            None => TileOutcome::Failed,
         };
-        Message::Media(MediaMessage::TileReady { key, tile, texture })
+        Message::Media(MediaMessage::TileReady { key, tile, outcome })
     })
 }
 

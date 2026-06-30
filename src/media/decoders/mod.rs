@@ -27,7 +27,12 @@ use crate::media::registry::DecodeOpts;
 pub(crate) fn finish(img: DynamicImage, opts: &DecodeOpts) -> DecodedImage {
     let original_size = (img.width(), img.height());
 
-    let img = match regime::decode_target(original_size, opts.max_dimension, opts.ram_budget) {
+    let target = if opts.tile_capable {
+        regime::decode_target(original_size, opts.max_dimension, opts.ram_budget)
+    } else {
+        regime::fit_within(original_size, opts.max_dimension)
+    };
+    let img = match target {
         // Full variable-width support, so any reduction ratio stays alias-free.
         Some((w, h)) => img.resize_exact(w, h, FilterType::CatmullRom),
         None => img,

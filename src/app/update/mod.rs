@@ -27,8 +27,8 @@ pub(crate) use file_ops::{
     copy_bitmap, copy_rgba_bitmap, file_op_target, fire_delete, purge_disk_thumb, validate_rename,
 };
 pub(crate) use media_tasks::{
-    fire_exif, fire_load, fire_prefetch, fire_rotate, fire_thumbnailer, run_jobs, run_jobs_at,
-    show_loaded, show_placeholder, try_start_shared_anim,
+    fire_exif, fire_load, fire_prefetch, fire_rotate, fire_thumbnailer, fire_tiles, run_jobs,
+    run_jobs_at, show_loaded, show_placeholder, try_start_shared_anim,
 };
 pub(crate) use navigation::open_path;
 pub(crate) use navigation::{
@@ -109,7 +109,7 @@ fn route(app: &mut App, envelope: Envelope) -> Task<Envelope> {
         // config (the app's own save tripping the watcher); otherwise apply it.
         Envelope::ConfigReloaded(config) => {
             if *config != app.shared.config {
-                apply_config(app, *config);
+                return apply_config(app, *config);
             }
             Task::none()
         }
@@ -123,7 +123,7 @@ fn route(app: &mut App, envelope: Envelope) -> Task<Envelope> {
 /// config at render), recompute every viewport (chrome/zoom-mode changes shift
 /// it), and let the decay tiers pick up the new values on their next pass. Window
 /// geometry only takes effect on the next window.
-fn apply_config(app: &mut App, config: AppConfig) {
+fn apply_config(app: &mut App, config: AppConfig) -> Task<Envelope> {
     app.shared.pipeline.set_ram_budget(
         config
             .resource
@@ -131,9 +131,13 @@ fn apply_config(app: &mut App, config: AppConfig) {
             .resolve(crate::config::total_system_ram()),
     );
     app.shared.config = config;
-    for win in app.windows.values_mut() {
+    let mut tasks = Vec::new();
+    for (id, win) in app.windows.iter_mut() {
         super::recalc_viewport(win, &app.shared);
+        // A chrome or zoom-mode change moves the placement, like a resize.
+        tasks.push(Envelope::wrap(*id, fire_tiles(win, &app.shared)));
     }
+    Task::batch(tasks)
 }
 
 /// Warn that a live config edit no longer parses, on the focused window (or any

@@ -41,7 +41,8 @@ use iced::time::Instant;
 use crate::app::state::{Direction, DisplayedImage, DragState};
 use crate::app::update::window::Message as WindowMessage;
 use crate::app::update::{
-    NavTarget, complete_navigation, fire_exif, fire_rotate, navigate, save_config, scrub_to,
+    NavTarget, complete_navigation, fire_exif, fire_rotate, navigate, push_toast, save_config,
+    scrub_to,
 };
 use crate::app::viewer_math::{
     clamp_pan, compute_zoom, nudge_zoom_percent, pan_for_zoom_toward_cursor,
@@ -49,8 +50,33 @@ use crate::app::viewer_math::{
 use crate::app::{
     Message as AppMessage, Shared, Window, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, recalc_viewport,
 };
+use crate::components::toasts::ToastKind;
+use crate::media::store::ImageKey;
 
 pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) -> Task<AppMessage> {
+    let before = win.viewer().map(|v| v.zoom);
+    let task = update_view(win, shared, message);
+    // A pan streams a tiled still's missing tiles immediately. A zoom change
+    // crosses mip levels, so its demand instead waits for the gesture to
+    // rest, never producing soon-obsolete tiles at intermediate levels.
+    let tiles = match win.viewer_mut() {
+        Some(viewer) if before != Some(viewer.zoom) => {
+            viewer.tile_epoch += 1;
+            let epoch = viewer.tile_epoch;
+            Task::future(async move {
+                // Rest threshold: two notches of a typical mouse-wheel repeat
+                // still count as one gesture, a deliberate stop does not.
+                tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+                AppMessage::Media(crate::app::MediaMessage::TilesSettled { epoch })
+            })
+        }
+        Some(_) => crate::app::update::fire_tiles(win, shared),
+        None => Task::none(),
+    };
+    Task::batch([task, tiles])
+}
+
+fn update_view(win: &mut Window, shared: &mut Shared, message: Message) -> Task<AppMessage> {
     match message {
         Message::Next => {
             let Some(viewer) = win.viewer_mut() else {
@@ -357,12 +383,31 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             update(win, shared, repeat)
         }
         Message::Rotate(turns) => {
-            let Some(viewer) = win.viewer_mut() else {
+            let Some(viewer) = win.viewer() else {
                 return Task::none();
             };
             if !matches!(viewer.displayed, DisplayedImage::Full { .. }) {
                 return Task::none();
             }
+            // A tiled still has no single texture to re-upload rotated, so
+            // rotation is refused instead of drawing the pyramid distorted.
+            let tiled = viewer
+                .displayed_path
+                .as_ref()
+                .map(|path| ImageKey::new(&viewer.source, path))
+                .and_then(|key| shared.store.shared(&key))
+                .is_some_and(|resident| resident.tiles().is_some());
+            if tiled {
+                return push_toast(
+                    win,
+                    shared,
+                    ToastKind::Info,
+                    "This image is too large to rotate.".into(),
+                );
+            }
+            let Some(viewer) = win.viewer_mut() else {
+                return Task::none();
+            };
             viewer.rotation = (viewer.rotation + turns) % 4;
             fire_rotate(viewer, &shared.store)
         }

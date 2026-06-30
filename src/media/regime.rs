@@ -11,9 +11,8 @@ pub const BYTES_PER_PIXEL: u64 = 4;
 pub enum Regime {
     /// Fits a single texture: fully resident, factor-aware sampled.
     Resident,
-    /// Too large for one texture but decodes within the RAM budget. Will be
-    /// tiled from its RAM source; until tiling lands it is capped to the
-    /// texture limit like a `Resident` image.
+    /// Too large for one texture but decodes within the RAM budget: kept at
+    /// full size and displayed through the tile pyramid.
     Tiled,
     /// Decoding at full size would exceed the RAM budget: decode-downscaled
     /// to fit, then treated as one of the other two.
@@ -21,7 +20,7 @@ pub enum Regime {
 }
 
 /// Classify from header dimensions. The `Resident` test is per-side (the
-/// texture limit binds each dimension); the `Clamped` test is total bytes
+/// texture limit binds each dimension). The `Clamped` test is total bytes
 /// (RAM does not care about shape). A `Resident` image is never `Clamped`:
 /// at the 8192 cap it decodes to at most 268 MB, which the budget dwarfs.
 pub fn classify(size: (u32, u32), texture_max: u32, ram_budget: u64) -> Regime {
@@ -40,23 +39,36 @@ pub fn decoded_bytes(size: (u32, u32)) -> u64 {
     size.0 as u64 * size.1 as u64 * BYTES_PER_PIXEL
 }
 
+/// The plain dimension cap for a consumer that cannot tile (a thumbnail
+/// decode): the largest aspect-preserving fit within `max` per side, or
+/// `None` when it already fits.
+pub fn fit_within(size: (u32, u32), max: u32) -> Option<(u32, u32)> {
+    let (w, h) = size;
+    if w.max(h) <= max {
+        return None;
+    }
+    let scale = max as f64 / w.max(h) as f64;
+    Some((
+        (((w as f64) * scale).floor() as u32).max(1),
+        (((h as f64) * scale).floor() as u32).max(1),
+    ))
+}
+
 /// The size an oversized decode is reduced to, or `None` to keep it as is.
-/// One aspect-preserving target satisfying both limits at once: the RAM
-/// budget (`Clamped`) and, until tiling lands, the per-side texture limit.
+/// Only a `Clamped` decode is reduced, to the largest aspect-preserving size
+/// within the RAM budget.
 pub fn decode_target(size: (u32, u32), texture_max: u32, ram_budget: u64) -> Option<(u32, u32)> {
     let (w, h) = size;
-    let mut scale: f64 = 1.0;
-    match classify(size, texture_max, ram_budget) {
+    let scale = match classify(size, texture_max, ram_budget) {
         Regime::Resident => return None,
-        Regime::Tiled => {}
+        // Kept at full size: displayed through the tile pyramid.
+        Regime::Tiled => return None,
         Regime::Clamped => {
             let budget_px = (ram_budget / BYTES_PER_PIXEL) as f64;
-            scale = (budget_px / (w as f64 * h as f64)).sqrt();
+            (budget_px / (w as f64 * h as f64)).sqrt()
         }
-    }
-    // Interim texture cap; tiling (the Tiled regime proper) lifts it.
-    scale = scale.min(texture_max as f64 / w.max(h) as f64);
-    // Floors keep both constraints exact: the products only shrink.
+    };
+    // Floors keep the constraint exact: the product only shrinks.
     let target = (
         ((w as f64 * scale).floor() as u32).max(1),
         ((h as f64 * scale).floor() as u32).max(1),
@@ -88,23 +100,20 @@ mod tests {
     }
 
     #[test]
-    fn tiled_images_cap_to_the_texture_limit_for_now() {
-        // 10000x5000 fits the budget; the interim cap scales it to 8192 wide.
-        assert_eq!(
-            decode_target((10000, 5000), 8192, 2 * GB),
-            Some((8192, 4096))
-        );
+    fn tiled_images_decode_at_full_size() {
+        // Within the budget but past the texture limit: kept whole for the
+        // tile pyramid.
+        assert_eq!(decode_target((10000, 5000), 8192, 2 * GB), None);
+        assert_eq!(decode_target((40000, 25000), 8192, 16 * GB), None);
     }
 
     #[test]
-    fn clamped_images_fit_the_budget_and_the_texture_limit() {
-        // 40000x25000 at a 16 GB budget: the byte clamp alone would leave a
-        // 63245-px side, so the texture cap binds instead.
-        assert_eq!(
-            decode_target((40000, 25000), 8192, 16 * GB),
-            Some((8192, 5120))
-        );
-        // A tiny budget binds harder than the texture cap.
+    fn clamped_images_fit_the_budget() {
+        // 40000x25000 decodes to 4 GB. A 2 GB budget halves the pixels.
+        let target = decode_target((40000, 25000), 8192, 2 * GB).unwrap();
+        assert!(decoded_bytes(target) <= 2 * GB);
+        assert!(decoded_bytes(target) > 19 * GB / 10); // no over-shrink
+        // A tiny budget still leaves a usable image.
         let target = decode_target((40000, 25000), 8192, 40 * 1_000_000).unwrap();
         assert!(decoded_bytes(target) <= 40 * 1_000_000);
         assert!(target.0 > 1 && target.1 > 1);
@@ -112,6 +121,13 @@ mod tests {
         let aspect = 40000.0 / 25000.0;
         let got = target.0 as f64 / target.1 as f64;
         assert!((got - aspect).abs() < 0.01, "aspect drifted: {got}");
+    }
+
+    #[test]
+    fn fit_within_caps_per_side_and_keeps_small_images() {
+        assert_eq!(fit_within((100, 50), 64), Some((64, 32)));
+        assert_eq!(fit_within((50, 100), 64), Some((32, 64)));
+        assert_eq!(fit_within((64, 64), 64), None);
     }
 
     #[test]

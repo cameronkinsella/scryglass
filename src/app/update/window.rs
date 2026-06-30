@@ -86,13 +86,16 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 viewer.pan = clamp_pan(viewer.pan, img_w, img_h, viewport);
             }
 
+            // A resize can change the fit zoom and expose new regions of a
+            // tiled still, so it runs a demand pass like a zoom would.
+            let tiles = super::fire_tiles(win, shared);
             // The app's own fullscreen never persists. A natively maximized or
             // fullscreened window looks like any other resize here, so confirm
             // the state before persisting and let the windowed size stand.
             if win.fullscreen {
-                Task::none()
+                tiles
             } else {
-                check_window_state(win.id)
+                Task::batch([tiles, check_window_state(win.id)])
             }
         }
 
@@ -210,7 +213,8 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 let img_h = h as f32 * viewer.zoom;
                 viewer.pan = clamp_pan(viewer.pan, img_w, img_h, size);
             }
-            Task::none()
+            // The corrected viewport shifts the placement, like a resize.
+            super::fire_tiles(win, shared)
         }
 
         Message::CloseRequested(id) => {
