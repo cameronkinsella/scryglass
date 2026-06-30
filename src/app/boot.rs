@@ -45,6 +45,7 @@ pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Envelope>) {
             .large_image_ram_budget
             .resolve(crate::config::total_system_ram()),
     );
+    crate::app::update::set_prefetch_scaler(config.resource.prefetch_scaler);
 
     let mut shared = Shared {
         config,

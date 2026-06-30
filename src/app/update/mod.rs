@@ -28,7 +28,8 @@ pub(crate) use file_ops::{
 };
 pub(crate) use media_tasks::{
     fire_exif, fire_load, fire_prefetch, fire_rotate, fire_thumbnailer, fire_tiles, run_jobs,
-    run_jobs_at, settle_tiles, show_loaded, show_placeholder, try_start_shared_anim,
+    run_jobs_at, set_prefetch_scaler, settle_tiles, show_loaded, show_placeholder,
+    try_start_shared_anim,
 };
 pub(crate) use navigation::open_path;
 pub(crate) use navigation::{
@@ -130,6 +131,7 @@ fn apply_config(app: &mut App, config: AppConfig) -> Task<Envelope> {
             .large_image_ram_budget
             .resolve(crate::config::total_system_ram()),
     );
+    set_prefetch_scaler(config.resource.prefetch_scaler);
     app.shared.config = config;
     let mut tasks = Vec::new();
     for (id, win) in app.windows.iter_mut() {

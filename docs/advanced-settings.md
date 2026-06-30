@@ -127,6 +127,7 @@ use the same controls, with different defaults.
 | Key | Type | Default | Effect |
 |---|---|---|---|
 | `prefetch_vram` | `"full-res"` \| `"view-res"` \| `"none"` | `"view-res"` | What resolution a focused window's prefetched neighbors keep in VRAM. `full-res` is instant-crisp on navigation but heavy; `none` keeps them in RAM only. |
+| `prefetch_scaler` | `"gpu"` \| `"cpu"` | `"gpu"` | Where a prefetched neighbor's view-res copy is produced. Both give identical pixels. `gpu` renders it through the display shader, briefly holding the neighbor's full decode in VRAM (up to ~268 MB per neighbor, two at once); `cpu` resamples at background priority with no extra VRAM but seconds of CPU per neighbor. |
 | `large_image_ram_budget` | percent or size | `"50%"` | Ceiling for a single image's decoded pixels in RAM. An image whose decode would exceed it opens downscaled to fit instead of failing (a 1-gigapixel image decodes to 4 GB). Accepts a share of the machine's RAM (`"50%"`) or an absolute size (`"2GB"`, `"500MB"`); units `B`/`KB`/`MB`/`GB`/`TB` are powers of 1000, the `KiB` family powers of 1024. The budget only binds past the texture limit, so images within 8192 px per side (at most ~268 MB decoded) are never downscaled by it. |
 
 ### `[resource.unfocused.{still,animated,video}]` and `[resource.minimized.{still,animated,video}]`
