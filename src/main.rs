@@ -42,9 +42,12 @@ fn main() -> anyhow::Result<()> {
         .theme(app::theme)
         .subscription(app::subscription)
         // .settings() replaces the whole struct, so it must precede .font()
-        // (fonts accumulate inside settings).
+        // (fonts accumulate inside settings). vsync on (Fifo present) paces rendering
+        // to the display's own refresh, which video playback needs to present without
+        // tearing and in step with the panel; the sub-frame input latency it adds is
+        // imperceptible.
         .settings(iced::Settings {
-            vsync: false,
+            vsync: true,
             ..Default::default()
         })
         .font(iced_fonts::BOOTSTRAP_FONT_BYTES)
