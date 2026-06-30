@@ -14,8 +14,9 @@ use crate::ui::image_display::{self, SurfacePlacement, snap_footprint_to_unit};
 use crate::video::VideoFrame;
 
 /// Build the video surface element for the current frame at the given zoom/pan.
-/// `high_quality` selects the factor-aware downscale for a minified frame. Fills the
-/// image area like the still-image widget does.
+/// `high_quality` selects the factor-aware downscale for a minified frame. `playing`
+/// asks the compositor to redraw every display refresh so playback is vsync-paced.
+/// Fills the image area like the still-image widget does.
 pub fn view(
     frame: Arc<VideoFrame>,
     zoom: f32,
@@ -23,6 +24,7 @@ pub fn view(
     viewport: (f32, f32),
     pixelated: bool,
     high_quality: bool,
+    playing: bool,
 ) -> Element<'static, Message> {
     shader::Shader::new(VideoSurface::new(
         frame,
@@ -31,6 +33,7 @@ pub fn view(
         viewport,
         pixelated,
         high_quality,
+        playing,
     ))
     .width(Length::Fill)
     .height(Length::Fill)
@@ -42,6 +45,7 @@ struct VideoSurface {
     frame: Arc<VideoFrame>,
     placement: SurfacePlacement,
     high_quality: bool,
+    playing: bool,
 }
 
 impl VideoSurface {
@@ -52,12 +56,14 @@ impl VideoSurface {
         viewport: (f32, f32),
         pixelated: bool,
         high_quality: bool,
+        playing: bool,
     ) -> Self {
         let original = (frame.width, frame.height);
         Self {
             frame,
             placement: SurfacePlacement::new(zoom, pan, viewport, original, pixelated),
             high_quality,
+            playing,
         }
     }
 }
@@ -65,6 +71,21 @@ impl VideoSurface {
 impl<T> shader::Program<T> for VideoSurface {
     type State = ();
     type Primitive = VideoPrimitive;
+
+    /// While playing, ask for a redraw on the next display refresh. iced calls this on
+    /// every `RedrawRequested`, so the request renews each frame and the video draws
+    /// on every vsync (the panel's own rate) with no wall-clock timer, the pacing a
+    /// dedicated player uses. `poll()` advances the frame per redraw. Paused, the
+    /// request stops and a slow timer handles only the control fade.
+    fn update(
+        &self,
+        _state: &mut Self::State,
+        _event: &iced::Event,
+        _bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Option<shader::Action<T>> {
+        self.playing.then(shader::Action::request_redraw)
+    }
 
     fn draw(
         &self,

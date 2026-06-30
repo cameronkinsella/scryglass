@@ -29,7 +29,7 @@ pub fn subscription(app: &App) -> Subscription<Envelope> {
         // Close requests route through update() so config saves first.
         iced::window::close_requests()
             .map(|id| Envelope::Win(id, Message::Window(WindowMessage::CloseRequested(id)))),
-        // A closed window's state is dropped; the app exits with the last one.
+        // A closed window's state is dropped. The app exits with the last one.
         iced::window::close_events().map(Envelope::Closed),
         // Files forwarded by a second launch open as new windows.
         ipc_forwards(),
@@ -71,7 +71,7 @@ fn forward_stream() -> impl Stream<Item = Envelope> {
     )
 }
 
-/// The timer and watch subscriptions for one window. Untagged; the caller
+/// The timer and watch subscriptions for one window. Untagged. The caller
 /// wraps each with the window's id.
 fn window_subscriptions(id: window::Id, win: &Window) -> Vec<Subscription<Message>> {
     let mut subs = Vec::new();
@@ -112,13 +112,22 @@ fn window_subscriptions(id: window::Id, win: &Window) -> Vec<Subscription<Messag
             subs.push(iced::time::every(delay).map(|_| Message::Anim(AnimMessage::Tick)));
         }
 
-        // Video pacing: pull frames due for display ~60×/s while a
-        // session is active (paused sessions still need control redraws).
-        if viewer.video.session.is_some() && !win.minimized {
-            subs.push(
-                iced::time::every(Duration::from_millis(16))
-                    .map(|_| Message::VideoControls(VideoControlsMessage::Tick)),
-            );
+        // Video pacing. While playing, the video shader program requests a redraw on
+        // every display refresh, so `window::frames` fires once per vsync. Polling
+        // each one for the frame then due paces playback to the panel itself (display
+        // sync) rather than a wall-clock timer that beats against vsync and juddered.
+        // A paused session drives no redraws, so a slow timer keeps the control fade
+        // moving and drains any late frame.
+        if !win.minimized
+            && let Some(session) = viewer.video.session.as_ref()
+        {
+            let tick = if session.playing {
+                window::frames().map(|_| Message::VideoControls(VideoControlsMessage::Tick))
+            } else {
+                iced::time::every(Duration::from_millis(33))
+                    .map(|_| Message::VideoControls(VideoControlsMessage::Tick))
+            };
+            subs.push(tick);
         }
 
         // A held edge press has no OS key-repeat, so drive it here. Leaving
@@ -149,7 +158,7 @@ fn config_watch() -> Subscription<Envelope> {
 
 /// Read and parse config.toml on each change (off the update thread), emitting
 /// the new config or an invalid-parse signal. A read failure (mid-write) is
-/// skipped; the next event retries. The app's own atomic saves trip this too,
+/// skipped. The next event retries. The app's own atomic saves trip this too,
 /// but the update side ignores a reload equal to the in-memory config.
 fn config_watch_stream() -> impl Stream<Item = Envelope> {
     use notify::{RecursiveMode, Watcher};
@@ -193,7 +202,7 @@ fn config_watch_stream() -> impl Stream<Item = Envelope> {
                         Ok(config) => Envelope::ConfigReloaded(Box::new(config)),
                         Err(_) => Envelope::ConfigInvalid,
                     },
-                    // Transient (read raced a write); wait for the next event.
+                    // Transient (read raced a write). Wait for the next event.
                     Err(_) => continue,
                 };
                 if output.send(envelope).await.is_err() {
