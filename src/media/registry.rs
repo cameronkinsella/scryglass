@@ -18,12 +18,19 @@ pub struct DecodeOpts {
     /// within GPU texture limits. The original size is preserved in
     /// [`super::DecodedImage::original_size`].
     pub max_dimension: u32,
+    /// Ceiling for the decoded RGBA bytes kept in RAM. A decode past it is
+    /// downscaled to fit (see [`super::regime`]).
+    pub ram_budget: u64,
 }
 
 impl Default for DecodeOpts {
+    /// The default budget resolved against this machine, so every decode path
+    /// is budget-safe even when nothing wires the live config through.
     fn default() -> Self {
         Self {
             max_dimension: MAX_TEXTURE_DIM,
+            ram_budget: crate::config::RamBudget::default()
+                .resolve(crate::config::total_system_ram()),
         }
     }
 }

@@ -178,10 +178,28 @@ mod tests {
 
     #[test]
     fn oversized_image_downscales_to_cap() {
-        let opts = DecodeOpts { max_dimension: 64 };
+        let opts = DecodeOpts {
+            max_dimension: 64,
+            ..DecodeOpts::default()
+        };
         let img = decode(&encode_png(100, 50), &opts);
         assert_eq!((img.width, img.height), (64, 32));
         assert_eq!(img.original_size, (100, 50));
+    }
+
+    #[test]
+    fn over_budget_image_downscales_to_fit_ram() {
+        // Past the texture limit with 20000 decoded bytes, a 5000-byte budget
+        // quarters the pixels: each side halves, binding harder than the
+        // 64-px cap would (which alone gives 64x32).
+        let opts = DecodeOpts {
+            max_dimension: 64,
+            ram_budget: 5000,
+        };
+        let img = decode(&encode_png(100, 50), &opts);
+        assert_eq!((img.width, img.height), (50, 25));
+        assert_eq!(img.original_size, (100, 50));
+        assert!(img.pixels.len() as u64 <= 5000);
     }
 
     #[test]

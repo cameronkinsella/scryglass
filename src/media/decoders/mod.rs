@@ -16,17 +16,18 @@ pub mod svg;
 use image::{DynamicImage, imageops::FilterType};
 
 use crate::media::DecodedImage;
+use crate::media::regime;
 use crate::media::registry::DecodeOpts;
 
-/// Shared decode tail: cap dimensions to the texture limit, derive a
-/// thumbnail, and convert to RGBA8.
+/// Shared decode tail: reduce an oversized decode to the texture limit and
+/// the RAM budget, derive a thumbnail, and convert to RGBA8.
 pub(crate) fn finish(img: DynamicImage, opts: &DecodeOpts) -> DecodedImage {
     let original_size = (img.width(), img.height());
 
-    let img = if img.width().max(img.height()) > opts.max_dimension {
-        img.resize(opts.max_dimension, opts.max_dimension, FilterType::Triangle)
-    } else {
-        img
+    let img = match regime::decode_target(original_size, opts.max_dimension, opts.ram_budget) {
+        // Full variable-width support, so any reduction ratio stays alias-free.
+        Some((w, h)) => img.resize_exact(w, h, FilterType::CatmullRom),
+        None => img,
     };
 
     // Always produce a thumbnail, since the pixels are already decoded.

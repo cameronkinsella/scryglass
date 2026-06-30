@@ -11,7 +11,6 @@ use crate::app::{MediaMessage, Message, Shared, Window};
 use crate::config::{PrefetchVram, ZoomMode};
 use crate::media::cache::ImageCache;
 use crate::media::pipeline::{Lane, Pipeline, Source, ThumbUrgency, thumb_key};
-use crate::media::registry::DecodeOpts;
 use crate::media::store::{Anim, ImageKey, Job, RamImage, Store, Tier};
 use crate::media::{DecodedMedia, MediaError, ThumbData};
 
@@ -516,7 +515,7 @@ fn run_job(
             let load = pipeline.load(
                 source,
                 path.clone(),
-                DecodeOpts::default(),
+                pipeline.decode_opts(),
                 lane,
                 generation,
             );

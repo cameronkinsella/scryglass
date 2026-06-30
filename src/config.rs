@@ -412,6 +412,128 @@ impl Default for WorkingSetConfig {
     }
 }
 
+/// Ceiling for one image's decoded RGBA bytes: a fraction of the machine's
+/// RAM (`"50%"`) or an absolute size (`"2GB"`, `"500MB"`). An image whose
+/// decode would exceed it opens downscaled to fit instead of failing.
+/// Reference: a 1-gigapixel image decodes to 4 GB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RamBudget {
+    /// Percentage of total system RAM, 1 to 100.
+    Percent(u8),
+    /// Absolute byte size.
+    Bytes(u64),
+}
+
+impl Default for RamBudget {
+    fn default() -> Self {
+        RamBudget::Percent(50)
+    }
+}
+
+/// Byte scales for parsing and display. Decimal units are powers of 1000,
+/// binary (`KiB` family) powers of 1024, per IEC 80000-13.
+/// https://en.wikipedia.org/wiki/ISO/IEC_80000#Information_science_and_technology
+const BYTE_UNITS: &[(&str, u64)] = &[
+    ("TiB", 1 << 40),
+    ("TB", 1_000_000_000_000),
+    ("GiB", 1 << 30),
+    ("GB", 1_000_000_000),
+    ("MiB", 1 << 20),
+    ("MB", 1_000_000),
+    ("KiB", 1 << 10),
+    ("KB", 1_000),
+    ("B", 1),
+];
+
+impl RamBudget {
+    /// The budget in bytes for a machine with `total_ram` bytes. An unknown
+    /// total (zero) turns a percentage into no limit rather than clamping
+    /// every image to nothing.
+    pub fn resolve(self, total_ram: u64) -> u64 {
+        match self {
+            RamBudget::Percent(_) if total_ram == 0 => u64::MAX,
+            RamBudget::Percent(p) => ((total_ram as u128 * p as u128) / 100) as u64,
+            RamBudget::Bytes(b) => b,
+        }
+    }
+}
+
+impl std::fmt::Display for RamBudget {
+    /// Lossless: bytes print in the largest unit that divides them exactly,
+    /// so a hand-written value survives every save/load cycle unchanged.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RamBudget::Percent(p) => write!(f, "{p}%"),
+            RamBudget::Bytes(n) => {
+                let (suffix, scale) = BYTE_UNITS
+                    .iter()
+                    .find(|(_, scale)| n % scale == 0 && n / scale > 0)
+                    .unwrap_or(&("B", 1));
+                write!(f, "{}{suffix}", n / scale)
+            }
+        }
+    }
+}
+
+impl std::str::FromStr for RamBudget {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        if let Some(percent) = s.strip_suffix('%') {
+            let p: u8 = percent
+                .trim()
+                .parse()
+                .map_err(|_| format!("invalid percentage: {s:?}"))?;
+            if p == 0 || p > 100 {
+                return Err(format!("percentage out of range 1-100: {s:?}"));
+            }
+            return Ok(RamBudget::Percent(p));
+        }
+        let unit_start = s
+            .find(|c: char| c.is_ascii_alphabetic())
+            .ok_or_else(|| format!("missing unit (B, KB, MB, GB, TB or %): {s:?}"))?;
+        let (number, unit) = s.split_at(unit_start);
+        let (_, scale) = BYTE_UNITS
+            .iter()
+            .find(|(suffix, _)| suffix.eq_ignore_ascii_case(unit))
+            .ok_or_else(|| format!("unknown unit {unit:?}"))?;
+        let value: f64 = number
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid number: {s:?}"))?;
+        if value.is_nan() || value <= 0.0 {
+            return Err(format!("size must be positive: {s:?}"));
+        }
+        Ok(RamBudget::Bytes((value * *scale as f64).round() as u64))
+    }
+}
+
+impl Serialize for RamBudget {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for RamBudget {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        String::deserialize(d)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Total physical RAM in bytes, queried once. Zero when the query fails;
+/// [`RamBudget::resolve`] treats that as no limit.
+pub fn total_system_ram() -> u64 {
+    static TOTAL: LazyLock<u64> = LazyLock::new(|| {
+        let mut system = sysinfo::System::new();
+        system.refresh_memory();
+        system.total_memory()
+    });
+    *TOTAL
+}
+
 /// Advanced memory/VRAM resource model. The defaults are scryglass's opinion;
 /// every field is tunable in `config.toml`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -419,6 +541,9 @@ impl Default for WorkingSetConfig {
 pub struct ResourceConfig {
     /// What resolution a focused window's prefetch neighbors upload at.
     pub prefetch_vram: PrefetchVram,
+    /// Ceiling for one image's decoded bytes: `"50%"` of RAM or `"2GB"`.
+    /// Kept before the sub-tables so the TOML serializer accepts it.
+    pub large_image_ram_budget: RamBudget,
     /// Decay timers for an unfocused window, by media kind.
     pub unfocused: StateDecay,
     /// Decay timers for a minimized window, by media kind.
@@ -432,6 +557,7 @@ impl Default for ResourceConfig {
     fn default() -> Self {
         Self {
             prefetch_vram: PrefetchVram::ViewRes,
+            large_image_ram_budget: RamBudget::default(),
             unfocused: StateDecay {
                 still: DecayPipeline {
                     demote_vram_after: Some(Duration::from_secs(15)),
@@ -919,6 +1045,7 @@ mod tests {
             show_checkerboard: true,
             resource: ResourceConfig {
                 prefetch_vram: PrefetchVram::FullRes,
+                large_image_ram_budget: RamBudget::Bytes(2_000_000_000),
                 unfocused: StateDecay {
                     still: DecayPipeline {
                         demote_vram_after: Some(Duration::from_secs(20)),
@@ -1019,6 +1146,70 @@ mod tests {
     fn present_mode_parses_kebab_case() {
         let cfg = AppConfig::from_toml("[startup]\npresent_mode = \"fifo-relaxed\"\n");
         assert_eq!(cfg.startup.present_mode, PresentMode::FifoRelaxed);
+    }
+
+    #[test]
+    fn ram_budget_parses_percentages_and_sizes() {
+        let parse = |s: &str| s.parse::<RamBudget>();
+        assert_eq!(parse("50%"), Ok(RamBudget::Percent(50)));
+        assert_eq!(parse(" 100 % "), Ok(RamBudget::Percent(100)));
+        assert_eq!(parse("2GB"), Ok(RamBudget::Bytes(2_000_000_000)));
+        assert_eq!(parse("500mb"), Ok(RamBudget::Bytes(500_000_000)));
+        assert_eq!(parse("1.5 GiB"), Ok(RamBudget::Bytes(1_610_612_736)));
+        assert_eq!(parse("123456B"), Ok(RamBudget::Bytes(123_456)));
+    }
+
+    #[test]
+    fn ram_budget_rejects_nonsense() {
+        for bad in ["", "5", "0%", "101%", "-5%", "2XB", "GB", "0B", "-1GB"] {
+            assert!(
+                bad.parse::<RamBudget>().is_err(),
+                "{bad:?} should not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn ram_budget_display_is_lossless_and_readable() {
+        let round = |b: RamBudget| b.to_string().parse::<RamBudget>().unwrap();
+        for budget in [
+            RamBudget::Percent(50),
+            RamBudget::Bytes(2_000_000_000),
+            RamBudget::Bytes(1_610_612_736),
+            RamBudget::Bytes(123_457),
+        ] {
+            assert_eq!(round(budget), budget);
+        }
+        assert_eq!(RamBudget::Percent(50).to_string(), "50%");
+        assert_eq!(RamBudget::Bytes(2_000_000_000).to_string(), "2GB");
+        assert_eq!(RamBudget::Bytes(1 << 30).to_string(), "1GiB");
+        assert_eq!(RamBudget::Bytes(123_457).to_string(), "123457B");
+    }
+
+    #[test]
+    fn ram_budget_resolves_against_total_ram() {
+        const GIB: u64 = 1 << 30;
+        assert_eq!(RamBudget::Percent(50).resolve(16 * GIB), 8 * GIB);
+        assert_eq!(RamBudget::Percent(100).resolve(16 * GIB), 16 * GIB);
+        assert_eq!(RamBudget::Bytes(123).resolve(16 * GIB), 123);
+        // An unknown total must not clamp everything to nothing.
+        assert_eq!(RamBudget::Percent(50).resolve(0), u64::MAX);
+        assert_eq!(RamBudget::Bytes(123).resolve(0), 123);
+    }
+
+    #[test]
+    fn total_system_ram_looks_like_bytes() {
+        // Guards against the query reporting kilobytes: any machine that can
+        // run the test suite has at least a quarter GiB.
+        assert!(total_system_ram() >= 256 * 1024 * 1024);
+    }
+
+    #[test]
+    fn ram_budget_default_is_half_of_ram() {
+        assert_eq!(
+            ResourceConfig::default().large_image_ram_budget,
+            RamBudget::Percent(50)
+        );
     }
 
     #[test]

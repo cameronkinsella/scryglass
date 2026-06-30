@@ -38,9 +38,17 @@ pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Envelope>) {
     })
     .discard();
 
+    let pipeline = Pipeline::new(disk_thumbs);
+    pipeline.set_ram_budget(
+        config
+            .resource
+            .large_image_ram_budget
+            .resolve(crate::config::total_system_ram()),
+    );
+
     let mut shared = Shared {
         config,
-        pipeline: Pipeline::new(disk_thumbs),
+        pipeline,
         store: crate::media::store::Store::default(),
         anim_store: crate::media::store::Store::default(),
         thumbs: crate::media::cache::ImageCache::new(crate::app::state::THUMB_BUDGET_BYTES),

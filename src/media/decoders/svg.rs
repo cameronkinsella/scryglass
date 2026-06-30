@@ -93,7 +93,10 @@ mod tests {
 
     #[test]
     fn renders_svg_at_cap_preserving_aspect() {
-        let opts = DecodeOpts { max_dimension: 100 };
+        let opts = DecodeOpts {
+            max_dimension: 100,
+            ..DecodeOpts::default()
+        };
         let DecodedMedia::Static(img) = Svg.decode(RED_SQUARE, &opts).unwrap() else {
             panic!("expected static media");
         };

@@ -89,6 +89,8 @@ pub struct Pipeline {
     /// Persistent thumbnail store, `None` when disabled by build or
     /// config. Swappable at runtime (settings toggle).
     disk: Arc<std::sync::RwLock<Option<DiskThumbs>>>,
+    /// Resolved decode RAM budget in bytes; a live config edit updates it.
+    ram_budget: Arc<AtomicU64>,
 }
 
 impl Pipeline {
@@ -105,7 +107,21 @@ impl Pipeline {
             // Bounded so a long key-hold can't flood the I/O pool.
             urgent_thumb_lane: Arc::new(Semaphore::new(8)),
             disk: Arc::new(std::sync::RwLock::new(disk)),
+            ram_budget: Arc::new(AtomicU64::new(DecodeOpts::default().ram_budget)),
         }
+    }
+
+    /// The decode knobs for the current settings.
+    pub fn decode_opts(&self) -> DecodeOpts {
+        DecodeOpts {
+            ram_budget: self.ram_budget.load(Ordering::Relaxed),
+            ..DecodeOpts::default()
+        }
+    }
+
+    /// Adopt a changed RAM budget (config edit); takes effect on the next decode.
+    pub fn set_ram_budget(&self, bytes: u64) {
+        self.ram_budget.store(bytes, Ordering::Relaxed);
     }
 
     /// A snapshot of the persistent thumbnail store, if enabled.
@@ -321,6 +337,7 @@ impl Pipeline {
                     .ok_or(MediaError::Unsupported)?;
                 let opts = DecodeOpts {
                     max_dimension: super::THUMB_DIM,
+                    ..DecodeOpts::default()
                 };
                 match format.decode(&bytes, &opts)? {
                     DecodedMedia::Static(img) => Ok(ThumbData {

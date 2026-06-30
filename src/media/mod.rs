@@ -16,6 +16,7 @@ pub mod disk_thumbs;
 pub mod disk_thumbs;
 pub mod info;
 pub mod pipeline;
+pub mod regime;
 pub mod registry;
 pub mod resample;
 pub mod store;

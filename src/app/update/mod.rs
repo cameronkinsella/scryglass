@@ -124,6 +124,12 @@ fn route(app: &mut App, envelope: Envelope) -> Task<Envelope> {
 /// it), and let the decay tiers pick up the new values on their next pass. Window
 /// geometry only takes effect on the next window.
 fn apply_config(app: &mut App, config: AppConfig) {
+    app.shared.pipeline.set_ram_budget(
+        config
+            .resource
+            .large_image_ram_budget
+            .resolve(crate::config::total_system_ram()),
+    );
     app.shared.config = config;
     for win in app.windows.values_mut() {
         super::recalc_viewport(win, &app.shared);
