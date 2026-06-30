@@ -866,8 +866,9 @@ fn downscale_or_cancel(
     Some(Handle::from_rgba(target.0, target.1, resized))
 }
 
-/// Runs whole-substrate base derives on half the cores, so a seconds-long
-/// exact resample never saturates the machine.
+/// Runs whole-substrate base derives on half the cores at below-normal
+/// priority, so a seconds-long exact resample never saturates the machine
+/// and always yields to the UI and foreground work.
 static BASE_POOL: std::sync::LazyLock<rayon::ThreadPool> = std::sync::LazyLock::new(|| {
     rayon::ThreadPoolBuilder::new()
         .num_threads(
@@ -875,6 +876,7 @@ static BASE_POOL: std::sync::LazyLock<rayon::ThreadPool> = std::sync::LazyLock::
                 .map(|n| (n.get() / 2).max(1))
                 .unwrap_or(1),
         )
+        .start_handler(|_| crate::platform::lower_thread_priority())
         .build()
         .expect("static thread pool config is valid")
 });
@@ -998,21 +1000,47 @@ async fn upload_at_res(
     zoom: f32,
     full: bool,
 ) -> Option<crate::ui::image_surface::Keepalive> {
-    let gpu_handle = if full {
-        handle.clone()
-    } else {
-        // Bound concurrent downscales so spamming through new neighbors never
-        // saturates the CPU with resizes.
-        let _permit = RESIZE_GATE.acquire().await.ok();
-        let h = handle.clone();
-        let scale_factor = crate::ui::image_surface::current_scale_factor();
-        tokio::task::spawn_blocking(move || {
-            downscale(&h, view_target(original_size, zoom, scale_factor))
-        })
-        .await
-        .unwrap_or_else(|_| handle.clone())
-    };
+    if full {
+        return submit_and_wait(handle.clone()).await;
+    }
+    // Bound concurrent derives so spamming through new neighbors never
+    // saturates the CPU, the upload thread, or transient VRAM.
+    let _permit = RESIZE_GATE.acquire().await.ok();
+    let scale_factor = crate::ui::image_surface::current_scale_factor();
+    let target = view_target(original_size, zoom, scale_factor);
+    let covers = target.0 >= original_size.0 && target.1 >= original_size.1;
+    // The GPU bake renders the copy through the display shader, trading a
+    // transient full-size texture for the whole CPU resample. Identical
+    // pixels either way (the CPU path is the shader's exact port), so this
+    // is purely the prefetch_scaler resource trade. Falls back to the CPU
+    // when the full decode exceeds a texture or the GPU path fails.
+    if !covers
+        && PREFETCH_GPU_BAKE.load(std::sync::atomic::Ordering::Relaxed)
+        && let Some(full_texture) = submit_and_wait(handle.clone()).await
+        && let Some(rx) = crate::ui::image_surface::submit_render_downscale(full_texture, target)
+        && let Ok(view) = rx.await
+    {
+        return Some(view);
+    }
+    let h = handle.clone();
+    let gpu_handle = tokio::task::spawn_blocking(move || {
+        crate::platform::run_below_normal(|| downscale(&h, target))
+    })
+    .await
+    .unwrap_or_else(|_| handle.clone());
     submit_and_wait(gpu_handle).await
+}
+
+/// Mirrors the `prefetch_scaler` config so the prefetch call graph needs no
+/// config handle, the same pattern the kernel and RAM budget use.
+static PREFETCH_GPU_BAKE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Adopt the configured prefetch scaler (boot and config changes).
+pub(crate) fn set_prefetch_scaler(scaler: crate::config::PrefetchScaler) {
+    PREFETCH_GPU_BAKE.store(
+        scaler == crate::config::PrefetchScaler::Gpu,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 /// Warm the prefetch window around the cursor, each neighbor leased at the tier

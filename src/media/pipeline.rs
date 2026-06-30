@@ -193,25 +193,34 @@ impl Pipeline {
             }
 
             let cache_key = cache_key(&source, &path);
+            let background = matches!(lane, Lane::Prefetch);
             let media = tokio::task::spawn_blocking(move || {
-                let src_size = bytes.len() as u64;
-                let magic = &bytes[..bytes.len().min(16)];
-                let format = registry::global()
-                    .find(&path, magic)
-                    .ok_or(MediaError::Unsupported)?;
-                let media = format.decode(&bytes, &opts)?;
+                let decode = || {
+                    let src_size = bytes.len() as u64;
+                    let magic = &bytes[..bytes.len().min(16)];
+                    let format = registry::global()
+                        .find(&path, magic)
+                        .ok_or(MediaError::Unsupported)?;
+                    let media = format.decode(&bytes, &opts)?;
 
-                // Decodes produce a thumbnail nearly for free. Persist it
-                // so the next session opens this folder warm.
-                let thumb = match &media {
-                    DecodedMedia::Static(img) => img.thumbnail.as_ref(),
-                    DecodedMedia::Animated(anim) => anim.thumbnail.as_ref(),
+                    // Decodes produce a thumbnail nearly for free. Persist it
+                    // so the next session opens this folder warm.
+                    let thumb = match &media {
+                        DecodedMedia::Static(img) => img.thumbnail.as_ref(),
+                        DecodedMedia::Animated(anim) => anim.thumbnail.as_ref(),
+                    };
+                    if let (Some(disk), Some(thumb)) = (&disk, thumb) {
+                        let (container, name) = &cache_key;
+                        disk.store(container, name, thumb, None, src_size);
+                    }
+                    Ok::<_, MediaError>(media)
                 };
-                if let (Some(disk), Some(thumb)) = (&disk, thumb) {
-                    let (container, name) = &cache_key;
-                    disk.store(container, name, thumb, None, src_size);
+                // A neighbor's decode always yields to the foreground.
+                if background {
+                    crate::platform::run_below_normal(decode)
+                } else {
+                    decode()
                 }
-                Ok::<_, MediaError>(media)
             })
             .await
             .map_err(|e| MediaError::Decode(e.to_string()))??;

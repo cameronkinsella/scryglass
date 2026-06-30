@@ -165,6 +165,20 @@ pub enum PrefetchVram {
     None,
 }
 
+/// Where a prefetch neighbor's view-resolution copy is produced. A GPU bake
+/// and the CPU resample give identical pixels; they trade transient VRAM
+/// against seconds of background CPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrefetchScaler {
+    /// Upload the full decode, render the copy through the display shader,
+    /// drop the full texture (briefly holds it in VRAM).
+    #[default]
+    Gpu,
+    /// Resample on the CPU at background priority (no VRAM beyond the copy).
+    Cpu,
+}
+
 /// When a backgrounded window's RAM source is evicted (re-decoded on return).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvictPolicy {
@@ -541,6 +555,8 @@ pub fn total_system_ram() -> u64 {
 pub struct ResourceConfig {
     /// What resolution a focused window's prefetch neighbors upload at.
     pub prefetch_vram: PrefetchVram,
+    /// Where a prefetch neighbor's view-res copy is produced (GPU or CPU).
+    pub prefetch_scaler: PrefetchScaler,
     /// Ceiling for one image's decoded bytes: `"50%"` of RAM or `"2GB"`.
     /// Kept before the sub-tables so the TOML serializer accepts it.
     pub large_image_ram_budget: RamBudget,
@@ -557,6 +573,7 @@ impl Default for ResourceConfig {
     fn default() -> Self {
         Self {
             prefetch_vram: PrefetchVram::ViewRes,
+            prefetch_scaler: PrefetchScaler::default(),
             large_image_ram_budget: RamBudget::default(),
             unfocused: StateDecay {
                 still: DecayPipeline {
@@ -1045,6 +1062,7 @@ mod tests {
             show_checkerboard: true,
             resource: ResourceConfig {
                 prefetch_vram: PrefetchVram::FullRes,
+                prefetch_scaler: PrefetchScaler::Cpu,
                 large_image_ram_budget: RamBudget::Bytes(2_000_000_000),
                 unfocused: StateDecay {
                     still: DecayPipeline {

@@ -691,3 +691,44 @@ mod windows {
         }
     }
 }
+
+/// Run `work` on the current thread at below-normal scheduling priority,
+/// restored after (panic-safe), so background decodes and resamples always
+/// yield the CPU to the UI and foreground work.
+/// https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-setthreadpriority
+pub(crate) fn run_below_normal<T>(work: impl FnOnce() -> T) -> T {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            set_thread_priority(false);
+        }
+    }
+    set_thread_priority(true);
+    let _restore = Restore;
+    work()
+}
+
+/// Permanently drop the calling thread to below-normal priority, for
+/// dedicated background pool threads.
+pub(crate) fn lower_thread_priority() {
+    set_thread_priority(true);
+}
+
+fn set_thread_priority(lowered: bool) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+            THREAD_PRIORITY_NORMAL,
+        };
+        let priority = if lowered {
+            THREAD_PRIORITY_BELOW_NORMAL
+        } else {
+            THREAD_PRIORITY_NORMAL
+        };
+        // Only the calling thread is affected; on failure it stays normal.
+        unsafe { SetThreadPriority(GetCurrentThread(), priority) };
+    }
+    #[cfg(not(windows))]
+    let _ = lowered;
+}
