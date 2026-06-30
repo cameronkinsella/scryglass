@@ -143,6 +143,7 @@ pub(crate) fn new_window(id: window::Id, config: &AppConfig) -> Window {
         viewport_size: size,
         chrome_pad: iced::Size::ZERO,
         last_cursor_pos: Point::ORIGIN,
+        tile_epoch: 0,
         window_size: size,
         window_pos,
         maximized: config.window_maximized,

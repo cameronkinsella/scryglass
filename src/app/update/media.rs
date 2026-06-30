@@ -17,7 +17,7 @@ pub enum TileOutcome {
     Ready(Keepalive),
     /// Bailed before the resample: the view moved to another level.
     Canceled,
-    /// The resample or upload failed; the next demand pass retries.
+    /// The resample or upload failed. The next demand pass retries.
     Failed,
 }
 
@@ -40,16 +40,27 @@ pub enum Message {
         texture: Keepalive,
     },
     /// A tile production finished: install it in the resident pyramid, or
-    /// release its claim.
+    /// release its claim. `pyramid` is the pyramid it was cut for, so a
+    /// production outliving a re-mint never installs into the wrong grid.
     TileReady {
         key: ImageKey,
         tile: crate::media::tiles::TileKey,
         outcome: TileOutcome,
+        pyramid: Keepalive,
     },
     /// A zoom gesture's settle timer fired: run the tile demand pass if no
     /// later zoom change superseded it.
     TilesSettled {
         epoch: u64,
+    },
+    /// A tiled still's base layer was re-derived at `target`: swap it in.
+    /// `None` just releases that claim. A claim stolen for another size in
+    /// the meantime is left to its thief, whose own derive is in flight.
+    BaseReady {
+        key: ImageKey,
+        texture: Option<Keepalive>,
+        target: (u32, u32),
+        pyramid: Keepalive,
     },
     /// An upload could not reach the GPU after retries; clear the pending mark so
     /// a later pass can try again.
@@ -180,19 +191,25 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             run_jobs(outcome.jobs, &pipeline, Lane::Current, viewport)
         }
 
-        Message::TileReady { key, tile, outcome } => {
-            // Install into the shared pyramid; every window leasing this image
-            // sees the tile on its next frame.
+        Message::TileReady {
+            key,
+            tile,
+            outcome,
+            pyramid,
+        } => {
+            // Install into the shared pyramid, unless it was re-minted while
+            // this production flew (a tile cut for another grid would draw
+            // misaligned). Every window leasing the image sees the tile on
+            // its next frame.
             if let Some(resident) = shared.store.shared(&key)
+                && std::sync::Arc::ptr_eq(&resident, &pyramid)
                 && let Some(tiles) = resident.tiles()
             {
                 tiles.settle(tile);
                 match outcome {
                     TileOutcome::Ready(texture) => tiles.insert(tile, texture),
-                    // A cancel for the level the view wants right now was
-                    // doomed by a zoom the user already undid, so re-request
-                    // it. The level guard stops cross-window ping-pong, and
-                    // a failure never re-fires, so nothing can loop.
+                    // Re-request a canceled tile the view still wants. The
+                    // level guard stops cross-window ping-pong.
                     TileOutcome::Canceled if tiles.wanted_lod() == tile.lod => {
                         return super::media_tasks::fire_tiles(win, shared);
                     }
@@ -203,11 +220,29 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
         }
 
         Message::TilesSettled { epoch } => {
-            if win.viewer().is_some_and(|v| v.tile_epoch == epoch) {
+            if win.tile_epoch == epoch {
                 super::media_tasks::fire_tiles(win, shared)
             } else {
                 Task::none()
             }
+        }
+
+        Message::BaseReady {
+            key,
+            texture,
+            target,
+            pyramid,
+        } => {
+            if let Some(resident) = shared.store.shared(&key)
+                && std::sync::Arc::ptr_eq(&resident, &pyramid)
+                && let Some(tiles) = resident.tiles()
+            {
+                match texture {
+                    Some(texture) => tiles.set_base(texture, target),
+                    None => tiles.settle_base(target),
+                }
+            }
+            Task::none()
         }
 
         Message::AnimDecoded {

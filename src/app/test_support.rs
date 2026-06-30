@@ -59,6 +59,7 @@ pub(crate) fn empty_app() -> TestApp {
             viewport_size: Size::new(800.0, 600.0),
             chrome_pad: Size::ZERO,
             last_cursor_pos: iced::Point::ORIGIN,
+            tile_epoch: 0,
             window_size: Size::new(800.0, 600.0),
             window_pos: iced::Point::ORIGIN,
             maximized: false,

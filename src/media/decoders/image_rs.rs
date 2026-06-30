@@ -105,6 +105,7 @@ fn sniff(magic: &[u8]) -> bool {
 mod tests {
     use super::*;
     use crate::media::DecodedImage;
+    use crate::media::registry::DecodeIntent;
 
     fn decode(bytes: &[u8], opts: &DecodeOpts) -> DecodedImage {
         match ImageRs.decode(bytes, opts).unwrap() {
@@ -181,7 +182,7 @@ mod tests {
         // A consumer that cannot tile (the thumbnailer) takes the plain cap.
         let opts = DecodeOpts {
             max_dimension: 64,
-            tile_capable: false,
+            intent: DecodeIntent::Thumbnail,
             ..DecodeOpts::default()
         };
         let img = decode(&encode_png(100, 50), &opts);

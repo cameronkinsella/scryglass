@@ -78,9 +78,20 @@ static UPLOAD_CONTEXT: OnceLock<UploadContext> = OnceLock::new();
 /// single texture; its tiles are small resident images themselves, so upload
 /// and off-thread VRAM release work the same way tile by tile.
 pub struct ResidentImage {
-    image: Option<GpuImage>,
-    drop_tx: Option<UnboundedSender<Job>>,
-    tiles: Option<TileSet>,
+    body: Resident,
+}
+
+/// The forms a resident image takes; each keepalive is exactly one of these.
+enum Resident {
+    /// One texture, freed off the render thread through the channel.
+    Texture {
+        image: GpuImage,
+        drop_tx: UnboundedSender<Job>,
+    },
+    /// A tile pyramid for a still too large for one texture.
+    Tiled(TileSet),
+    /// No GPU state: the tokenless test keepalive, or a drained drop.
+    Empty,
 }
 
 impl ResidentImage {
@@ -88,18 +99,39 @@ impl ResidentImage {
     /// the tokenless test keepalive. The downscale shader needs it to step
     /// taps by whole texels.
     pub fn size(&self) -> Option<(u32, u32)> {
-        self.image.as_ref().map(|image| image.size)
+        match &self.body {
+            Resident::Texture { image, .. } => Some(image.size),
+            Resident::Tiled(_) | Resident::Empty => None,
+        }
     }
 
     /// The texture view to sample when rendering this image into another texture
     /// (the view-res downscale), or `None` for the tokenless test keepalive.
     fn input_view(&self) -> Option<&wgpu::TextureView> {
-        self.image.as_ref().map(|image| &image.view)
+        match &self.body {
+            Resident::Texture { image, .. } => Some(&image.view),
+            Resident::Tiled(_) | Resident::Empty => None,
+        }
+    }
+
+    /// The single texture's bind group, if this resident is one.
+    fn bind(&self, nearest: bool) -> Option<&wgpu::BindGroup> {
+        match &self.body {
+            Resident::Texture { image, .. } => Some(if nearest {
+                &image.bind_nearest
+            } else {
+                &image.bind_linear
+            }),
+            Resident::Tiled(_) | Resident::Empty => None,
+        }
     }
 
     /// The tile pyramid, when this resident is a tiled still.
     pub fn tiles(&self) -> Option<&TileSet> {
-        self.tiles.as_ref()
+        match &self.body {
+            Resident::Tiled(set) => Some(set),
+            Resident::Texture { .. } | Resident::Empty => None,
+        }
     }
 
     /// A fresh, empty tile pyramid for an `original`-sized still. Purely
@@ -107,17 +139,18 @@ impl ResidentImage {
     /// produced and uploaded like any small image. `base` is the view-quality
     /// texture drawn stretched beneath the tiles, so a not-yet-produced tile
     /// shows a softer image instead of a hole.
-    pub fn tiled(original: (u32, u32), base: Option<Keepalive>) -> Keepalive {
+    pub fn tiled(original: (u32, u32), base: Keepalive) -> Keepalive {
         Arc::new(ResidentImage {
-            image: None,
-            drop_tx: None,
-            tiles: Some(TileSet {
+            body: Resident::Tiled(TileSet {
                 original,
-                base,
+                base: Mutex::new(base),
+                base_pending: Mutex::new(None),
                 tiles: Mutex::new(TileCache::new(MAX_CACHED_TILES)),
                 pending: Mutex::new(std::collections::HashMap::new()),
                 wanted_lod: AtomicU32::new(0),
                 draw_lod: AtomicU32::new(DRAW_UNSTAMPED),
+                draw_scale: AtomicU32::new(1.0f32.to_bits()),
+                wanted_base: std::sync::atomic::AtomicU64::new(0),
             }),
         })
     }
@@ -134,9 +167,16 @@ const MAX_CACHED_TILES: usize = 224;
 /// [`Keepalive`], with tiles streaming in through the mutex as they land.
 pub struct TileSet {
     original: (u32, u32),
-    /// The view-quality texture drawn beneath the tiles, so the image is
-    /// never blank where a tile is missing.
-    base: Option<Keepalive>,
+    /// The view-quality layer beneath the tiles, re-derived at resting zooms
+    /// so it stays a one-pass copy (a fixed base redrawn through the kernel
+    /// would be softer than the View tier it must match).
+    base: Mutex<Keepalive>,
+    /// The in-flight base re-derive's claim time and target size. A demand
+    /// pass wanting a DIFFERENT size steals the slot at once (the old derive
+    /// dies at its next row), so contending windows never deadlock or churn
+    /// through refires: the last thief simply wins. Expires like a tile
+    /// claim, so a lost settle can never block re-derives for good.
+    base_pending: Mutex<Option<(std::time::Instant, (u32, u32))>>,
     tiles: Mutex<TileCache<Keepalive>>,
     /// Tiles requested but not yet landed, with their claim time, so a pan or
     /// zoom repeating its demand pass never produces the same tile twice. A
@@ -154,6 +194,12 @@ pub struct TileSet {
     /// rounding). Holds [`DRAW_UNSTAMPED`] before any tiled draw and
     /// [`DRAW_BASE_ONLY`] when the base layer alone sufficed.
     draw_lod: AtomicU32,
+    /// The scale factor of the last tiled draw (`f32` bits), so the demand
+    /// pass sizes base re-derives for the window actually drawing.
+    draw_scale: AtomicU32,
+    /// The base size the latest demand pass wants, packed `w << 32 | h`.
+    /// A queued derive for any other size bails before its resample.
+    wanted_base: std::sync::atomic::AtomicU64,
 }
 
 /// Most tiles one demand pass may claim: what one frame can draw.
@@ -186,8 +232,83 @@ impl TileSet {
     }
 
     /// The view-quality layer beneath the tiles.
-    pub fn base(&self) -> Option<&Keepalive> {
-        self.base.as_ref()
+    pub fn base(&self) -> Option<Keepalive> {
+        self.base.lock().ok().map(|base| base.clone())
+    }
+
+    /// Swap in a base re-derived at `target`, releasing that claim.
+    pub fn set_base(&self, base: Keepalive, target: (u32, u32)) {
+        if let Ok(mut slot) = self.base.lock() {
+            *slot = base;
+        }
+        self.settle_base(target);
+    }
+
+    /// Claim the base re-derive slot for `target`: true when no live claim
+    /// exists, or the live claim is for another size (stolen: the old
+    /// derive is superseded and dies at its next cancel check). A live
+    /// same-size claim holds. An expired claim counts as free.
+    pub fn try_claim_base(&self, target: (u32, u32)) -> bool {
+        self.base_pending
+            .lock()
+            .map(|mut slot| match *slot {
+                Some((claimed, wanted)) if wanted == target && claimed.elapsed() < CLAIM_TTL => {
+                    false
+                }
+                _ => {
+                    *slot = Some((std::time::Instant::now(), target));
+                    true
+                }
+            })
+            .unwrap_or(false)
+    }
+
+    /// A derive for `target` finished (either way): release the slot, unless
+    /// a thief re-claimed it for another size in the meantime.
+    pub fn settle_base(&self, target: (u32, u32)) {
+        if let Ok(mut slot) = self.base_pending.lock()
+            && matches!(*slot, Some((_, wanted)) if wanted == target)
+        {
+            *slot = None;
+        }
+    }
+
+    /// Production started: restart the tile's claim clock, so the TTL
+    /// measures the work, not the queue behind the gate.
+    pub fn refresh_claim(&self, key: TileKey) {
+        if let Ok(mut pending) = self.pending.lock()
+            && let Some(claimed) = pending.get_mut(&key)
+        {
+            *claimed = std::time::Instant::now();
+        }
+    }
+
+    /// A derive for `target` started: restart its claim clock, unless the
+    /// slot was stolen for another size while it queued.
+    pub fn refresh_base_claim(&self, target: (u32, u32)) {
+        if let Ok(mut slot) = self.base_pending.lock()
+            && matches!(*slot, Some((_, wanted)) if wanted == target)
+        {
+            *slot = Some((std::time::Instant::now(), target));
+        }
+    }
+
+    /// Record the base size the current view wants; stale derives bail.
+    pub fn set_wanted_base(&self, target: (u32, u32)) {
+        let packed = (u64::from(target.0) << 32) | u64::from(target.1);
+        self.wanted_base
+            .store(packed, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether `target` is still the base size the view wants.
+    pub fn base_wanted(&self, target: (u32, u32)) -> bool {
+        let packed = (u64::from(target.0) << 32) | u64::from(target.1);
+        self.wanted_base.load(std::sync::atomic::Ordering::Relaxed) == packed
+    }
+
+    /// The scale factor of the last tiled draw.
+    pub fn draw_scale(&self) -> f32 {
+        f32::from_bits(self.draw_scale.load(Ordering::Relaxed))
     }
 
     /// Install a produced tile, evicting the stalest past the cap.
@@ -256,22 +377,24 @@ impl TileSet {
 
 impl std::fmt::Debug for ResidentImage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let body = match &self.body {
+            Resident::Texture { .. } => "texture",
+            Resident::Tiled(_) => "tiled",
+            Resident::Empty => "empty",
+        };
         f.debug_struct("ResidentImage")
-            .field("resident", &self.image.is_some())
+            .field("body", &body)
             .finish()
     }
 }
 
 impl Drop for ResidentImage {
     fn drop(&mut self) {
-        if let Some(image) = self.image.take() {
-            match &self.drop_tx {
-                // Free on the upload thread, never the render thread.
-                Some(tx) => {
-                    let _ = tx.send(Job::Drop(image));
-                }
-                None => drop(image),
-            }
+        // Free on the upload thread, never the render thread.
+        if let Resident::Texture { image, drop_tx } =
+            std::mem::replace(&mut self.body, Resident::Empty)
+        {
+            let _ = drop_tx.send(Job::Drop(image));
         }
     }
 }
@@ -284,9 +407,7 @@ pub type Keepalive = Arc<ResidentImage>;
 #[cfg(test)]
 pub fn test_keepalive() -> Keepalive {
     Arc::new(ResidentImage {
-        image: None,
-        drop_tx: None,
-        tiles: None,
+        body: Resident::Empty,
     })
 }
 
@@ -298,10 +419,11 @@ pub struct ImagePipeline {
     uniforms: wgpu::Buffer,
     is_srgb: bool,
     /// The tiled draw list `prepare` resolved for this frame: each entry is a
-    /// resident tile (or the base layer) and the uniform slot holding its
-    /// rects. Holding the keepalives here keeps every tile alive through the
-    /// draw. One image primitive draws per frame, so one list suffices.
-    tile_draws: Vec<(Keepalive, u32)>,
+    /// tile (or the base layer) and the uniform slot holding its rects. Weak,
+    /// so a minimized window's stale list never pins tile VRAM the decay
+    /// tiers released. The pyramid holds the strong references, and no update
+    /// runs between prepare and draw to drop them mid-frame.
+    tile_draws: Vec<(std::sync::Weak<ResidentImage>, u32)>,
 }
 
 struct GpuImage {
@@ -531,13 +653,8 @@ impl ImagePipeline {
         resident: &ResidentImage,
         nearest: bool,
     ) {
-        let Some(image) = resident.image.as_ref() else {
+        let Some(bind) = resident.bind(nearest) else {
             return;
-        };
-        let bind = if nearest {
-            &image.bind_nearest
-        } else {
-            &image.bind_linear
         };
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.empty_bind, &[]);
@@ -559,11 +676,13 @@ impl ImagePipeline {
         src: [f32; 4],
         raw_footprint: [f32; 2],
         scale: f32,
+        viewport_phys: (f32, f32),
         kernel: DownscaleKernel,
     ) {
         use crate::media::tiles;
         self.tile_draws.clear();
         let original = set.original();
+        set.draw_scale.store(scale.to_bits(), Ordering::Relaxed);
         // Texels per physical pixel of the substrate; its inverse is the
         // physical zoom the LOD is chosen for.
         let footprint = [raw_footprint[0] / scale, raw_footprint[1] / scale];
@@ -571,25 +690,37 @@ impl ImagePipeline {
             && let Some((bw, bh)) = base.size()
         {
             let base_fp = [
-                footprint[0] * bw as f32 / original.0 as f32,
-                footprint[1] * bh as f32 / original.1 as f32,
+                snap_footprint_to_unit(footprint[0] * bw as f32 / original.0 as f32),
+                snap_footprint_to_unit(footprint[1] * bh as f32 / original.1 as f32),
             ];
+            // A base at its shown size aligns its source to its own texel
+            // grid, the exact snap the View tier gets, so its single taps
+            // are texel-exact even when only part of the image is visible.
+            let (bdst, bsrc) = crate::ui::image_display::snap_placement_to_pixels(
+                dst,
+                src,
+                (bw as f32, bh as f32),
+                viewport_phys,
+                crate::ui::image_display::near_one_to_one(base_fp),
+            );
             self.write_uniforms(
                 queue,
                 0,
-                dst,
-                src,
-                [
-                    snap_footprint_to_unit(base_fp[0]),
-                    snap_footprint_to_unit(base_fp[1]),
-                ],
+                bdst,
+                bsrc,
+                base_fp,
                 [bw as f32, bh as f32],
                 kernel,
             );
-            self.tile_draws.push((base.clone(), 0));
-            // The base alone is the whole answer while it still has a texel
-            // per display pixel; tiles take over past its resolution.
-            if base_fp[0] >= 1.0 && base_fp[1] >= 1.0 {
+            self.tile_draws.push((Arc::downgrade(&base), 0));
+            // The base covers the view when it is at least as fine as the
+            // display OR within the near-1:1 band: float dust leaves an
+            // exact base a hair either side of 1.0, and the snap only caps
+            // from above, so a bare >= 1.0 test lets one axis reading
+            // 0.9999 invite cascade tiles over an exact copy.
+            if crate::ui::image_display::near_one_to_one(base_fp)
+                || (base_fp[0] >= 1.0 && base_fp[1] >= 1.0)
+            {
                 set.draw_lod.store(DRAW_BASE_ONLY, Ordering::Relaxed);
                 return;
             }
@@ -622,7 +753,7 @@ impl ImagePipeline {
                 [tex.0 as f32, tex.1 as f32],
                 kernel,
             );
-            self.tile_draws.push((tile, slot));
+            self.tile_draws.push((Arc::downgrade(&tile), slot));
             slot += 1;
         }
     }
@@ -642,13 +773,11 @@ impl ImagePipeline {
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.empty_bind, &[]);
         for (tile, slot) in &self.tile_draws {
-            let Some(image) = tile.image.as_ref() else {
+            let Some(tile) = tile.upgrade() else {
                 continue;
             };
-            let bind = if nearest {
-                &image.bind_nearest
-            } else {
-                &image.bind_linear
+            let Some(bind) = tile.bind(nearest) else {
+                continue;
             };
             render_pass.set_bind_group(1, bind, &[*slot * UNIFORM_STRIDE as u32]);
             render_pass.draw(0..6, 0..1);
@@ -951,9 +1080,10 @@ fn spawn_upload_thread(
                         // The app holds this Arc (keeping the texture resident);
                         // dropping the last Arc frees the texture via `drop_tx`.
                         let resident = Arc::new(ResidentImage {
-                            image: Some(image),
-                            drop_tx: Some(drop_tx.clone()),
-                            tiles: None,
+                            body: Resident::Texture {
+                                image,
+                                drop_tx: drop_tx.clone(),
+                            },
                         });
                         let _ = ready.send(resident);
                     }
@@ -1059,9 +1189,10 @@ fn spawn_upload_thread(
                             timeout: None,
                         });
                         let resident = Arc::new(ResidentImage {
-                            image: Some(image),
-                            drop_tx: Some(drop_tx.clone()),
-                            tiles: None,
+                            body: Resident::Texture {
+                                image,
+                                drop_tx: drop_tx.clone(),
+                            },
                         });
                         let _ = ready.send(resident);
                     }

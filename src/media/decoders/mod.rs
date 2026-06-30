@@ -17,7 +17,7 @@ use image::{DynamicImage, imageops::FilterType};
 
 use crate::media::DecodedImage;
 use crate::media::regime;
-use crate::media::registry::DecodeOpts;
+use crate::media::registry::{DecodeIntent, DecodeOpts};
 
 /// Shared decode tail: reduce an oversized decode to the texture limit and
 /// the RAM budget, derive a thumbnail, and convert to RGBA8.
@@ -27,7 +27,7 @@ use crate::media::registry::DecodeOpts;
 pub(crate) fn finish(img: DynamicImage, opts: &DecodeOpts) -> DecodedImage {
     let original_size = (img.width(), img.height());
 
-    let target = if opts.tile_capable {
+    let target = if opts.intent == DecodeIntent::Display {
         regime::decode_target(original_size, opts.max_dimension, opts.ram_budget)
     } else {
         regime::fit_within(original_size, opts.max_dimension)

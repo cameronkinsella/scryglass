@@ -19,7 +19,7 @@ use tokio::sync::Semaphore;
 
 use super::archive::ArchiveIndex;
 use super::disk_thumbs::DiskThumbs;
-use super::registry::{self, DecodeOpts};
+use super::registry::{self, DecodeIntent, DecodeOpts};
 use super::{DecodedMedia, MediaError, ThumbData, thumbs};
 
 /// Which queue a load belongs to.
@@ -338,7 +338,7 @@ impl Pipeline {
                 let opts = DecodeOpts {
                     max_dimension: super::THUMB_DIM,
                     // A thumbnail wants the plain cap, never a full-size keep.
-                    tile_capable: false,
+                    intent: DecodeIntent::Thumbnail,
                     ..DecodeOpts::default()
                 };
                 match format.decode(&bytes, &opts)? {

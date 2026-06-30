@@ -162,6 +162,10 @@ pub struct Window {
     pub(crate) chrome_pad: Size,
     /// Last known cursor position (updated on every CursorMoved event).
     pub(crate) last_cursor_pos: iced::Point,
+    /// Bumped by every view change that debounces its tile demand pass, so
+    /// only the LAST settle timer of a gesture fires. Lives on the window,
+    /// not the viewer, so a stale timer can never match a fresh viewer.
+    pub(crate) tile_epoch: u64,
     /// Last known window size (for recalculating viewport on layout toggles).
     pub(crate) window_size: Size,
     /// Last known window position (top-left, logical px), updated on move.

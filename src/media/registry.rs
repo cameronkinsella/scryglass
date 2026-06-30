@@ -11,6 +11,16 @@ use super::{DecodedMedia, MediaError};
 /// device limit, but 8192 is the downlevel default and safe everywhere.
 pub const MAX_TEXTURE_DIM: u32 = 8192;
 
+/// Who a decode is for, deciding how an over-limit image is reduced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodeIntent {
+    /// The viewer: an over-limit still keeps its full size, displayed
+    /// through the tile pyramid.
+    Display,
+    /// A thumbnail: always the plain dimension cap.
+    Thumbnail,
+}
+
 /// Knobs for a single decode.
 #[derive(Debug, Clone, Copy)]
 pub struct DecodeOpts {
@@ -21,10 +31,8 @@ pub struct DecodeOpts {
     /// Ceiling for the decoded RGBA bytes kept in RAM. A decode past it is
     /// downscaled to fit (see [`super::regime`]).
     pub ram_budget: u64,
-    /// Whether the consumer can display past `max_dimension` through the tile
-    /// pyramid. The display path can, so its over-limit decodes keep their
-    /// full size; a thumbnail decode cannot and takes the plain cap.
-    pub tile_capable: bool,
+    /// Who the decode is for.
+    pub intent: DecodeIntent,
 }
 
 impl Default for DecodeOpts {
@@ -35,7 +43,7 @@ impl Default for DecodeOpts {
             max_dimension: MAX_TEXTURE_DIM,
             ram_budget: crate::config::RamBudget::default()
                 .resolve(crate::config::total_system_ram()),
-            tile_capable: true,
+            intent: DecodeIntent::Display,
         }
     }
 }

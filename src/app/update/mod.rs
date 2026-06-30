@@ -28,7 +28,7 @@ pub(crate) use file_ops::{
 };
 pub(crate) use media_tasks::{
     fire_exif, fire_load, fire_prefetch, fire_rotate, fire_thumbnailer, fire_tiles, run_jobs,
-    run_jobs_at, show_loaded, show_placeholder, try_start_shared_anim,
+    run_jobs_at, settle_tiles, show_loaded, show_placeholder, try_start_shared_anim,
 };
 pub(crate) use navigation::open_path;
 pub(crate) use navigation::{
@@ -135,7 +135,7 @@ fn apply_config(app: &mut App, config: AppConfig) -> Task<Envelope> {
     for (id, win) in app.windows.iter_mut() {
         super::recalc_viewport(win, &app.shared);
         // A chrome or zoom-mode change moves the placement, like a resize.
-        tasks.push(Envelope::wrap(*id, fire_tiles(win, &app.shared)));
+        tasks.push(Envelope::wrap(*id, settle_tiles(win)));
     }
     Task::batch(tasks)
 }

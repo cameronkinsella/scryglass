@@ -54,24 +54,20 @@ use crate::components::toasts::ToastKind;
 use crate::media::store::ImageKey;
 
 pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) -> Task<AppMessage> {
-    let before = win.viewer().map(|v| v.zoom);
+    let fingerprint = |win: &Window| win.viewer().map(|v| (v.zoom, v.nav.cursor()));
+    let before = fingerprint(win);
     let task = update_view(win, shared, message);
     // A pan streams a tiled still's missing tiles immediately. A zoom change
-    // crosses mip levels, so its demand instead waits for the gesture to
-    // rest, never producing soon-obsolete tiles at intermediate levels.
-    let tiles = match win.viewer_mut() {
-        Some(viewer) if before != Some(viewer.zoom) => {
-            viewer.tile_epoch += 1;
-            let epoch = viewer.tile_epoch;
-            Task::future(async move {
-                // Rest threshold: two notches of a typical mouse-wheel repeat
-                // still count as one gesture, a deliberate stop does not.
-                tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-                AppMessage::Media(crate::app::MediaMessage::TilesSettled { epoch })
-            })
-        }
-        Some(_) => crate::app::update::fire_tiles(win, shared),
-        None => Task::none(),
+    // or navigation moves to a placement no frame has stamped yet, so its
+    // demand instead waits for the view to rest, never producing
+    // soon-obsolete tiles.
+    let after = fingerprint(win);
+    let tiles = if after.is_none() {
+        Task::none()
+    } else if before != after {
+        crate::app::update::settle_tiles(win)
+    } else {
+        crate::app::update::fire_tiles(win, shared)
     };
     Task::batch([task, tiles])
 }
@@ -389,15 +385,28 @@ fn update_view(win: &mut Window, shared: &mut Shared, message: Message) -> Task<
             if !matches!(viewer.displayed, DisplayedImage::Full { .. }) {
                 return Task::none();
             }
-            // A tiled still has no single texture to re-upload rotated, so
-            // rotation is refused instead of drawing the pyramid distorted.
-            let tiled = viewer
+            // A substrate past the texture limit cannot re-upload rotated:
+            // refuse rather than draw it distorted. The true size stands in
+            // while the RAM is mid-re-decode.
+            let max = crate::media::registry::MAX_TEXTURE_DIM;
+            let too_large = viewer
                 .displayed_path
                 .as_ref()
                 .map(|path| ImageKey::new(&viewer.source, path))
-                .and_then(|key| shared.store.shared(&key))
-                .is_some_and(|resident| resident.tiles().is_some());
-            if tiled {
+                .and_then(|key| shared.store.ram(&key))
+                .map(|ram| match &ram.handle {
+                    iced::widget::image::Handle::Rgba { width, height, .. } => {
+                        width.max(height) > &max
+                    }
+                    _ => false,
+                })
+                .unwrap_or_else(|| {
+                    viewer
+                        .displayed
+                        .original_size()
+                        .is_some_and(|(w, h)| w.max(h) > max)
+                });
+            if too_large {
                 return push_toast(
                     win,
                     shared,

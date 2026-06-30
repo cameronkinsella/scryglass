@@ -240,7 +240,16 @@ impl shader::Primitive for ImagePrimitive {
             // its `tex_size` is the substrate, so the footprint above already
             // measures substrate texels per pixel.
             if let Some(set) = self.texture.as_ref().and_then(|t| t.tiles()) {
-                pipeline.prepare_tiles(queue, set, dst, src, raw, scale, self.kernel);
+                pipeline.prepare_tiles(
+                    queue,
+                    set,
+                    dst,
+                    src,
+                    raw,
+                    scale,
+                    (bounds.width * scale, bounds.height * scale),
+                    self.kernel,
+                );
                 return;
             }
             pipeline.clear_tiles();

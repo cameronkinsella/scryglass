@@ -139,6 +139,19 @@ pub(crate) fn downscale(
     downscale_region(pixels, src, (0, 0, src.0, src.1), target, kernel)
 }
 
+/// [`downscale`], abandoned mid-pass when `cancel` turns true. A large exact
+/// pass is seconds of taps; the check is one call per output row, so a
+/// superseded result stops costing within milliseconds.
+pub(crate) fn downscale_cancellable(
+    pixels: &[u8],
+    src: (u32, u32),
+    target: (u32, u32),
+    kernel: DownscaleKernel,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Option<Vec<u8>> {
+    downscale_region_inner(pixels, src, (0, 0, src.0, src.1), target, kernel, cancel)
+}
+
 /// Downscale one `region` (x, y, w, h in source pixels) of `pixels` to `target`,
 /// producing a tile of the same downscale a whole-image pass would give. Taps near
 /// the region's border sample the full image, not a crop, so adjacent tiles
@@ -152,6 +165,17 @@ pub(crate) fn downscale_region(
     target: (u32, u32),
     kernel: DownscaleKernel,
 ) -> Vec<u8> {
+    downscale_region_inner(pixels, src, region, target, kernel, &|| false).expect("never cancelled")
+}
+
+fn downscale_region_inner(
+    pixels: &[u8],
+    src: (u32, u32),
+    region: (i64, i64, u32, u32),
+    target: (u32, u32),
+    kernel: DownscaleKernel,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Option<Vec<u8>> {
     let (sw, sh) = (src.0 as usize, src.1 as usize);
     let (tw, th) = (target.0.max(1) as usize, target.1.max(1) as usize);
     let (selector, bc) = kernel.shader_params();
@@ -167,6 +191,9 @@ pub(crate) fn downscale_region(
         let left = (-x0).clamp(0, tw as i64) as usize;
         let in_end = (sw as i64 - x0).clamp(left as i64, tw as i64) as usize;
         for (oy, row) in out.chunks_mut(tw * 4).enumerate() {
+            if cancel() {
+                return None;
+            }
             let sy = (region.1 + oy as i64).clamp(0, sh as i64 - 1) as usize;
             let src_row = &pixels[sy * sw * 4..(sy + 1) * sw * 4];
             for px in row[..left * 4].chunks_mut(4) {
@@ -181,7 +208,7 @@ pub(crate) fn downscale_region(
                 px.copy_from_slice(&src_row[(sw - 1) * 4..]);
             }
         }
-        return out;
+        return Some(out);
     }
 
     // The region's frame in full-image UV: an output texel at region UV `v`
@@ -199,7 +226,10 @@ pub(crate) fn downscale_region(
     if selector == 0 {
         out.par_chunks_mut(tw * 4)
             .enumerate()
-            .for_each(|(oy, row)| {
+            .try_for_each(|(oy, row)| {
+                if cancel() {
+                    return Err(());
+                }
                 let vy = off_y + (oy as f32 + 0.5) / th as f32 * span_y;
                 for (ox, px) in row.chunks_mut(4).enumerate() {
                     let vx = off_x + (ox as f32 + 0.5) / tw as f32 * span_x;
@@ -208,8 +238,10 @@ pub(crate) fn downscale_region(
                         px[c] = (s[c] * 255.0).round() as u8;
                     }
                 }
-            });
-        return out;
+                Ok(())
+            })
+            .ok()?;
+        return Some(out);
     }
 
     let radius = if selector == 2 { 3.0 } else { 2.0 };
@@ -231,7 +263,10 @@ pub(crate) fn downscale_region(
 
     out.par_chunks_mut(tw * 4)
         .enumerate()
-        .for_each(|(oy, row)| {
+        .try_for_each(|(oy, row)| {
+            if cancel() {
+                return Err(());
+            }
             let vy = off_y + (oy as f32 + 0.5) / th as f32 * span_y;
             for (ox, px) in row.chunks_mut(4).enumerate() {
                 let vx = off_x + (ox as f32 + 0.5) / tw as f32 * span_x;
@@ -265,8 +300,10 @@ pub(crate) fn downscale_region(
                 }
                 px[3] = (alpha * 255.0).round() as u8;
             }
-        });
-    out
+            Ok(())
+        })
+        .ok()?;
+    Some(out)
 }
 
 #[cfg(test)]
@@ -282,6 +319,18 @@ mod tests {
 
     fn solid(w: u32, h: u32, rgba: [u8; 4]) -> Vec<u8> {
         (0..w * h).flat_map(|_| rgba).collect()
+    }
+
+    #[test]
+    fn a_cancelled_downscale_stops_and_an_uncancelled_one_matches() {
+        let px = solid(64, 64, [10, 200, 30, 255]);
+        for kernel in KERNELS {
+            let plain = downscale(&px, (64, 64), (16, 16), kernel);
+            let same = downscale_cancellable(&px, (64, 64), (16, 16), kernel, &|| false);
+            assert_eq!(same.as_deref(), Some(plain.as_slice()));
+            let stopped = downscale_cancellable(&px, (64, 64), (16, 16), kernel, &|| true);
+            assert!(stopped.is_none());
+        }
     }
 
     #[test]

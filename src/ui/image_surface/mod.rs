@@ -9,7 +9,7 @@ mod program;
 #[cfg(test)]
 pub use pipeline::test_keepalive;
 pub use pipeline::{
-    DrawWant, Keepalive, MAX_TILE_DRAWS, ResidentImage, current_kernel, current_scale_factor,
-    submit_render_downscale, submit_upload,
+    DrawWant, Keepalive, MAX_TILE_DRAWS, ResidentImage, TileSet, current_kernel,
+    current_scale_factor, submit_render_downscale, submit_upload,
 };
 pub use program::{view, warmup};
