@@ -162,14 +162,16 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             // that became resident via a shared upload (another window's decode),
             // so no decode of its own ever fired show_loaded.
             if let Some(viewer) = win.viewer_mut() {
-                let on_screen = matches!(
-                    viewer.displayed,
-                    DisplayedImage::Placeholder(_) | DisplayedImage::None
-                );
-                let target = viewer
-                    .displayed_path
-                    .clone()
-                    .filter(|path| on_screen && ImageKey::new(&viewer.source, path) == key);
+                let target = match &viewer.displayed {
+                    DisplayedImage::Placeholder(_) => viewer.displayed_path.clone(),
+                    // Nothing on screen at all (no thumbnail to stand in): the
+                    // cursor names what this window is waiting for. A fresh
+                    // window opening an image another window already holds in
+                    // RAM runs no decode, so this upload is its only signal.
+                    DisplayedImage::None => Some(viewer.nav.current().to_path_buf()),
+                    _ => None,
+                };
+                let target = target.filter(|path| ImageKey::new(&viewer.source, path) == key);
                 if let Some(path) = target
                     && let Some(ram) = shared.store.ram(&key)
                 {
@@ -592,6 +594,54 @@ mod tests {
                 .in_flight_thumbs
                 .contains(Path::new("a.png"))
         );
+    }
+
+    #[test]
+    fn texture_ready_puts_a_first_image_on_screen_without_a_thumb() {
+        use crate::media::store::RamImage;
+        use iced::widget::image::Handle;
+
+        // Another window already decoded a.png: its RAM sits in the shared
+        // store, so this window's open fires only an upload, never a decode.
+        // With no thumbnail cached nothing stands in on screen, and the
+        // upload's landing is this window's one signal to display.
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        let source = crate::media::pipeline::Source::Fs;
+        let key = ImageKey::new(&source, Path::new("a.png"));
+        let (lease, _) =
+            app.shared
+                .store
+                .request(key.clone(), PathBuf::from("a.png"), source, Tier::Full);
+        let _ = app.shared.store.on_decoded(
+            key.clone(),
+            RamImage {
+                handle: Handle::from_rgba(2, 2, vec![0u8; 16]),
+                original_size: (2, 2),
+                decode_time: None,
+            },
+        );
+        app.viewer_mut()
+            .unwrap()
+            .cache
+            .insert(PathBuf::from("a.png"), lease);
+        assert!(matches!(
+            app.viewer().unwrap().displayed,
+            DisplayedImage::None
+        ));
+
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::TextureReady {
+                key,
+                tier: Tier::Full,
+                texture: crate::ui::image_surface::test_keepalive(),
+            },
+        );
+
+        let v = app.viewer().unwrap();
+        assert!(matches!(v.displayed, DisplayedImage::Full { .. }));
+        assert_eq!(v.displayed_path.as_deref(), Some(Path::new("a.png")));
     }
 
     #[test]
