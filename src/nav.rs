@@ -119,6 +119,14 @@ impl Nav {
         &self.files
     }
 
+    /// The wrapping navigation distance from the cursor to `path` (the fewest
+    /// steps in either direction), or `None` when it is not in the listing.
+    pub fn distance(&self, path: &Path) -> Option<usize> {
+        let index = self.files.iter().position(|f| f == path)?;
+        let raw = self.cursor.abs_diff(index);
+        Some(raw.min(self.files.len() - raw))
+    }
+
     /// Jump the cursor to an absolute index (wraps via modular arithmetic).
     pub fn set_cursor(&mut self, index: usize) {
         self.cursor = index % self.files.len();
@@ -323,6 +331,18 @@ mod tests {
             .collect();
         assert_eq!(around, expect);
         assert!(!around.contains(&PathBuf::from("3.png"))); // current excluded
+    }
+
+    #[test]
+    fn distance_is_the_fewest_wrapping_steps() {
+        let files: Vec<PathBuf> = (0..10).map(|i| PathBuf::from(format!("{i}.png"))).collect();
+        let nav = Nav::new(files, Path::new("1.png")).unwrap();
+        assert_eq!(nav.distance(Path::new("1.png")), Some(0));
+        assert_eq!(nav.distance(Path::new("3.png")), Some(2));
+        // 9.png is 8 forward but only 2 backward through the wrap.
+        assert_eq!(nav.distance(Path::new("9.png")), Some(2));
+        assert_eq!(nav.distance(Path::new("6.png")), Some(5));
+        assert_eq!(nav.distance(Path::new("missing.png")), None);
     }
 
     #[test]

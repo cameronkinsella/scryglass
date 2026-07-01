@@ -2,13 +2,13 @@
 
 scryglass keeps its settings in `config.toml` (open it from **Settings → Open
 Advanced Settings**, or find it next to the app in portable mode, otherwise under
-your OS config directory). Most settings have an in-app control; the ones here can
+your OS config directory). Most settings have an in-app control. The ones here can
 only be changed by editing the file. Saved edits apply live across all open windows,
-with no relaunch (decay-pipeline changes take effect on the next image); the one
+with no relaunch (decay-pipeline changes take effect on the next image). The one
 exception is the `[startup]` section, which needs a full restart. Every key
 has a sensible default, so you only set what you want to change. Unknown keys are
 ignored and missing keys fall back to their default, so the file is safe to evolve
-and hand-edit; a syntax error is reported and the previous settings are kept.
+and hand-edit. A syntax error is reported and the previous settings are kept.
 
 Durations are written as readable strings: `"15s"`, `"200ms"`, `"1m30s"`, or
 `"never"` to disable.
@@ -29,7 +29,7 @@ Durations are written as readable strings: `"15s"`, `"200ms"`, `"1m30s"`, or
 | `sort_key` | `"Name"` \| `"DateModified"` \| `"Size"` | `"Name"` | File ordering. |
 | `sort_desc` | bool | `false` | Reverse the sort order. |
 | `crisp_pixels` | bool | `false` | Nearest-neighbor sampling above 100% zoom (crisp pixel art). |
-| `downscale_kernel` | enum | `"mitchell"` | Kernel used to shrink stills and animations to fit (`bilinear`, `mitchell`, `catmull-rom`, `lanczos3`). All fix the aliasing a plain bilinear tap leaves when shrinking past ~2x; sharper kernels (`catmull-rom`, `lanczos3`) resolve more detail but can ring on text and hard edges. |
+| `downscale_kernel` | enum | `"mitchell"` | Kernel used to shrink stills and animations to fit (`bilinear`, `mitchell`, `catmull-rom`, `lanczos3`). All fix the aliasing a plain bilinear tap leaves when shrinking past ~2x. Sharper kernels (`catmull-rom`, `lanczos3`) resolve more detail but can ring on text and hard edges. |
 | `show_checkerboard` | bool | `false` | Draw a checkerboard behind images to reveal transparency. |
 
 ## File operations
@@ -44,7 +44,7 @@ Durations are written as readable strings: `"15s"`, `"200ms"`, `"1m30s"`, or
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
-| `video_volume` | float `0.0`–`1.0` | `1.0` | Playback volume. |
+| `video_volume` | float `0.0`-`1.0` | `1.0` | Playback volume. |
 | `video_muted` | bool | `false` | Start muted. |
 | `video_loop` | bool | `false` | Loop playback. |
 | `hardware_decode` | bool | `true` | Use the GPU video decoder when available, falling back to software. |
@@ -81,7 +81,7 @@ already running joins the existing process, which keeps its startup settings.
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
-| `present_mode` | enum | `"mailbox"` on Windows, `"auto"` elsewhere | How rendered frames are handed to the display; values below. |
+| `present_mode` | enum | `"mailbox"` on Windows, `"auto"` elsewhere | How rendered frames are handed to the display (values below). |
 
 | Value | Meaning |
 |---|---|
@@ -92,7 +92,7 @@ already running joins the existing process, which keeps its startup settings.
 | `"immediate"` | No sync at all: the lowest latency, may tear anywhere. |
 | `"no-vsync"` | Vsync off with graceful fallback (`immediate` where offered, else `mailbox`, else `fifo`), so it works on any driver. |
 
-Not every driver offers every mode; notably, AMD's Windows Vulkan driver has no
+Not every driver offers every mode. AMD's Windows Vulkan driver has no
 mailbox. Requesting a missing mode would fail at launch, so on Windows scryglass
 probes the driver first and quietly falls back to `"auto"` when the requested mode
 is absent. `"auto"`, `"fifo"`, and `"no-vsync"` can never be missing. On other
@@ -107,7 +107,7 @@ validation, which is handy for a quick experiment.
 ## Resource model (`[resource]`)
 
 scryglass reclaims a window's GPU and RAM as it moves to the background, and gives
-it back when you return. This is fully tunable. The defaults are a balance; a slim
+it back when you return. This is fully tunable. The defaults are a balance. A slim
 build can reclaim more aggressively, and a "blazing fast always" build can disable
 decay entirely.
 
@@ -117,7 +117,7 @@ A backgrounded window runs a forward-only **decay pipeline**:
 full-res VRAM  →demote→  view-res VRAM  →drop→  no VRAM  →evict→  no RAM
 ```
 
-"Drop" frees the VRAM only (re-uploaded from the RAM copy on return); "evict"
+"Drop" frees the VRAM only (re-uploaded from the RAM copy on return). "Evict"
 frees the RAM copy too (re-decoded from disk on return). Each step has its own
 timer (a duration, or `"never"` to skip it), measured from when the window
 entered the state. The steps can never run out of order, and re-focusing (or
@@ -127,9 +127,9 @@ use the same controls, with different defaults.
 | Key | Type | Default | Effect |
 |---|---|---|---|
 | `prefetch_vram` | `"full-res"` \| `"view-res"` \| `"none"` | `"view-res"` | What resolution a focused window's prefetched neighbors keep in VRAM. `full-res` is instant-crisp on navigation but heavy; `none` keeps them in RAM only. |
-| `prefetch_scaler` | `"gpu"` \| `"cpu"` | `"gpu"` | Where a prefetched neighbor's view-res copy is produced. Both give identical pixels. `gpu` renders it through the display shader, briefly holding the neighbor's full decode in VRAM (up to ~268 MB per neighbor, two at once); `cpu` resamples at background priority with no extra VRAM but seconds of CPU per neighbor. |
+| `prefetch_scaler` | `"gpu"` \| `"cpu"` | `"gpu"` | Where a prefetched neighbor's view-res copy is produced. Both give identical pixels. `gpu` renders it through the display shader, briefly holding the neighbor's full decode in VRAM (up to ~268 MB per neighbor, two at once). `cpu` resamples at background priority with no extra VRAM but seconds of CPU per neighbor. |
 | `prefetch_parallelism` | `"auto"` or a count | `"auto"` | How many prefetch neighbors decode at once, nearest first. Bounds the CPU burst and the peak RAM held by in-flight decodes (each holds its full decoded pixels until cached). `auto` is half the logical cores, at least 2; lower it on memory-tight machines, raise it to warm deep navigation faster. |
-| `large_image_ram_budget` | percent or size | `"50%"` | Ceiling for a single image's decoded pixels in RAM. An image whose decode would exceed it opens downscaled to fit instead of failing (a 1-gigapixel image decodes to 4 GB). Accepts a share of the machine's RAM (`"50%"`) or an absolute size (`"2GB"`, `"500MB"`); units `B`/`KB`/`MB`/`GB`/`TB` are powers of 1000, the `KiB` family powers of 1024. The budget only binds past the texture limit, so images within 8192 px per side (at most ~268 MB decoded) are never downscaled by it. |
+| `large_image_ram_budget` | percent or size | `"50%"` | Ceiling for a single image's decoded pixels in RAM. An image whose decode would exceed it opens downscaled to fit instead of failing (a 1-gigapixel image decodes to 4 GB). Accepts a share of the machine's RAM (`"50%"`) or an absolute size (`"2GB"`, `"500MB"`). Units `B`/`KB`/`MB`/`GB`/`TB` are powers of 1000, the `KiB` family powers of 1024. The budget only binds past the texture limit, so images within 8192 px per side (at most ~268 MB decoded) are never downscaled by it. |
 
 ### `[resource.unfocused.{still,animated,video}]` and `[resource.minimized.{still,animated,video}]`
 
@@ -145,9 +145,9 @@ session (see below).
 
 | Key | Type | Default (still: unfocused / minimized) | Effect |
 |---|---|---|---|
-| `demote_vram_after` | duration \| `"never"` | `"15s"` / `"never"` | **(still only)** Demote the on-screen image from full-res to view-res VRAM (and drop the prefetch look-ahead). |
+| `demote_vram_after` | duration \| `"never"` | `"15s"` / `"never"` | **(still only)** Demote the on-screen image from full-res to view-res VRAM. |
 | `drop_vram_after` | duration \| `"never"` | `"never"` / `"0s"` | **(still only)** Drop the on-screen image's VRAM entirely (it falls back to its thumbnail until you return). |
-| `evict_ram` | `"never"` \| duration \| `"dynamic"` | `"dynamic"` / `"dynamic"` | When to evict the full-resolution copy from RAM (re-decoded from disk on return). A duration is a fixed delay; `dynamic` decides per image from how long it took to decode (see below); `never` always keeps it. |
+| `evict_ram` | `"never"` \| duration \| `"dynamic"` | `"dynamic"` / `"dynamic"` | When to evict the full-resolution copy from RAM (re-decoded from disk on return). A duration is a fixed delay. `dynamic` decides per image from how long it took to decode (see below). `never` always keeps it. |
 | `evict_ram_min` | duration | `"30s"` / `"15s"` | `dynamic` only: the evict delay for an image that decodes instantly. |
 | `evict_ram_max` | duration | `"10m"` / `"5m"` | `dynamic` only: the evict delay for an image right at the latency ceiling. |
 | `max_decode_latency` | duration | `"200ms"` / `"200ms"` | `dynamic` only: an image that took longer than this to decode (read + decode) is never evicted, so slow storage (a NAS) stays resident. |
@@ -158,11 +158,34 @@ The `video` sub-table has a single key:
 |---|---|---|---|
 | `evict_session_after` | duration \| `"never"` | `"never"` / `"5s"` | When to release an open video's whole decode session (its decode threads, hardware decoder, audio sink, and GPU textures). The last frame stays frozen on screen and the video re-opens at the saved position when you return. `never` keeps the session alive (a minimized window still pauses it, see `pause_video`). |
 
-`[resource.minimized]` additionally has, at the state level (not per media kind):
+`[resource.minimized]` has one more key at the state level (not per media kind):
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
 | `pause_video` | bool | `true` | Pause an open video while the window is minimized. |
+
+### `[resource.unfocused.prefetch]` and `[resource.minimized.prefetch]`
+
+A backgrounded window sheds its prefetched neighbors separately from the
+on-screen image, and this sub-table controls when and how fast. Shedding walks
+inward ring by ring from the furthest neighbors: each step releases the most
+distant remaining ring (up to one image per side, both sides together), so the
+neighbors you are most likely to see next are the last to go. A released
+neighbor frees both its VRAM and its RAM; returning to the window re-warms the
+look-ahead (re-decoding what was shed).
+
+| Key | Type | Default (unfocused / minimized) | Effect |
+|---|---|---|---|
+| `drop_on` | `"immediately"` \| `"demote"` \| `"drop"` \| `"evict"` | `"demote"` / `"immediately"` | The event the shedding counts from. `immediately` counts from entering the state. The others count from the on-screen image's decay reaching that point of its pipeline. An anchor stage the pipeline skips falls through to the next stage that actually runs (`"demote"` still sheds with the drop stage when demote is `"never"`, and with an animation's evict or a video's session release). Only when nothing at or after the anchor runs is the prefetch kept. |
+| `drop_after` | duration | `"0s"` / `"15s"` | How long after the event the first ring is released. |
+| `drop_interval` | duration | `"0s"` / `"5s"` | The pause between one ring and the next. `0s` sheds everything in one sweep. |
+
+The defaults follow each state's still pipeline: an unfocused window sheds its
+look-ahead with the demote stage in one sweep (as it always has), while a
+minimized window, whose still pipeline has no demote stage, walks its rings in
+on a timer of its own: nothing for the first 15 seconds (a quick alt-tab back
+keeps the whole deck), then one ring every 5 seconds until only the on-screen
+image remains.
 
 **Dynamic eviction** scales the RAM-evict delay linearly with the image's measured
 decode time: a fast (SSD) image is reclaimed soon after `evict_ram_min`, a slower
@@ -175,14 +198,14 @@ RAM on local storage while never punishing slow network drives.
 decode pipeline (decode threads, the hardware decoder, the audio sink, and the GPU
 plane textures). So memory scales with the videos you can actually see, not with
 every window left open. A released video that is still visible (an unfocused window)
-keeps its last frame frozen on screen, so it looks paused rather than blank; a
+keeps its last frame frozen on screen, so it looks paused rather than blank. A
 minimized window is hidden, so it drops the frame too and repaints when you restore
 it. Either way it re-opens at the saved position and play state. Re-opening pays a
 brief decoder warm-up (a demux seek plus the first frame), which is why a quick
 alt-tab back within the grace period keeps the session. An archive video re-uses the file it was already extracted to, so it never
 re-extracts. While a video is released its transport controls disappear and keyboard
 playback keys do nothing until it returns, so unfocused (still visible) videos
-default to never releasing; only minimized (hidden) ones do.
+default to never releasing. Only minimized (hidden) ones do.
 
 ### `[resource.working_set]` (Windows only)
 
@@ -197,5 +220,5 @@ the OS reclaims idle memory on its own.
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
-| `trim_when` | `"never"` \| `"all-unfocused"` \| `"all-minimized"` | `"never"` | The background condition that arms the trim. `all-unfocused` fires whenever scryglass is not the foreground app (any window still visible); `all-minimized` only once every window is minimized (fully hidden), which hides the re-fault behind the restore you are already waiting on. |
+| `trim_when` | `"never"` \| `"all-unfocused"` \| `"all-minimized"` | `"never"` | The background condition that arms the trim. `all-unfocused` fires whenever scryglass is not the foreground app (any window still visible). `all-minimized` fires only once every window is minimized (fully hidden), hiding the re-fault behind the restore you are already waiting on. |
 | `trim_after` | duration | `"10s"` | How long the condition must hold, uninterrupted, before the trim fires. A refocus or restore within this grace period cancels it. |

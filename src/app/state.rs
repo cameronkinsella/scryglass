@@ -63,7 +63,7 @@ pub enum DisplayedImage {
     /// An animation. Like a still, its on-screen pixels are derived at render time
     /// from the resource owner (here `anim_player`'s current frame texture, else
     /// the thumbnail blur), so the display owns nothing and never blanks: eviction
-    /// just frees the frames and the view falls back to the thumbnail.
+    /// frees the frames and the view falls back to the thumbnail.
     Animated { original_size: (u32, u32) },
     /// Live video, drawn by the GPU YUV surface. Carries dimensions for
     /// zoom and the info panel. The frame planes live on the viewer.
@@ -136,7 +136,7 @@ pub struct Viewer {
     pub displayed: DisplayedImage,
     /// This window's store leases, keyed by path: the on-screen image plus its
     /// prefetch neighbors. Each lease is a claim on the one shared texture the
-    /// store owns; holding it keeps the image resident at the demanded tier, and
+    /// store owns. Holding it keeps the image resident at the demanded tier, and
     /// dropping it (navigation, decay, close) lowers the demand. The set is the
     /// window's whole still-image footprint: no separate warm pool.
     pub cache: HashMap<PathBuf, Lease>,
@@ -253,15 +253,28 @@ impl Viewer {
         }
     }
 
-    /// Shed the prefetch look-ahead down to just the on-screen image, freeing
-    /// the neighbors' VRAM and RAM. Called when a window has sat unfocused long
-    /// enough that its look-ahead is unlikely to be used soon; refocus re-warms
-    /// it. Thumbnails are kept (small, and the filmstrip draws them).
-    pub fn drop_prefetch(&mut self) {
+    /// Release the furthest ring of prefetched neighbors: among cached entries
+    /// other than the on-screen image, find the greatest navigation distance
+    /// and drop every lease at it, at most one per side. A path no longer in
+    /// the listing counts as furthest of all. Returns true while prefetched
+    /// entries remain cached after this ring, so the caller knows to come back.
+    pub fn drop_prefetch_ring(&mut self) -> bool {
         let keep: HashSet<PathBuf> = std::iter::once(self.nav.current().to_path_buf())
             .chain(self.displayed_path.clone())
             .collect();
-        self.cache.retain(|p, _| keep.contains(p));
+        let nav = &self.nav;
+        let Some(ring) = self
+            .cache
+            .keys()
+            .filter(|p| !keep.contains(*p))
+            .map(|p| nav.distance(p).unwrap_or(usize::MAX))
+            .max()
+        else {
+            return false;
+        };
+        self.cache
+            .retain(|p, _| keep.contains(p) || nav.distance(p).unwrap_or(usize::MAX) != ring);
+        self.cache.keys().any(|p| !keep.contains(p))
     }
 
     /// The paths that must stay cached: the current image plus the
@@ -470,7 +483,7 @@ mod tests {
     }
 
     /// A lease holding a resident full-res texture, as after a decode and upload.
-    /// The backing store is dropped right away; the lease keeps its shared cell
+    /// The backing store is dropped right away. The lease keeps its shared cell
     /// alive on its own (the cell is `Arc`), so `lease.texture()` stays `Some` and
     /// the image counts as displayable.
     fn resident_lease(path: &str) -> Lease {
@@ -509,17 +522,41 @@ mod tests {
     }
 
     #[test]
-    fn drop_prefetch_keeps_only_the_on_screen_image() {
+    fn prefetch_rings_drop_furthest_first_both_sides_at_once() {
+        let mut viewer = test_viewer(&["a.png", "b.png", "c.png", "d.png", "e.png"], 2);
+        for name in ["a.png", "b.png", "c.png", "d.png", "e.png"] {
+            cache_image(&mut viewer, name);
+        }
+        viewer.displayed_path = Some(PathBuf::from("c.png"));
+
+        // First ring: the outermost pair (distance 2) goes, the near pair stays.
+        assert!(viewer.drop_prefetch_ring());
+        assert!(!viewer.cache.contains_key(Path::new("a.png")));
+        assert!(!viewer.cache.contains_key(Path::new("e.png")));
+        assert!(viewer.cache.contains_key(Path::new("b.png")));
+        assert!(viewer.cache.contains_key(Path::new("d.png")));
+
+        // Second ring: the near pair goes too. Nothing prefetched remains.
+        assert!(!viewer.drop_prefetch_ring());
+        assert!(viewer.cache.contains_key(Path::new("c.png")));
+        assert_eq!(viewer.cache.len(), 1);
+
+        // Nothing left to shed: still false, the on-screen image untouched.
+        assert!(!viewer.drop_prefetch_ring());
+        assert!(viewer.cache.contains_key(Path::new("c.png")));
+    }
+
+    #[test]
+    fn paths_outside_the_listing_shed_before_real_neighbors() {
         let mut viewer = test_viewer(&["a.png", "b.png", "c.png"], 1);
-        cache_image(&mut viewer, "a.png");
         cache_image(&mut viewer, "b.png");
         cache_image(&mut viewer, "c.png");
+        cache_image(&mut viewer, "stale.png");
         viewer.displayed_path = Some(PathBuf::from("b.png"));
 
-        viewer.drop_prefetch();
-
-        assert!(viewer.cache.contains_key(Path::new("b.png")));
-        assert!(!viewer.cache.contains_key(Path::new("a.png")));
-        assert!(!viewer.cache.contains_key(Path::new("c.png")));
+        // The stale path is not in the listing, so it counts as furthest.
+        assert!(viewer.drop_prefetch_ring());
+        assert!(!viewer.cache.contains_key(Path::new("stale.png")));
+        assert!(viewer.cache.contains_key(Path::new("c.png")));
     }
 }

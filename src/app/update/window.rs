@@ -45,15 +45,20 @@ pub enum Message {
 /// demote/drop/evict, an animation only evict, a video only its session release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecayStage {
-    /// Demote the on-screen image to view-res and drop the prefetch look-ahead.
+    /// Demote the on-screen image to view-res.
     Demote,
-    /// Release all of this window's GPU textures (the RAM sources survive).
+    /// Drop the on-screen image's GPU texture (its RAM source survives).
     DropVram,
     /// Evict this window's RAM sources, so they re-decode from disk on return.
     EvictRam,
     /// Release an open video's whole decode session, freezing the last frame; a
     /// restore re-opens it at the saved position.
     EvictVideo,
+    /// Release the furthest remaining ring of prefetched neighbors, then re-arm
+    /// itself after the configured interval while any remain. Started by its
+    /// configured anchor event (state entry or one of the stages above), so it
+    /// runs beside the on-screen pipeline, not inside it.
+    ShedPrefetch,
 }
 use std::time::Duration;
 
@@ -63,7 +68,7 @@ use super::{fire_load, fire_prefetch, run_jobs_at, try_start_shared_anim};
 use crate::app::state::{DisplayedImage, Viewer};
 use crate::app::viewer_math::{clamp_pan, compute_zoom};
 use crate::app::{Message as AppMessage, Shared, Window, recalc_viewport};
-use crate::config::{EvictConfig, PrefetchVram, VideoDecay};
+use crate::config::{EvictConfig, PrefetchDecay, PrefetchDropAnchor, PrefetchVram, VideoDecay};
 use crate::media::pipeline::{Lane, Pipeline};
 use crate::media::store::{ImageKey, Tier};
 
@@ -280,6 +285,20 @@ fn run_decay_stage(
     if generation != win.decay_generation {
         return Task::none();
     }
+    // The shedding walks in one ring per firing: release the furthest ring and,
+    // while any neighbor remains, come back after the configured interval.
+    if stage == DecayStage::ShedPrefetch {
+        let interval = if win.minimized {
+            shared.config.resource.minimized.prefetch.drop_interval
+        } else {
+            shared.config.resource.unfocused.prefetch.drop_interval
+        };
+        let more = win.viewer_mut().is_some_and(Viewer::drop_prefetch_ring);
+        if more {
+            return arm_decay(generation, DecayStage::ShedPrefetch, interval);
+        }
+        return Task::none();
+    }
     // Releasing a video session touches both the viewer and the window's resume flag,
     // so handle it before borrowing the viewer for the store-backed (still) stages.
     if stage == DecayStage::EvictVideo {
@@ -323,9 +342,7 @@ fn run_decay_stage(
     // focused window holds never blanks from a background window's decay.
     match stage {
         DecayStage::Demote => {
-            // Shed the prefetch look-ahead and demote the on-screen image to a
-            // smaller view-res texture.
-            viewer.drop_prefetch();
+            // Demote the on-screen image to a smaller view-res texture.
             retarget_displayed(viewer, shared, Tier::View, &pipeline, view)
         }
         DecayStage::DropVram => {
@@ -335,8 +352,6 @@ fn run_decay_stage(
         }
         DecayStage::EvictRam => {
             let is_anim = matches!(viewer.displayed, DisplayedImage::Animated { .. });
-            // Free the RAM too. Shed any remaining look-ahead first.
-            viewer.drop_prefetch();
             if is_anim {
                 // Lower this window's demand on the shared frames to evicted, exactly
                 // like a still lowering its tier, and nothing more. The lease and the
@@ -359,7 +374,41 @@ fn run_decay_stage(
                 retarget_displayed(viewer, shared, Tier::Evicted, &pipeline, view)
             }
         }
-        DecayStage::EvictVideo => unreachable!("handled before the viewer borrow above"),
+        DecayStage::EvictVideo | DecayStage::ShedPrefetch => {
+            unreachable!("handled before the viewer borrow above")
+        }
+    }
+}
+
+/// When the prefetch shedding starts, measured from state entry: the anchor
+/// resolves to the earliest armed stage at or after it in pipeline order, plus
+/// the configured delay. A skipped anchor stage falls through to the next one
+/// that actually runs, so `drop_on = "demote"` still sheds when only the drop
+/// stage is enabled. `None` (keep the prefetch) only when nothing at or after
+/// the anchor runs.
+fn shed_start(cfg: &PrefetchDecay, stages: &[(DecayStage, Duration)]) -> Option<Duration> {
+    let anchor = match cfg.drop_on {
+        PrefetchDropAnchor::Immediately => return Some(cfg.drop_after),
+        PrefetchDropAnchor::Demote => 0,
+        PrefetchDropAnchor::Drop => 1,
+        PrefetchDropAnchor::Evict => 2,
+    };
+    stages
+        .iter()
+        .filter(|(stage, _)| stage_rank(*stage) >= anchor)
+        .map(|(_, delay)| *delay + cfg.drop_after)
+        .min()
+}
+
+/// A stage's position in the decay pipeline, for the anchor fall-through. A
+/// video's session release stands in for its evict.
+fn stage_rank(stage: DecayStage) -> u8 {
+    match stage {
+        DecayStage::Demote => 0,
+        DecayStage::DropVram => 1,
+        DecayStage::EvictRam | DecayStage::EvictVideo => 2,
+        // Never armed by the still/anim/video schedules, so never an anchor.
+        DecayStage::ShedPrefetch => u8::MAX,
     }
 }
 
@@ -451,6 +500,17 @@ fn restart_decay(win: &mut Window, shared: &mut Shared) -> Task<AppMessage> {
         };
         decay_schedule(cfg, decode)
     };
+    // The shedding's start is resolved against the stages that actually run
+    // (a skipped anchor falls through), so it is armed here as one absolute
+    // timer from state entry, like the stages themselves.
+    let prefetch = if win.minimized {
+        &res.minimized.prefetch
+    } else {
+        &res.unfocused.prefetch
+    };
+    if let Some(delay) = shed_start(prefetch, &stages) {
+        tasks.push(arm_decay(generation, DecayStage::ShedPrefetch, delay));
+    }
     for (stage, delay) in stages {
         tasks.push(arm_decay(generation, stage, delay));
     }
@@ -692,7 +752,7 @@ mod tests {
     }
 
     #[test]
-    fn the_idle_timer_sheds_prefetch_when_still_unfocused() {
+    fn the_shed_timer_drops_prefetch_when_still_unfocused() {
         use crate::app::test_support::viewing_app;
         let mut app = viewing_app(&["a.png", "b.png", "c.png"], 1);
         cache_image(&mut app, "a.png");
@@ -707,14 +767,90 @@ mod tests {
             &mut app.shared,
             Message::Decay {
                 generation,
-                stage: DecayStage::Demote,
+                stage: DecayStage::ShedPrefetch,
             },
         );
 
+        // Both neighbors sit one step out, so the one ring covers them.
         let v = app.viewer().unwrap();
         assert!(v.cache.contains_key(std::path::Path::new("b.png")));
         assert!(!v.cache.contains_key(std::path::Path::new("a.png")));
         assert!(!v.cache.contains_key(std::path::Path::new("c.png")));
+    }
+
+    #[test]
+    fn shedding_walks_in_from_the_furthest_ring_while_minimized() {
+        use crate::app::test_support::viewing_app;
+        let mut app = viewing_app(&["a.png", "b.png", "c.png", "d.png", "e.png"], 2);
+        for name in ["a.png", "b.png", "c.png", "d.png", "e.png"] {
+            cache_image(&mut app, name);
+        }
+        app.viewer_mut().unwrap().displayed_path = Some("c.png".into());
+
+        let _ = update(&mut app.window, &mut app.shared, Message::Minimized(true));
+        let generation = app.window.decay_generation;
+        let shed = Message::Decay {
+            generation,
+            stage: DecayStage::ShedPrefetch,
+        };
+
+        // First firing: only the outermost pair goes.
+        let _ = update(&mut app.window, &mut app.shared, shed.clone());
+        let v = app.viewer().unwrap();
+        assert!(!v.cache.contains_key(std::path::Path::new("a.png")));
+        assert!(!v.cache.contains_key(std::path::Path::new("e.png")));
+        assert!(v.cache.contains_key(std::path::Path::new("b.png")));
+        assert!(v.cache.contains_key(std::path::Path::new("d.png")));
+
+        // Second firing: the next ring goes, the on-screen image stays.
+        let _ = update(&mut app.window, &mut app.shared, shed);
+        let v = app.viewer().unwrap();
+        assert!(!v.cache.contains_key(std::path::Path::new("b.png")));
+        assert!(!v.cache.contains_key(std::path::Path::new("d.png")));
+        assert!(v.cache.contains_key(std::path::Path::new("c.png")));
+    }
+
+    #[test]
+    fn shed_start_resolves_its_anchor_against_the_armed_stages() {
+        use crate::config::{PrefetchDecay, PrefetchDropAnchor};
+        let s = Duration::from_secs;
+        let cfg = |drop_on| PrefetchDecay {
+            drop_on,
+            drop_after: s(3),
+            drop_interval: s(1),
+        };
+        let full = [
+            (DecayStage::Demote, s(10)),
+            (DecayStage::DropVram, s(20)),
+            (DecayStage::EvictRam, s(30)),
+        ];
+
+        // Each anchor picks its own stage when armed.
+        assert_eq!(shed_start(&cfg(PrefetchDropAnchor::Demote), &full), Some(s(13)));
+        assert_eq!(shed_start(&cfg(PrefetchDropAnchor::Drop), &full), Some(s(23)));
+        assert_eq!(shed_start(&cfg(PrefetchDropAnchor::Evict), &full), Some(s(33)));
+
+        // A skipped anchor falls through to the next stage that runs: demote
+        // disabled, drop at 0s (the default minimized pipeline).
+        let drop_only = [(DecayStage::DropVram, Duration::ZERO)];
+        assert_eq!(
+            shed_start(&cfg(PrefetchDropAnchor::Demote), &drop_only),
+            Some(s(3))
+        );
+
+        // Nothing at or after the anchor runs: the prefetch is kept.
+        let demote_only = [(DecayStage::Demote, s(15))];
+        assert_eq!(shed_start(&cfg(PrefetchDropAnchor::Evict), &demote_only), None);
+        assert_eq!(shed_start(&cfg(PrefetchDropAnchor::Demote), &[]), None);
+
+        // A video's session release stands in for its evict, and earlier
+        // anchors fall through to it.
+        let video = [(DecayStage::EvictVideo, s(5))];
+        assert_eq!(shed_start(&cfg(PrefetchDropAnchor::Demote), &video), Some(s(8)));
+        assert_eq!(shed_start(&cfg(PrefetchDropAnchor::Evict), &video), Some(s(8)));
+
+        // Immediately counts from state entry, whatever the pipeline runs.
+        assert_eq!(shed_start(&cfg(PrefetchDropAnchor::Immediately), &[]), Some(s(3)));
     }
 
     #[test]
@@ -734,7 +870,7 @@ mod tests {
             &mut app.shared,
             Message::Decay {
                 generation: stale,
-                stage: DecayStage::Demote,
+                stage: DecayStage::ShedPrefetch,
             },
         );
 
@@ -756,15 +892,15 @@ mod tests {
 
         let _ = update(&mut app.window, &mut app.shared, Message::Focused(false));
         let armed = app.window.decay_generation;
-        // Minimizing bumps the generation, so the idle-drop fired afterwards must
-        // no-op rather than demote a window that is no longer merely unfocused.
+        // Minimizing bumps the generation, so a shed armed under the unfocused
+        // state must no-op when it fires late: the minimized state armed its own.
         let _ = update(&mut app.window, &mut app.shared, Message::Minimized(true));
         let _ = update(
             &mut app.window,
             &mut app.shared,
             Message::Decay {
                 generation: armed,
-                stage: DecayStage::Demote,
+                stage: DecayStage::ShedPrefetch,
             },
         );
 
@@ -777,7 +913,7 @@ mod tests {
     }
 
     #[test]
-    fn the_evict_stage_sheds_prefetch_and_frees_the_displayed_ram() {
+    fn the_evict_stage_frees_the_displayed_ram_and_leaves_prefetch_alone() {
         use crate::app::test_support::viewing_app;
         let mut app = viewing_app(&["a.png", "b.png"], 0);
         cache_image(&mut app, "a.png");
@@ -795,9 +931,10 @@ mod tests {
             },
         );
 
-        // The prefetch neighbor's lease is dropped; the on-screen image keeps its
-        // lease (so it still reads the shared cell) but its RAM is freed, since no
-        // window wants it any higher.
+        // The on-screen image keeps its lease (so it still reads the shared
+        // cell) but its RAM is freed, since no window wants it any higher. The
+        // neighbor is untouched: shedding the look-ahead belongs to the
+        // prefetch schedule, not this stage.
         let a_key = ImageKey::new(
             &crate::media::pipeline::Source::Fs,
             std::path::Path::new("a.png"),
@@ -805,7 +942,7 @@ mod tests {
         assert!(app.shared.store.tier(&a_key) < Tier::InRam);
         let v = app.viewer().unwrap();
         assert!(v.cache.contains_key(std::path::Path::new("a.png")));
-        assert!(!v.cache.contains_key(std::path::Path::new("b.png")));
+        assert!(v.cache.contains_key(std::path::Path::new("b.png")));
     }
 
     #[test]
@@ -1047,13 +1184,14 @@ mod tests {
         app.viewer_mut().unwrap().displayed_path = Some("b.png".into());
         let generation = app.window.decay_generation;
 
-        // Demote sheds the two prefetch neighbors, keeping the on-screen image.
+        // The shed releases the two prefetch neighbors, keeping the on-screen
+        // image (both sit one step out, so one ring covers them).
         let _ = update(
             &mut app.window,
             &mut app.shared,
             Message::Decay {
                 generation,
-                stage: DecayStage::Demote,
+                stage: DecayStage::ShedPrefetch,
             },
         );
         let v = app.viewer().unwrap();

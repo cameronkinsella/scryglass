@@ -103,7 +103,7 @@ impl ZoomMode {
 }
 
 /// Kernel used to shrink a still or animation to fit. All fix the aliasing a plain
-/// bilinear tap leaves on heavy minification; they differ only in sharpness and
+/// bilinear tap leaves on heavy minification. They differ only in sharpness and
 /// whether they ring.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -115,7 +115,7 @@ pub enum DownscaleKernel {
     Mitchell,
     /// Sharper cubic with a small overshoot (mild ringing).
     CatmullRom,
-    /// Sharpest, with visible ringing; best on clean photographic detail.
+    /// Sharpest, with visible ringing. Best on clean photographic detail.
     Lanczos3,
 }
 
@@ -158,10 +158,10 @@ impl DownscaleKernel {
 pub enum PrefetchVram {
     /// Full-resolution texture (instant crisp zoom when navigated to).
     FullRes,
-    /// Downscaled to the window (smaller VRAM); promoted on navigation.
+    /// Downscaled to the window (smaller VRAM). Promoted on navigation.
     #[default]
     ViewRes,
-    /// No texture; decoded into RAM only, uploaded on navigation.
+    /// No texture. Decoded into RAM only, uploaded on navigation.
     None,
 }
 
@@ -224,7 +224,7 @@ impl<'de> Deserialize<'de> for PrefetchParallelism {
 }
 
 /// Where a prefetch neighbor's view-resolution copy is produced. A GPU bake
-/// and the CPU resample give identical pixels; they trade transient VRAM
+/// and the CPU resample give identical pixels. They trade transient VRAM
 /// against seconds of background CPU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -240,7 +240,7 @@ pub enum PrefetchScaler {
 /// When a backgrounded window's RAM source is evicted (re-decoded on return).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvictPolicy {
-    /// Never evict; keep the full-res source in RAM.
+    /// Never evict the full-res source from RAM.
     Never,
     /// Evict after a fixed delay.
     Fixed(Duration),
@@ -315,7 +315,7 @@ mod humantime_opt {
 /// When (and how) a backgrounded window evicts a decoded source from RAM, which
 /// is re-decoded from disk on return. Shared by the still pipeline, where it is
 /// the last of three stages, and the animated one, where it is the *only* stage:
-/// an animation has no governed VRAM tier, so demote/drop simply do not exist for
+/// an animation has no governed VRAM tier, so demote/drop do not exist for
 /// it (this type is the whole animated decay config).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -349,7 +349,7 @@ impl Default for EvictConfig {
 impl EvictConfig {
     /// The RAM-eviction delay for an image given its decode time, or `None` to
     /// never evict. Dynamic mode interpolates linearly between `evict_ram_min`
-    /// (instant decode) and `evict_ram_max` (at the latency ceiling); an image
+    /// (instant decode) and `evict_ram_max` (at the latency ceiling). An image
     /// at or past the ceiling, or one whose decode time is unknown, is kept.
     pub fn evict_delay(&self, decode: Option<Duration>) -> Option<Duration> {
         match self.evict_ram {
@@ -388,7 +388,7 @@ pub struct DecayPipeline {
 }
 
 /// Decay timing for an open video. A video has no governed VRAM tier to demote or
-/// drop; the heavy resource is its whole decode session (the decode threads, the
+/// drop. The heavy resource is its whole decode session (the decode threads, the
 /// hardware decoder, the audio sink, and the GPU plane textures). After this delay a
 /// backgrounded window releases that session, freezing the last frame on screen, and
 /// re-opens it at the saved position when the window returns. A `None` timer keeps the
@@ -401,10 +401,60 @@ pub struct VideoDecay {
     pub evict_session_after: Option<Duration>,
 }
 
+/// The event that starts a backgrounded window's prefetch shedding.
+/// `Immediately` counts from entering the state. The other anchors count from
+/// the on-screen image's decay reaching that stage. A skipped anchor falls
+/// through to the next stage that runs (`Demote` sheds with the drop stage
+/// when demote is `"never"`, or with an animation's evict or a video's session
+/// release). If no stage at or after the anchor runs, the prefetch is kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrefetchDropAnchor {
+    /// Count from the moment the window enters the state.
+    Immediately,
+    /// Count from the on-screen image's demote stage running.
+    #[default]
+    Demote,
+    /// Count from the on-screen image's VRAM-drop stage running.
+    Drop,
+    /// Count from the on-screen image's RAM-evict stage running (for a video,
+    /// its session release).
+    Evict,
+}
+
+/// When a backgrounded window sheds its prefetched neighbors, and how fast.
+/// Shedding walks inward ring by ring from the furthest neighbors: each step
+/// releases the most distant ring (up to one image per side), so the
+/// neighbors most likely to be shown next are the last to go.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PrefetchDecay {
+    /// The event the shedding counts from.
+    pub drop_on: PrefetchDropAnchor,
+    /// How long after the event the first ring is released.
+    #[serde(with = "humantime_dur")]
+    pub drop_after: Duration,
+    /// The pause between one ring and the next. Zero sheds everything at once.
+    #[serde(with = "humantime_dur")]
+    pub drop_interval: Duration,
+}
+
+impl Default for PrefetchDecay {
+    /// Conservative fallback for a deleted key: shed with the demote stage, all
+    /// at once. The real per-state defaults are set in [`ResourceConfig::default`].
+    fn default() -> Self {
+        Self {
+            drop_on: PrefetchDropAnchor::Demote,
+            drop_after: Duration::ZERO,
+            drop_interval: Duration::ZERO,
+        }
+    }
+}
+
 /// A backgrounded state's decay timers, split by media kind. Stills, animations, and
 /// video decay independently: only the evict stage applies to an animation (it has no
 /// governed VRAM tier), and re-decoding one is costly, so animations are usually kept
-/// in RAM longer than stills; a video has only the session-release timer.
+/// in RAM longer than stills. A video has only the session-release timer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct StateDecay {
@@ -415,6 +465,9 @@ pub struct StateDecay {
     pub animated: EvictConfig,
     /// When to release an open video's decode session.
     pub video: VideoDecay,
+    /// When the prefetched neighbors are shed, independent of the media kind
+    /// on screen.
+    pub prefetch: PrefetchDecay,
 }
 
 /// The minimized state's decay timers plus its video-pause toggle.
@@ -429,6 +482,9 @@ pub struct MinimizedConfig {
     pub animated: EvictConfig,
     /// When to release an open video's decode session.
     pub video: VideoDecay,
+    /// When the prefetched neighbors are shed, independent of the media kind
+    /// on screen.
+    pub prefetch: PrefetchDecay,
 }
 
 impl Default for MinimizedConfig {
@@ -438,6 +494,7 @@ impl Default for MinimizedConfig {
             still: DecayPipeline::default(),
             animated: EvictConfig::default(),
             video: VideoDecay::default(),
+            prefetch: PrefetchDecay::default(),
         }
     }
 }
@@ -655,6 +712,14 @@ impl Default for ResourceConfig {
                 video: VideoDecay {
                     evict_session_after: None,
                 },
+                // Unfocused prefetch sheds with the demote stage, all rings at
+                // once: the window is still visible, so its look-ahead keeps
+                // the same 15 s grace the on-screen image gets.
+                prefetch: PrefetchDecay {
+                    drop_on: PrefetchDropAnchor::Demote,
+                    drop_after: Duration::ZERO,
+                    drop_interval: Duration::ZERO,
+                },
             },
             minimized: MinimizedConfig {
                 pause_video: true,
@@ -668,16 +733,25 @@ impl Default for ResourceConfig {
                         max_decode_latency: Duration::from_millis(200),
                     },
                 },
-                // Minimized animations free their RAM frames after a delay; a
-                // restore re-decodes them.
+                // Minimized animations free their RAM frames after a delay.
+                // A restore re-decodes them.
                 animated: EvictConfig {
                     evict_ram: EvictPolicy::Fixed(Duration::from_secs(30)),
                     ..EvictConfig::default()
                 },
                 // A minimized window is hidden, so release the whole decode session
-                // after a short grace; a restore re-opens it at the saved position.
+                // after a short grace. A restore re-opens it at the saved position.
                 video: VideoDecay {
                     evict_session_after: Some(Duration::from_secs(5)),
+                },
+                // A minimized window sheds its look-ahead on a timer of its own
+                // (its still pipeline has no demote stage to anchor to): a
+                // quick alt-tab back keeps the whole deck, a parked window
+                // walks it in from the furthest ring.
+                prefetch: PrefetchDecay {
+                    drop_on: PrefetchDropAnchor::Immediately,
+                    drop_after: Duration::from_secs(15),
+                    drop_interval: Duration::from_secs(5),
                 },
             },
             // Off by default: the trim is an aggressive, Windows-only knob whose
@@ -745,7 +819,7 @@ impl PresentMode {
     /// explicit mode when the surface is configured and iced treats that as
     /// fatal, so these are verified against the driver before the UI boots.
     /// `Fifo` is spec-guaranteed and the auto modes carry fallback chains.
-    // Compiled for tests everywhere; only the Windows startup path calls it.
+    // Compiled for tests everywhere. Only the Windows startup path calls it.
     #[cfg(any(target_os = "windows", test))]
     pub fn needs_probe(self) -> bool {
         matches!(
@@ -843,7 +917,7 @@ pub struct AppConfig {
     pub show_checkerboard: bool,
     /// Advanced memory/VRAM resource model (see `docs/advanced-settings.md`).
     pub resource: ResourceConfig,
-    /// Settings applied once at launch; changing them needs a full restart.
+    /// Settings applied once at launch. Changing them needs a full restart.
     pub startup: StartupConfig,
 }
 
@@ -898,7 +972,7 @@ pub enum DataDir {
 }
 
 /// Resolve the data location once. A `data/` folder beside the executable is the
-/// opt-in marker for a portable build that travels with its folder; otherwise
+/// opt-in marker for a portable build that travels with its folder. Otherwise
 /// the per-user OS directories are used.
 pub fn data_dir() -> &'static DataDir {
     static DATA_DIR: LazyLock<DataDir> = LazyLock::new(|| {
@@ -936,7 +1010,7 @@ pub enum ConfigLoad {
     Ok,
     /// No config file yet (first run).
     Missing,
-    /// The file exists but is not valid TOML; defaults are used and the original
+    /// The file exists but is not valid TOML. Defaults are used and the original
     /// is preserved.
     Malformed,
 }
@@ -996,7 +1070,7 @@ impl AppConfig {
 
     /// Parse a TOML document leniently: unknown keys are ignored, missing keys
     /// take their defaults, and a malformed document yields the full defaults.
-    /// A test helper for exercising the parse behavior; production loads report
+    /// A test helper for exercising the parse behavior. Production loads report
     /// the outcome via [`load_reporting`].
     #[cfg(test)]
     pub fn from_toml(s: &str) -> Self {
@@ -1016,11 +1090,10 @@ impl AppConfig {
     }
 
     /// Write the config to disk atomically: write a unique temp file, then
-    /// rename it over the target. A rename is atomic, so a reader (or a second
-    /// window saving at the same time) never sees a half-written file, which a
-    /// plain write would produce when two windows close at once. Errors are
-    /// deliberately swallowed: failing to persist settings must never disturb
-    /// the viewer.
+    /// rename it over the target. A reader (or a second window saving at the
+    /// same time) never sees the half-written file a plain write would produce
+    /// when two windows close at once. Errors are deliberately swallowed:
+    /// failing to persist settings must never disturb the viewer.
     pub async fn save(self) {
         let Some(path) = Self::path() else {
             return;
@@ -1060,6 +1133,50 @@ mod tests {
     }
 
     #[test]
+    fn prefetch_decay_defaults_differ_by_state() {
+        let res = AppConfig::default().resource;
+        // Unfocused: the look-ahead sheds with the demote stage, all at once.
+        assert_eq!(res.unfocused.prefetch.drop_on, PrefetchDropAnchor::Demote);
+        assert_eq!(res.unfocused.prefetch.drop_after, Duration::ZERO);
+        assert_eq!(res.unfocused.prefetch.drop_interval, Duration::ZERO);
+        // Minimized: its still pipeline has no demote stage, so the shedding
+        // runs on its own timer, ring by ring.
+        assert_eq!(
+            res.minimized.prefetch.drop_on,
+            PrefetchDropAnchor::Immediately
+        );
+        assert_eq!(res.minimized.prefetch.drop_after, Duration::from_secs(15));
+        assert_eq!(res.minimized.prefetch.drop_interval, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn prefetch_decay_parses_from_toml() {
+        let cfg = AppConfig::from_toml(
+            "[resource.minimized.prefetch]\n\
+             drop_on = \"evict\"\n\
+             drop_after = \"30s\"\n\
+             drop_interval = \"2s\"\n",
+        );
+        assert_eq!(
+            cfg.resource.minimized.prefetch.drop_on,
+            PrefetchDropAnchor::Evict
+        );
+        assert_eq!(
+            cfg.resource.minimized.prefetch.drop_after,
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            cfg.resource.minimized.prefetch.drop_interval,
+            Duration::from_secs(2)
+        );
+        // The other state keeps its own default.
+        assert_eq!(
+            cfg.resource.unfocused.prefetch.drop_on,
+            PrefetchDropAnchor::Demote
+        );
+    }
+
+    #[test]
     fn default_shows_all_chrome() {
         let cfg = AppConfig::default();
         assert!(cfg.show_toolbar);
@@ -1082,7 +1199,7 @@ mod tests {
     #[test]
     fn try_from_toml_surfaces_errors_where_from_toml_defaults() {
         let bad = "prefetch_depth = = nonsense";
-        // The strict parse surfaces the error; the lenient one falls back.
+        // The strict parse surfaces the error. The lenient one falls back.
         assert!(AppConfig::try_from_toml(bad).is_err());
         assert_eq!(AppConfig::from_toml(bad).prefetch_depth, 5);
         // A valid partial document parses, with missing keys defaulted.
@@ -1144,6 +1261,11 @@ mod tests {
                     video: VideoDecay {
                         evict_session_after: None,
                     },
+                    prefetch: PrefetchDecay {
+                        drop_on: PrefetchDropAnchor::Evict,
+                        drop_after: Duration::from_secs(7),
+                        drop_interval: Duration::from_secs(3),
+                    },
                 },
                 minimized: MinimizedConfig {
                     pause_video: false,
@@ -1163,6 +1285,11 @@ mod tests {
                     },
                     video: VideoDecay {
                         evict_session_after: Some(Duration::from_secs(8)),
+                    },
+                    prefetch: PrefetchDecay {
+                        drop_on: PrefetchDropAnchor::Drop,
+                        drop_after: Duration::from_secs(2),
+                        drop_interval: Duration::from_secs(1),
                     },
                 },
                 #[cfg(target_os = "windows")]
@@ -1405,7 +1532,7 @@ mod tests {
             evict_ram_max: Duration::from_secs(630),
             max_decode_latency: Duration::from_millis(200),
         };
-        // Instant decode -> min; halfway -> midpoint; at/over ceiling -> never.
+        // Instant decode -> min, halfway -> midpoint, at/over ceiling -> never.
         assert_eq!(
             p.evict_delay(Some(Duration::ZERO)),
             Some(Duration::from_secs(30))
