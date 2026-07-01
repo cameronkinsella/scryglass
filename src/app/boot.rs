@@ -154,6 +154,10 @@ pub(crate) fn new_window(id: window::Id, config: &AppConfig) -> Window {
         context_menu_pos: None,
         zoom_slider_open: false,
         fullscreen: config.window_fullscreen,
+        // Born focused: opening a window is user-initiated, and even when the
+        // OS leaves it in the background (launched from a terminal that keeps
+        // focus), decaying while the user first looks at it is worse than
+        // retaining until the first real focus cycle corrects the state.
         focused: true,
         decay_generation: 0,
         minimized: false,
