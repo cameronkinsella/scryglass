@@ -995,6 +995,12 @@ fn bind_texture(
     }
 }
 
+/// Whether the upload thread exists yet. It is built by the first frame any
+/// window draws, which a window revealed late (a maximized relaunch) delays.
+pub fn upload_ready() -> bool {
+    UPLOAD_CONTEXT.get().is_some()
+}
+
 /// Queue an image for the upload thread. Returns false when the pipeline is not
 /// built yet (the first image) or the image is oversize for the device, in which
 /// case `ready` is dropped and the display falls back to its thumbnail.

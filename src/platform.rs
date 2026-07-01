@@ -20,7 +20,7 @@ pub fn copy_file_to_clipboard(path: &Path) {
 // ---------------------------------------------------------------------------
 
 /// Open the file's parent folder in the native file manager and, on Windows,
-/// select the file. Other platforms just open the folder.
+/// select the file. Other platforms only open the folder.
 pub fn reveal_in_file_manager(path: &Path) {
     #[cfg(target_os = "windows")]
     windows::reveal_in_file_manager(path);
@@ -88,15 +88,11 @@ pub fn file_associations_registered() -> bool {
 
 /// The explicit wgpu present modes the GPU driver offers, queried against an
 /// invisible throwaway window before iced boots. iced treats configuring a
-/// mode the driver lacks as fatal, and drivers genuinely differ (AMD's
-/// Windows Vulkan driver has no mailbox), so a `[startup]` mode that can be
-/// missing is verified here first. The adapter request mirrors iced_wgpu's,
-/// so the probed capabilities are the ones the real window will get. `None`
-/// means the probe failed and nothing can be assumed.
-///
-/// The answer only changes with the machine's graphics setup, and the probe
-/// costs a Vulkan instance, so it is cached against the graphics identity:
-/// every launch after the first is a file read.
+/// mode the driver lacks as fatal, and drivers differ (AMD's Windows Vulkan
+/// driver has no mailbox), so a `[startup]` mode that can be missing is
+/// verified here first. `None` means the probe failed and nothing can be
+/// assumed. The answer is cached against the graphics identity, so every
+/// launch after the first is a file read.
 #[cfg(target_os = "windows")]
 pub fn supported_present_modes() -> Option<Vec<crate::config::PresentMode>> {
     windows::supported_present_modes()
@@ -104,8 +100,8 @@ pub fn supported_present_modes() -> Option<Vec<crate::config::PresentMode>> {
 
 /// A cached probe answer, valid while the graphics identity (every display
 /// adapter's name and driver version) is unchanged. A new GPU or driver
-/// re-probes; a stale or unreadable cache is simply re-probed, so no wrong
-/// mode can outlive the driver that reported it.
+/// re-probes, as does a stale or unreadable cache, so no wrong mode can
+/// outlive the driver that reported it.
 // Lives outside the windows module so the hit rule is tested on every
 // platform.
 #[cfg(any(target_os = "windows", test))]
@@ -130,14 +126,28 @@ fn cached_present_modes(
 // ---------------------------------------------------------------------------
 
 /// Ask the OS to return this process's resident pages, shrinking its reported
-/// working set; the pages fault back in when next touched. A no-op off Windows,
+/// working set. The pages fault back in when next touched. A no-op off Windows,
 /// where the kernel reclaims idle memory under pressure on its own.
 pub fn trim_working_set() {
     #[cfg(target_os = "windows")]
     windows::trim_working_set();
 }
 
-/// The ProgID groups we register: (progid, friendly name, extensions).
+/// Whether the window with winit raw id `raw_id` sits in a snap layout.
+/// Always false where snap layouts don't exist.
+pub fn window_is_snapped(raw_id: u64) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        windows::window_is_snapped(raw_id)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = raw_id;
+        false
+    }
+}
+
+/// The registered ProgID groups: (progid, friendly name, extensions).
 /// Extensions come from the live decoder registry, so new formats flow
 /// through automatically. Plain archives (zip, 7z, rar) are left out; only
 /// the comic variants are registered.
@@ -312,6 +322,31 @@ mod windows {
         Ok(())
     }
 
+    /// Whether the window is in a snap layout. Windows keeps the pre-snap
+    /// bounds in the placement's normal position, so a size mismatch means
+    /// snapped. Sizes only: the normal position is in workspace coordinates,
+    /// which shift when the taskbar sits left or top.
+    pub fn window_is_snapped(raw_id: u64) -> bool {
+        use WindowsAndMessaging::{GetWindowPlacement, GetWindowRect, WINDOWPLACEMENT};
+
+        let hwnd = raw_id as *mut core::ffi::c_void;
+        // SAFETY: both structs are plain C data whose all-zero pattern is
+        // valid, the calls only write into them, and the handle belongs to a
+        // window of this process. A failed call answers "not snapped".
+        unsafe {
+            let mut rect: Foundation::RECT = std::mem::zeroed();
+            let mut placement: WINDOWPLACEMENT = std::mem::zeroed();
+            placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+            if GetWindowRect(hwnd, &mut rect) == 0 || GetWindowPlacement(hwnd, &mut placement) == 0
+            {
+                return false;
+            }
+            let normal = placement.rcNormalPosition;
+            (rect.right - rect.left, rect.bottom - rect.top)
+                != (normal.right - normal.left, normal.bottom - normal.top)
+        }
+    }
+
     /// Empty this process's working set with `EmptyWorkingSet`, moving its
     /// resident pages to the standby list so the OS can reclaim them.
     pub fn trim_working_set() {
@@ -338,9 +373,9 @@ mod windows {
     impl ComGuard {
         fn apartment_threaded() -> Self {
             // SAFETY: CoInitializeEx is always safe to call with a null
-            // reserved pointer. A success code (>= 0) means our call took a
-            // reference that we must release on drop; S_FALSE (already
-            // initialized on this thread) still counts and is balanced too.
+            // reserved pointer. A success code (>= 0) means the call took a
+            // reference that drop must release. S_FALSE (already initialized
+            // on this thread) still counts and is balanced too.
             let hr = unsafe {
                 Com::CoInitializeEx(std::ptr::null(), Com::COINIT_APARTMENTTHREADED as u32)
             };
@@ -351,8 +386,8 @@ mod windows {
     impl Drop for ComGuard {
         fn drop(&mut self) {
             if self.owns {
-                // SAFETY: balanced against our own successful CoInitializeEx
-                // on this same thread.
+                // SAFETY: balanced against this guard's successful
+                // CoInitializeEx on the same thread.
                 unsafe { Com::CoUninitialize() };
             }
         }
@@ -447,7 +482,7 @@ mod windows {
     }
 
     /// An invisible 1x1 window that exists only to give wgpu a surface to
-    /// query driver capabilities against; torn down when the probe returns.
+    /// query driver capabilities against. Torn down when the probe returns.
     struct ProbeWindow {
         hwnd: Foundation::HWND,
         class: Vec<u16>,
@@ -458,7 +493,7 @@ mod windows {
         fn create() -> Option<Self> {
             let class: Vec<u16> = "scryglass-present-probe\0".encode_utf16().collect();
             // SAFETY: plain window-class registration and creation with a
-            // null-terminated class name that outlives the window; Drop
+            // null-terminated class name that outlives the window. Drop
             // tears both down.
             unsafe {
                 let hinstance = LibraryLoader::GetModuleHandleW(std::ptr::null());
@@ -583,7 +618,7 @@ mod windows {
         toml::from_str(&text).ok()
     }
 
-    /// Best-effort: a failed write just means the next launch probes again,
+    /// Best-effort: a failed write means the next launch probes again,
     /// and a torn write fails to parse, which does the same.
     fn save_probe_cache(cache: &super::PresentProbeCache) {
         let Some(path) = probe_cache_path() else {
@@ -607,7 +642,7 @@ mod windows {
             // check below covers the machines where iced would pick it.
             backends: wgpu::Backends::from_env()
                 .unwrap_or(wgpu::Backends::VULKAN | wgpu::Backends::DX12),
-            // iced boots with empty flags; the wgpu default turns on
+            // iced boots with empty flags. The wgpu default turns on
             // validation in debug builds, which the real surface never
             // runs with.
             flags: wgpu::InstanceFlags::empty(),
@@ -616,11 +651,11 @@ mod windows {
         let mut handle =
             wgpu::rwh::Win32WindowHandle::new(std::num::NonZeroIsize::new(window.hwnd as isize)?);
         // Vulkan refuses a Win32 handle without its hinstance (wgpu-hal
-        // vulkan/instance.rs); leaving it unset silently drops the Vulkan
+        // vulkan/instance.rs). Leaving it unset silently drops the Vulkan
         // adapters and skews the probe to another backend's answer.
         handle.hinstance = std::num::NonZeroIsize::new(window.hinstance as isize);
         // SAFETY: the raw handle points at the live probe window, which
-        // outlives the surface; both end with this function.
+        // outlives the surface. Both end with this function.
         let surface = unsafe {
             instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
                 raw_display_handle: wgpu::rwh::RawDisplayHandle::Windows(
@@ -653,8 +688,7 @@ mod windows {
         // iced picks across every backend including GL, which this probe
         // skips. A hardware GPU always outranks GL in that pick (wgpu sorts
         // by device type), so only a hardware winner here is guaranteed to
-        // be the adapter the real surface runs on; anything else means the
-        // probe cannot speak for iced's choice.
+        // be the adapter the real surface runs on.
         if !matches!(
             info.device_type,
             wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu
@@ -720,7 +754,7 @@ fn set_thread_priority(lowered: bool) {
         } else {
             THREAD_PRIORITY_NORMAL
         };
-        // Only the calling thread is affected; on failure it stays normal.
+        // Only the calling thread is affected. On failure it stays normal.
         unsafe { SetThreadPriority(GetCurrentThread(), priority) };
     }
     #[cfg(not(windows))]

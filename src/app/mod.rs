@@ -187,6 +187,9 @@ pub struct Window {
     /// Whether this window currently has native focus. The resource states key
     /// VRAM retention on it.
     pub(crate) focused: bool,
+    /// Bumped on every move or resize, so the settled state probe knows a
+    /// mid-drag timer from the one armed by the final position.
+    pub(crate) probe_generation: u64,
     /// Bumped on every focus or minimize change, so a deferred decay-stage
     /// timer can tell whether it is still current when it fires (a stale one
     /// no-ops). Replaces tracking a per-stage timestamp.

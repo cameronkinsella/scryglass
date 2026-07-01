@@ -2,12 +2,18 @@
 pub enum Message {
     Resized(Size),
     Moved(iced::Point),
-    /// Maximized/minimized/mode fetched after a resize or move, the gate for
-    /// persisting the live geometry only while plainly windowed.
+    /// Maximized/minimized/mode/snapped fetched after a resize or move, the
+    /// gate for persisting the live geometry only while plainly windowed.
     WindowState {
         maximized: bool,
         minimized: bool,
         mode: iced::window::Mode,
+        snapped: bool,
+    },
+    /// The settle timer after a move or resize fired; a later event bumps the
+    /// generation, so a mid-drag probe no-ops.
+    ProbeWindowState {
+        generation: u64,
     },
     /// Native focus gained or lost, tracked per window for the resource states.
     Focused(bool),
@@ -101,7 +107,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             if win.fullscreen {
                 tiles
             } else {
-                Task::batch([tiles, check_window_state(win.id)])
+                Task::batch([tiles, debounce_window_state(win)])
             }
         }
 
@@ -114,14 +120,22 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             if win.fullscreen {
                 Task::none()
             } else {
-                check_window_state(win.id)
+                debounce_window_state(win)
             }
+        }
+
+        Message::ProbeWindowState { generation } => {
+            if generation != win.probe_generation {
+                return Task::none();
+            }
+            check_window_state(win.id)
         }
 
         Message::WindowState {
             maximized,
             minimized,
             mode,
+            snapped,
         } => {
             // A minimized window reports it is neither maximized nor at its real
             // bounds. Leave both untouched so the restore stack ignores minimize
@@ -129,7 +143,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             // is written only on close, so it tracks the last closed window.
             if !minimized {
                 win.maximized = maximized;
-                if should_persist(maximized, minimized, mode) {
+                if should_persist(maximized, minimized, mode, snapped) {
                     win.restored_size = win.window_size;
                     win.restored_pos = win.window_pos;
                 }
@@ -239,16 +253,35 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
     }
 }
 
+/// How long a window must sit still before its state is probed for the
+/// geometry save. A drag streams events; probing only after they settle keeps
+/// mid-drag positions (the instant before a snap layout applies) out of the
+/// saved geometry.
+const PROBE_SETTLE: Duration = Duration::from_millis(400);
+
+/// Arm the settle timer for a state probe, superseding any pending one.
+fn debounce_window_state(win: &mut Window) -> Task<AppMessage> {
+    win.probe_generation = win.probe_generation.wrapping_add(1);
+    let generation = win.probe_generation;
+    Task::future(async move {
+        tokio::time::sleep(PROBE_SETTLE).await;
+        AppMessage::Window(Message::ProbeWindowState { generation })
+    })
+}
+
 /// Ask the windowing system for the window's maximized, minimized, and mode
 /// state, so the size is persisted only when it is the plain windowed size.
 fn check_window_state(id: iced::window::Id) -> Task<AppMessage> {
     iced::window::is_maximized(id).then(move |maximized| {
         iced::window::mode(id).then(move |mode| {
-            iced::window::is_minimized(id).map(move |minimized| {
-                AppMessage::Window(Message::WindowState {
-                    maximized,
-                    minimized: minimized.unwrap_or(false),
-                    mode,
+            iced::window::is_minimized(id).then(move |minimized| {
+                iced::window::raw_id::<AppMessage>(id).map(move |raw| {
+                    AppMessage::Window(Message::WindowState {
+                        maximized,
+                        minimized: minimized.unwrap_or(false),
+                        mode,
+                        snapped: crate::platform::window_is_snapped(raw),
+                    })
                 })
             })
         })
@@ -256,9 +289,10 @@ fn check_window_state(id: iced::window::Id) -> Task<AppMessage> {
 }
 
 /// A size worth remembering only when the window is plainly windowed: neither
-/// maximized, minimized, nor fullscreen.
-fn should_persist(maximized: bool, minimized: bool, mode: iced::window::Mode) -> bool {
-    !maximized && !minimized && mode == iced::window::Mode::Windowed
+/// maximized, minimized, fullscreen, nor snapped. A snap layout is the OS
+/// placing the window, so reopening there would lose the size the user chose.
+fn should_persist(maximized: bool, minimized: bool, mode: iced::window::Mode, snapped: bool) -> bool {
+    !maximized && !minimized && !snapped && mode == iced::window::Mode::Windowed
 }
 
 /// Query the OS minimize state. iced surfaces no minimize event on any backend
@@ -1354,6 +1388,40 @@ mod tests {
                 maximized: false,
                 minimized: false,
                 mode: iced::window::Mode::Windowed,
+                snapped: false,
+            },
+        );
+        assert_eq!(app.window.restored_size, Size::new(1024.0, 768.0));
+        assert_eq!(app.window.restored_pos, iced::Point::new(120.0, 80.0));
+    }
+
+    #[test]
+    fn a_snapped_gate_keeps_the_windowed_geometry() {
+        let mut app = empty_app();
+        app.window.window_size = Size::new(1024.0, 768.0);
+        app.window.window_pos = iced::Point::new(120.0, 80.0);
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::WindowState {
+                maximized: false,
+                minimized: false,
+                mode: iced::window::Mode::Windowed,
+                snapped: false,
+            },
+        );
+        // A snap layout moves and resizes the window, but the saved geometry
+        // must stay what the user chose, so a relaunch opens pre-snap.
+        app.window.window_size = Size::new(1280.0, 1400.0);
+        app.window.window_pos = iced::Point::new(1280.0, 0.0);
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::WindowState {
+                maximized: false,
+                minimized: false,
+                mode: iced::window::Mode::Windowed,
+                snapped: true,
             },
         );
         assert_eq!(app.window.restored_size, Size::new(1024.0, 768.0));
@@ -1373,6 +1441,7 @@ mod tests {
                 maximized: false,
                 minimized: false,
                 mode: iced::window::Mode::Windowed,
+                snapped: false,
             },
         );
         // Maximizing moves and resizes the window to its bounds, but the gate
@@ -1390,6 +1459,7 @@ mod tests {
                     maximized: state.0,
                     minimized: false,
                     mode: state.1,
+                    snapped: false,
                 },
             );
         }
@@ -1398,12 +1468,32 @@ mod tests {
     }
 
     #[test]
+    fn moves_supersede_the_pending_state_probe() {
+        let mut app = empty_app();
+        let before = app.window.probe_generation;
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::Moved(iced::Point::new(10.0, 10.0)),
+        );
+        let mid = app.window.probe_generation;
+        assert_ne!(before, mid);
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::Resized(Size::new(800.0, 600.0)),
+        );
+        assert_ne!(mid, app.window.probe_generation);
+    }
+
+    #[test]
     fn only_a_normal_window_persists_its_size() {
         use iced::window::Mode;
-        assert!(should_persist(false, false, Mode::Windowed));
-        assert!(!should_persist(true, false, Mode::Windowed));
-        assert!(!should_persist(false, true, Mode::Windowed));
-        assert!(!should_persist(false, false, Mode::Fullscreen));
+        assert!(should_persist(false, false, Mode::Windowed, false));
+        assert!(!should_persist(true, false, Mode::Windowed, false));
+        assert!(!should_persist(false, true, Mode::Windowed, false));
+        assert!(!should_persist(false, false, Mode::Fullscreen, false));
+        assert!(!should_persist(false, false, Mode::Windowed, true));
     }
 
     #[test]
@@ -1418,6 +1508,7 @@ mod tests {
                 maximized: false,
                 minimized: false,
                 mode: iced::window::Mode::Windowed,
+                snapped: false,
             },
         );
         // Minimizing reports bogus off-screen bounds, which must not be saved.
@@ -1430,6 +1521,7 @@ mod tests {
                 maximized: false,
                 minimized: true,
                 mode: iced::window::Mode::Windowed,
+                snapped: false,
             },
         );
         assert_eq!(app.window.restored_size, Size::new(1024.0, 768.0));
@@ -1448,6 +1540,7 @@ mod tests {
                 maximized: true,
                 minimized: false,
                 mode: iced::window::Mode::Windowed,
+                snapped: false,
             },
         );
         assert!(app.window.maximized);
@@ -1458,6 +1551,7 @@ mod tests {
                 maximized: false,
                 minimized: true,
                 mode: iced::window::Mode::Windowed,
+                snapped: false,
             },
         );
         assert!(app.window.maximized);
@@ -1484,6 +1578,7 @@ mod tests {
                 maximized: true,
                 minimized: false,
                 mode: iced::window::Mode::Windowed,
+                snapped: false,
             },
         );
         assert!(app.window.maximized);
@@ -1526,6 +1621,7 @@ mod tests {
                 maximized: false,
                 minimized: false,
                 mode: iced::window::Mode::Windowed,
+                snapped: false,
             },
         );
         assert_eq!(app.shared.config.window_x, Some(10.0));

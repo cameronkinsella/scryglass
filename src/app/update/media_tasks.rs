@@ -583,8 +583,16 @@ fn run_job(
             ram,
             source,
         } => Task::future(async move {
-            // The upload thread is built by the warmup surface; retry briefly so
-            // the very first upload, which may race that setup, still lands.
+            // The upload thread exists once any window draws a frame, which a
+            // window revealed late (a maximized relaunch) delays well past any
+            // fixed retry count. Wait for it, bounded only as a backstop.
+            for _ in 0..3750 {
+                if crate::ui::image_surface::upload_ready() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+            }
+            // Retry briefly past readiness for the transient failure modes.
             for _ in 0..30 {
                 let zoom = zoom_override.unwrap_or_else(|| fit_zoom(ram.original_size, view));
                 let texture = if tier >= Tier::Full {

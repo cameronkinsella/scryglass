@@ -87,7 +87,7 @@ pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Envelope>) {
     };
 
     // A portable `data/` folder that can't be written falls back to the system
-    // dirs; say so, since the user expected settings to live beside the app.
+    // dirs. Say so, since the user expected settings to live beside the app.
     let portable_toast = if matches!(
         crate::config::data_dir(),
         crate::config::DataDir::PortableReadOnly
@@ -159,6 +159,7 @@ pub(crate) fn new_window(id: window::Id, config: &AppConfig) -> Window {
         // focus), decaying while the user first looks at it is worse than
         // retaining until the first real focus cycle corrects the state.
         focused: true,
+        probe_generation: 0,
         decay_generation: 0,
         minimized: false,
         video_resumes_on_restore: false,
@@ -182,6 +183,9 @@ pub(crate) fn window_settings(config: &AppConfig) -> window::Settings {
         position,
         min_size: Some(Size::new(480.0, 420.0)),
         icon: window_icon(),
+        // A pending maximize/fullscreen replay opens hidden, so the windowed
+        // frame never flashes. The replay's mode change reveals it in place.
+        visible: !(config.window_maximized || config.window_fullscreen),
         // Close requests route through update() so config saves first.
         exit_on_close_request: false,
         ..Default::default()
@@ -190,7 +194,8 @@ pub(crate) fn window_settings(config: &AppConfig) -> window::Settings {
 
 /// Replay a saved maximized/fullscreen state onto a freshly opened window, in
 /// order, so the OS rebuilds the same restore stack: exit fullscreen to
-/// maximized, then to the restored windowed geometry.
+/// maximized, then to the restored windowed geometry. Such a window opened
+/// hidden, and the final mode change is what reveals it.
 pub(crate) fn replay_window_state(
     id: window::Id,
     maximized: bool,
@@ -202,6 +207,12 @@ pub(crate) fn replay_window_state(
     }
     if fullscreen {
         task = task.chain(window::set_mode(id, window::Mode::Fullscreen));
+    } else if maximized {
+        // The bare reveal paints nothing until some event arrives (a parked
+        // occluded present has no wake-up). Focus forces the first frame.
+        task = task
+            .chain(window::set_mode(id, window::Mode::Windowed))
+            .chain(window::gain_focus(id));
     }
     task
 }
@@ -229,6 +240,19 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn a_pending_replay_opens_hidden() {
+        let mut config = AppConfig::default();
+        assert!(window_settings(&config).visible);
+
+        config.window_fullscreen = true;
+        assert!(!window_settings(&config).visible);
+
+        config.window_fullscreen = false;
+        config.window_maximized = true;
+        assert!(!window_settings(&config).visible);
+    }
 
     #[test]
     fn initial_open_path_returns_existing_file() {
