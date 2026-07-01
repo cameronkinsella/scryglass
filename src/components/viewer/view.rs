@@ -274,12 +274,25 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
         DisplayedImage::Error { message } => ui::image_display::error_viewport(message),
     };
 
-    // Behind non-surface content, a warmup surface builds the image pipeline up
-    // front. A still or animation already drives the surface, so it needs none.
-    let image_view: Element<'_, Message> = if matches!(
-        viewer.displayed,
-        DisplayedImage::Full { .. } | DisplayedImage::Animated { .. }
-    ) {
+    // Behind non-surface content, a warmup surface builds the image pipeline
+    // up front. Only a resident texture actually drives the surface: a Full
+    // display still waiting on its upload draws the thumbnail blur through the
+    // plain image widget, and without the warmup the pipeline (and its upload
+    // thread) would never build, so the texture could never arrive.
+    let drives_surface = match &viewer.displayed {
+        DisplayedImage::Full { rotated, .. } => {
+            rotated.is_some()
+                || viewer
+                    .displayed_path
+                    .as_deref()
+                    .and_then(|p| viewer.cache.get(p))
+                    .and_then(|lease| lease.texture())
+                    .is_some()
+        }
+        DisplayedImage::Animated { .. } => viewer.anim_player.current_texture().is_some(),
+        _ => false,
+    };
+    let image_view: Element<'_, Message> = if drives_surface {
         image_view
     } else {
         Stack::with_children(vec![ui::image_surface::warmup(), image_view]).into()
