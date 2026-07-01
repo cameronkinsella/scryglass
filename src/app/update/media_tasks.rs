@@ -67,12 +67,10 @@ pub(crate) fn fire_rotate(viewer: &mut Viewer, store: &Store) -> Task<Message> {
 static RESIZE_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 /// The view-resolution target for an image of `original` size shown at `zoom`
-/// (1.0 = full native): the displayed size in physical pixels (logical size times
-/// the display `scale_factor`), never upscaled past native. Sizing to the physical
-/// display, rather than a fixed headroom, keeps the demoted copy crisp on HiDPI and
-/// seamless with the full-res view on the way down. A demoted but visible image
-/// targets its current zoom so it stays as crisp as what is on screen; a prefetch
-/// neighbor targets its fit zoom, since it is shown fit when navigated to.
+/// (1.0 = full native): the displayed size in physical pixels (logical size
+/// times `scale_factor`), never upscaled past native. Sizing to the physical
+/// display keeps the demoted copy crisp on HiDPI and seamless with full-res.
+/// A visible demote targets its current zoom, a prefetch neighbor its fit zoom.
 pub(crate) fn view_target(original: (u32, u32), zoom: f32, scale_factor: f32) -> (u32, u32) {
     let (w, h) = (original.0.max(1) as f32, original.1.max(1) as f32);
     // The view copy must always fit one texture. Past this cap the tile
@@ -96,14 +94,11 @@ fn fit_zoom(original: (u32, u32), view: Size) -> f32 {
     (view.width / w).min(view.height / h).min(1.0)
 }
 
-/// Downscale a full-res RGBA handle to `target`, for a prefetch neighbor's smaller
-/// GPU texture. Returns the original handle when it already fits.
-///
-/// Downscales through the exact CPU port of the display shader with the live kernel,
-/// so a prefetched neighbor's view-res copy is indistinguishable from the full-res
-/// it promotes to, the same way a demote's GPU-baked copy is. A plain resize (a
-/// fixed cubic averaged in gamma space) was visibly softer than the shader's
-/// linear-light kernel.
+/// Downscale a full-res RGBA handle to `target`, for a prefetch neighbor's
+/// smaller GPU texture. Returns the original handle when it already fits.
+/// Downscales through the exact CPU port of the display shader with the live
+/// kernel, so the neighbor's view-res copy is indistinguishable from the
+/// full-res it promotes to, the same way a demote's GPU-baked copy is.
 fn downscale(handle: &Handle, target: (u32, u32)) -> Handle {
     let Handle::Rgba {
         width,
@@ -295,7 +290,7 @@ pub(crate) fn fire_thumb(
     }
 
     // A full decode of this image is already in flight and will derive a
-    // thumbnail; only the cheap disk and prefix lookups are worth running.
+    // thumbnail. Only the cheap disk and prefix lookups are worth running.
     let cheap_only = viewer.in_flight.contains(&path);
     viewer.in_flight_thumbs.insert(path.clone());
     let generation = pipeline.thumb_generation();
@@ -325,7 +320,7 @@ pub(crate) fn fire_thumb(
 
 /// Fire a first-frame thumbnail for an archive video from its just-extracted
 /// temp `file`, keyed under the archive `entry`. The entry has no real path for
-/// FFmpeg, so this reuses the file playback already wrote; `guard` keeps it
+/// FFmpeg, so this reuses the file playback already wrote. `guard` keeps it
 /// alive through the decode. Skips when a thumbnail is cached, in flight, or
 /// known to fail. Background urgency, since the playing video covers the wait.
 pub(crate) fn fire_archive_video_thumb(
@@ -432,19 +427,17 @@ pub(crate) fn fire_load(
     }
     let lane = lane_for(want);
     if let Some(lease) = viewer.cache.get(&path) {
-        if lease.want() >= want {
-            return Task::none();
-        }
-        let outcome = store.retarget(lease, want);
+        // Keep the higher demand, and reconcile even when it is unchanged:
+        // the touch heals an entry whose completion message was lost.
+        let outcome = store.retarget(lease, want.max(lease.want()));
         return run_jobs(outcome.jobs, pipeline, lane, view);
     }
     let key = ImageKey::new(&viewer.source, &path);
     let (lease, outcome) = store.request(key, path.clone(), viewer.source.clone(), want);
     // Mark it loading only when a decode is actually firing: that decode produces
-    // a thumbnail and clears this when it lands. A request that shares another
-    // window's already-resident image runs no decode, so marking it would leave it
-    // stuck here and the background thumbnailer would skip it forever, never giving
-    // this window a thumbnail.
+    // a thumbnail and clears this when it lands. A request sharing another
+    // window's already-resident image runs no decode, so marking it would leave
+    // it stuck here and the background thumbnailer would skip it forever.
     if outcome
         .jobs
         .iter()
@@ -485,7 +478,7 @@ pub(crate) fn try_start_shared_anim(
         viewer.anim_player.insert(path.to_path_buf(), lease);
     }
     // A dormant (or running) playback for this GIF resumes from where it is on its
-    // own once the frames are pinned; do not restart it from the first frame.
+    // own once the frames are pinned. Do not restart it from the first frame.
     if viewer.anim_player.is_active_on(path) {
         return Some(Task::none());
     }
@@ -493,7 +486,7 @@ pub(crate) fn try_start_shared_anim(
 }
 
 /// Turn the store's pending [`Job`]s into async tasks. A decode reads and decodes
-/// from disk (or finds an animation); an upload pushes RAM to the GPU. Each
+/// from disk (or finds an animation). An upload pushes RAM to the GPU. Each
 /// reports back so the store can install the result and swap the shared cell.
 pub(crate) fn run_jobs(
     jobs: Vec<Job>,
@@ -564,7 +557,7 @@ fn run_job(
                     })
                 }
                 Ok(DecodedMedia::Animated(anim)) => {
-                    // Frames allocate at display time; only the thumb needs a
+                    // Frames allocate at display time. Only the thumb needs a
                     // handle here. The store forgets this key (it is not a still).
                     let thumb = anim.thumbnail.as_ref().map(|t| Thumb {
                         handle: Handle::from_rgba(t.width, t.height, t.pixels.clone()),
@@ -880,7 +873,7 @@ async fn submit_and_wait(handle: Handle) -> Option<crate::ui::image_surface::Kee
 
 /// Produce and upload one tile of a tiled still. The tile is cut from the RAM
 /// substrate with the region resampler, whose border taps read the whole
-/// image, so adjacent tiles reassemble seamlessly; the finished tile uploads
+/// image, so adjacent tiles reassemble seamlessly. The finished tile uploads
 /// like any small image.
 pub(crate) fn produce_tile(
     key: ImageKey,
@@ -1082,9 +1075,35 @@ mod tests {
     use crate::app::test_support::viewing_app;
 
     #[test]
+    fn fire_load_never_lowers_a_lease_demand() {
+        use crate::app::test_support::cache_image;
+        use crate::media::store::Tier;
+
+        let mut app = viewing_app(&["a.png"], 0);
+        cache_image(&mut app, "a.png");
+        let pipeline = app.shared.pipeline.clone();
+        let viewer = app.window.viewer_mut().unwrap();
+        let _ = fire_load(
+            &mut app.shared.store,
+            &pipeline,
+            viewer,
+            "a.png".into(),
+            Tier::View,
+            Size::new(800.0, 600.0),
+        );
+        // A prefetch-tier touch on a full-res lease reconciles but keeps it.
+        let lease = app
+            .viewer()
+            .unwrap()
+            .cache
+            .get(std::path::Path::new("a.png"));
+        assert_eq!(lease.unwrap().want(), Tier::Full);
+    }
+
+    #[test]
     fn view_target_sizes_to_the_physical_display() {
         // 4000x3000 fit into 800x600 is a 0.2 zoom. At 100% scaling the copy is the
-        // logical size; a 200% display doubles it to stay crisp on the denser panel.
+        // logical size. A 200% display doubles it to stay crisp on the denser panel.
         let zoom = fit_zoom((4000, 3000), Size::new(800.0, 600.0));
         assert_eq!(view_target((4000, 3000), zoom, 1.0), (800, 600));
         assert_eq!(view_target((4000, 3000), zoom, 2.0), (1600, 1200));
@@ -1109,7 +1128,7 @@ mod tests {
     #[test]
     fn view_target_never_exceeds_one_texture() {
         // A tiled-regime (uncapped) source at high zoom caps the view copy to
-        // the texture limit, aspect preserved; tiles carry the rest.
+        // the texture limit, aspect preserved. Tiles carry the rest.
         let max = crate::media::registry::MAX_TEXTURE_DIM;
         assert_eq!(view_target((20000, 10000), 1.0, 1.0), (max, max / 2));
         assert_eq!(view_target((20000, 10000), 0.1, 1.0), (2000, 1000));
@@ -1117,7 +1136,7 @@ mod tests {
 
     #[test]
     fn prefetch_want_resolves_the_prefetch_vram_mode() {
-        // The prefetch tier follows the setting; the current image always asks
+        // The prefetch tier follows the setting. The current image always asks
         // for Full at its call site.
         assert_eq!(prefetch_want(PrefetchVram::FullRes), Tier::Full);
         assert_eq!(prefetch_want(PrefetchVram::ViewRes), Tier::View);

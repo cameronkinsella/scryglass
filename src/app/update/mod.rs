@@ -51,7 +51,7 @@ pub(crate) enum NavTarget {
 
 /// Daemon update: route a per-window message to its window, or handle a
 /// window-lifecycle event, then let the store reconcile any image whose demand a
-/// dropped lease just lowered (navigation, decay, window close).
+/// dropped lease lowered (navigation, decay, window close).
 pub fn update(app: &mut App, envelope: Envelope) -> Task<Envelope> {
     let task = route(app, envelope);
     let store = pump_store(app);
@@ -68,7 +68,10 @@ fn route(app: &mut App, envelope: Envelope) -> Task<Envelope> {
     match envelope {
         Envelope::Win(id, message) => {
             let Some(win) = app.windows.get_mut(&id) else {
-                return Task::none();
+                // The window closed mid-flight, but a store completion still
+                // owns shared state: dropping it would leave the entry's
+                // pending mark set, wedging the image for every other window.
+                return orphaned_media(app, message);
             };
             let vp_before = win.viewport_size;
             let window_before = win.window_size;
@@ -107,7 +110,7 @@ fn route(app: &mut App, envelope: Envelope) -> Task<Envelope> {
         }
         Envelope::Forwarded(path) => open_new_window(app, path),
         // A live config edit reparsed cleanly. Ignore one equal to the in-memory
-        // config (the app's own save tripping the watcher); otherwise apply it.
+        // config (the app's own save tripping the watcher). Otherwise apply it.
         Envelope::ConfigReloaded(config) => {
             if *config != app.shared.config {
                 return apply_config(app, *config);
@@ -173,15 +176,58 @@ fn config_invalid_toast(app: &mut App) -> Task<Envelope> {
 
 /// Drain the store's drop-fed dirty queue and run whatever re-mint a lowered
 /// demand calls for (re-uploading a now-smaller texture as a higher tier is
-/// released). Sync demotes and evictions already happened on the lease drop; this
+/// released). Sync demotes and evictions already happened on the lease drop. This
 /// fires only the async re-mints, which touch the shared cell, not any window's
 /// display, so they route through any live window. O(keys dirtied), never a scan.
 fn pump_store(app: &mut App) -> Task<Envelope> {
     // Reconcile dropped animation leases: free a GIF's shared frames once its last
     // holder let go. This pump only ever frees (demand falls on a drop, never rises),
-    // so it yields no jobs to run; draining it is enough.
+    // so it yields no jobs to run. Draining it is enough.
     let _ = app.shared.anim_store.pump();
     let outcome = app.shared.store.pump();
+    run_shared_jobs(app, outcome)
+}
+
+/// Apply a store completion whose window no longer exists. The shared cell,
+/// tier, and pending mark move exactly as they would have. Only the closed
+/// window's display effects are dropped.
+fn orphaned_media(app: &mut App, message: Message) -> Task<Envelope> {
+    // An archive-video extraction that outlives its window wrote a real temp
+    // file. Wrap it in a guard so it is deleted, like the navigated-away path.
+    if let Message::VideoControls(crate::components::video_controls::Message::Extracted {
+        result: Ok(temp),
+        ..
+    }) = message
+    {
+        drop(crate::video::TempFileGuard::new(temp));
+        return Task::none();
+    }
+    let Message::Media(message) = message else {
+        return Task::none();
+    };
+    let outcome = match message {
+        media::Message::Decoded { key, ram, .. } => app.shared.store.on_decoded(key, *ram),
+        media::Message::TextureReady { key, tier, texture } => {
+            app.shared.store.on_minted(key, tier, texture)
+        }
+        media::Message::MintFailed { key } => app.shared.store.on_mint_failed(&key),
+        media::Message::DecodeFailed { key, err, .. } => app
+            .shared
+            .store
+            .on_decode_failed(&key, matches!(err, crate::media::MediaError::Cancelled)),
+        // Nobody leases the frames. The still store forgets the key like the
+        // live handler does. Tile settles heal through their claim TTL.
+        media::Message::AnimDecoded { key, .. } => {
+            app.shared.store.abandon(&key);
+            return Task::none();
+        }
+        _ => return Task::none(),
+    };
+    run_shared_jobs(app, outcome)
+}
+
+/// Run store jobs that belong to no particular window through any live one.
+fn run_shared_jobs(app: &mut App, outcome: crate::media::store::StoreOutcome) -> Task<Envelope> {
     if outcome.jobs.is_empty() {
         return Task::none();
     }
@@ -338,6 +384,49 @@ mod tests {
             Envelope::Win(id, Message::Viewer(ViewerMessage::Next)),
         );
         assert!(app.windows[&id].viewer().unwrap().pending_nav.is_none());
+    }
+
+    #[test]
+    fn a_store_completion_survives_its_window_closing() {
+        use crate::media::store::{ImageKey, RamImage, Tier};
+
+        let (mut app, id) = into_app(viewing_app(&["a.png"], 0));
+        let source = crate::media::pipeline::Source::Fs;
+        let key = ImageKey::new(&source, std::path::Path::new("a.png"));
+        // Another window still leases the image while the closing window's
+        // upload is in flight (pending is set).
+        let (lease, _) = app
+            .shared
+            .store
+            .request(key.clone(), "a.png".into(), source, Tier::Full);
+        let _ = app.shared.store.on_decoded(
+            key.clone(),
+            RamImage {
+                handle: iced::widget::image::Handle::from_rgba(2, 2, vec![0u8; 16]),
+                original_size: (2, 2),
+                decode_time: None,
+            },
+        );
+
+        // The upload's window closes before its completion processes.
+        let closed = app.windows.remove(&id).unwrap();
+        let _ = update(
+            &mut app,
+            Envelope::Win(
+                id,
+                Message::Media(media::Message::TextureReady {
+                    key: key.clone(),
+                    tier: Tier::Full,
+                    texture: crate::ui::image_surface::test_keepalive(),
+                }),
+            ),
+        );
+
+        // The completion reached the shared store anyway: the survivor's
+        // lease reads the texture and the entry is not wedged pending.
+        assert!(lease.texture().is_some());
+        assert_eq!(app.shared.store.tier(&key), Tier::Full);
+        drop(closed);
     }
 
     #[test]
