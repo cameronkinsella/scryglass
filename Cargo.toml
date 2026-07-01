@@ -138,3 +138,14 @@ video = ["dep:ffmpeg-next", "dep:rodio"]
 # build.rs rejects shared builds to prevent silently DLL-dependent
 # binaries. See README for the licensing note (LGPL relink terms).
 video-static = ["video", "ffmpeg-next/static"]
+
+# One-commit iced patch: release a minimized window's swapchain.
+# Drop this section if/when it lands in iced 0.15 release.
+[patch.crates-io]
+iced_core = { git = "https://github.com/cameronkinsella/iced", branch = "shrink-minimized-surfaces" }
+iced_debug = { git = "https://github.com/cameronkinsella/iced", branch = "shrink-minimized-surfaces" }
+iced_futures = { git = "https://github.com/cameronkinsella/iced", branch = "shrink-minimized-surfaces" }
+iced_graphics = { git = "https://github.com/cameronkinsella/iced", branch = "shrink-minimized-surfaces" }
+iced_program = { git = "https://github.com/cameronkinsella/iced", branch = "shrink-minimized-surfaces" }
+iced_runtime = { git = "https://github.com/cameronkinsella/iced", branch = "shrink-minimized-surfaces" }
+iced_winit = { git = "https://github.com/cameronkinsella/iced", branch = "shrink-minimized-surfaces" }
