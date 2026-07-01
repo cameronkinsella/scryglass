@@ -3,10 +3,12 @@
 //! pipeline. Zoom, pan, and fit reuse the shared display geometry, so stills,
 //! animations, and video share one path and never diverge.
 
+use std::sync::{Arc, Weak};
+
 use iced::widget::shader;
 use iced::{Element, Length, Rectangle, Size, mouse, wgpu};
 
-use super::pipeline::{ImagePipeline, Keepalive};
+use super::pipeline::{ImagePipeline, Keepalive, ResidentImage};
 use crate::app::Message;
 use crate::app::viewer_math::compute_zoom;
 use crate::config::{DownscaleKernel, ZoomMode};
@@ -61,8 +63,11 @@ pub fn warmup() -> Element<'static, Message> {
 /// placement is resolved per frame in `prepare` from iced's real widget size, not
 /// stored here, so it can never lag the size actually being drawn into.
 struct ImageSurface {
-    /// The resident texture to draw, or `None` for the warmup surface.
-    texture: Option<Keepalive>,
+    /// The resident texture to draw, or `None` for the warmup surface. Weak,
+    /// because iced keeps the last widget tree and primitive of a window that
+    /// stops redrawing (a minimized one): a strong ref here would pin VRAM the
+    /// decay freed. The store owns the texture. Draws upgrade per frame.
+    texture: Option<Weak<ResidentImage>>,
     original: (u32, u32),
     zoom: f32,
     pan: (f32, f32),
@@ -98,7 +103,7 @@ impl ImageSurface {
             .and_then(|t| t.size().or_else(|| t.tiles().map(|set| set.original())))
             .unwrap_or(original);
         Self {
-            texture,
+            texture: texture.as_ref().map(Arc::downgrade),
             original,
             zoom,
             pan,
@@ -155,8 +160,11 @@ impl<T> shader::Program<T> for ImageSurface {
 
 /// One frame's worth of work handed to the renderer.
 pub struct ImagePrimitive {
-    /// The resident texture to draw, owned for the whole frame.
-    texture: Option<Keepalive>,
+    /// The resident texture to draw. Weak like the surface's (iced retains the
+    /// last primitive of a window that stops redrawing). Prepare and draw
+    /// upgrade it, and the store cannot free it between them because no update
+    /// runs mid-frame.
+    texture: Option<Weak<ResidentImage>>,
     original: (u32, u32),
     zoom: f32,
     pan: (f32, f32),
@@ -223,12 +231,11 @@ impl shader::Primitive for ImagePrimitive {
                 snap_footprint_to_unit(raw[1] / scale),
             ];
             // Snap the placement to whole physical pixels so a view-res demote lands
-            // the image on the same grid as the full-res it replaces and never nudges
-            // it sideways. A near-1:1 copy (a demote at its baked size, or a 100%-zoom
-            // image) also snaps its source to texel centers, so the single tap is a
-            // pixel-exact copy instead of a sub-pixel resample that would soften it
-            // (worst on text). The image area is `bounds` in logical pixels, taken to
-            // physical by the scale factor.
+            // on the same grid as the full-res it replaces. A near-1:1 copy (a demote
+            // at its baked size, or a 100%-zoom image) also snaps its source to texel
+            // centers, so the single tap is a pixel-exact copy rather than a softening
+            // sub-pixel resample (worst on text). The image area is `bounds` in
+            // logical pixels, taken to physical by the scale factor.
             let (dst, src) = snap_placement_to_pixels(
                 placement.dst,
                 placement.src,
@@ -236,10 +243,21 @@ impl shader::Primitive for ImagePrimitive {
                 (bounds.width * scale, bounds.height * scale),
                 near_one_to_one(footprint),
             );
-            // A tiled still resolves a per-tile draw list instead of one quad;
-            // its `tex_size` is the substrate, so the footprint above already
+            // A dead ref is a texture the decay freed while this window kept
+            // its stale frame state (a minimized window never redraws), so
+            // draw nothing rather than pin or sample it.
+            let texture = match self.texture.as_ref().map(Weak::upgrade) {
+                Some(None) => {
+                    pipeline.clear_tiles();
+                    return;
+                }
+                Some(Some(t)) => Some(t),
+                None => None,
+            };
+            // A tiled still resolves a per-tile draw list instead of one quad.
+            // Its `tex_size` is the substrate, so the footprint above already
             // measures substrate texels per pixel.
-            if let Some(set) = self.texture.as_ref().and_then(|t| t.tiles()) {
+            if let Some(set) = texture.as_ref().and_then(|t| t.tiles()) {
                 pipeline.prepare_tiles(
                     queue,
                     set,
@@ -260,11 +278,11 @@ impl shader::Primitive for ImagePrimitive {
     }
 
     fn draw(&self, pipeline: &ImagePipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
-        if let Some(texture) = &self.texture {
+        if let Some(texture) = self.texture.as_ref().and_then(Weak::upgrade) {
             if texture.tiles().is_some() {
                 pipeline.draw_tiles(render_pass, self.nearest);
             } else {
-                pipeline.draw_resident(render_pass, texture, self.nearest);
+                pipeline.draw_resident(render_pass, &texture, self.nearest);
             }
         }
         true
