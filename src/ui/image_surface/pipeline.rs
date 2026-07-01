@@ -460,6 +460,10 @@ struct GpuImage {
     bind_nearest: wgpu::BindGroup,
     /// Kept so this texture can be sampled as the source of a view-res render.
     view: wgpu::TextureView,
+    /// Owned so the drop path can `destroy()` the native texture: dropping the
+    /// handles only releases them for whenever wgpu's internal references
+    /// unwind, which never happens while every window is minimized.
+    texture: wgpu::Texture,
     size: (u32, u32),
 }
 
@@ -942,15 +946,15 @@ fn create_rgba_texture(
     })
 }
 
-/// Build a texture's two bind groups (linear and nearest sampling). The bind
-/// groups keep the texture and its view alive, so neither is stored separately.
+/// Build a texture's two bind groups (linear and nearest sampling). Takes the
+/// texture by value: the image owns it so the drop path can destroy it.
 fn bind_texture(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     uniforms: &wgpu::Buffer,
     sampler_linear: &wgpu::Sampler,
     sampler_nearest: &wgpu::Sampler,
-    texture: &wgpu::Texture,
+    texture: wgpu::Texture,
 ) -> GpuImage {
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     // Scope the closure so its borrow of `view` ends before `view` moves into the
@@ -983,11 +987,13 @@ fn bind_texture(
         };
         (bind(sampler_linear), bind(sampler_nearest))
     };
+    let size = (texture.width(), texture.height());
     GpuImage {
         bind_linear,
         bind_nearest,
         view,
-        size: (texture.width(), texture.height()),
+        texture,
+        size,
     }
 }
 
@@ -1167,7 +1173,7 @@ fn spawn_upload_thread(
                             &uniforms,
                             &sampler_linear,
                             &sampler_nearest,
-                            &texture,
+                            texture,
                         );
                         // Wait for the GPU here so only one upload is ever in
                         // flight (iced's back-pressure), off the render thread.
@@ -1280,7 +1286,7 @@ fn spawn_upload_thread(
                             &uniforms,
                             &sampler_linear,
                             &sampler_nearest,
-                            &out,
+                            out,
                         );
                         let _ = device.poll(wgpu::PollType::Wait {
                             submission_index: Some(submission),
@@ -1295,10 +1301,15 @@ fn spawn_upload_thread(
                         let _ = ready.send(resident);
                     }
                     Job::Drop(image) => {
+                        // Dropping the handles is not enough: the native texture
+                        // survives until wgpu's last internal reference unwinds,
+                        // which a minimized window (no frames, no sweeps) never
+                        // forces. destroy() queues the native free unconditionally;
+                        // the poll then has the driver reclaim the VRAM now. The
+                        // app only drops an image it will never draw again, so
+                        // nothing can submit the destroyed texture afterwards.
+                        image.texture.destroy();
                         drop(image);
-                        // Dropping a texture only queues it for destruction;
-                        // poll so the driver reclaims the VRAM now, even while
-                        // every window is minimized and nothing else renders.
                         let _ = device.poll(wgpu::PollType::Poll);
                     }
                 }
