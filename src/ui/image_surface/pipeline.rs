@@ -20,7 +20,7 @@ const UNIFORM_SIZE: u64 = 80;
 /// pyramid's base layer), the rest for visible tiles. The LOD floor leaves up
 /// to 2 level texels per physical pixel, so a 4K viewport can show
 /// ceil(3840*2/512)+1 x ceil(2160*2/512)+1 = 16x10 tiles, 17x11 with the
-/// demand margin. 192 covers that with headroom; a larger display degrades to
+/// demand margin. 192 covers that with headroom. A larger display degrades to
 /// the base layer past the cap.
 const UNIFORM_SLOTS: u64 = 192;
 
@@ -29,7 +29,7 @@ const UNIFORM_SLOTS: u64 = 192;
 const UNIFORM_STRIDE: u64 = 256;
 
 /// Hands decoded images to the single dedicated upload thread (set up on the
-/// pipeline's first build, the only place wgpu gives us the device). One thread
+/// pipeline's first build, the only place wgpu exposes the device). One thread
 /// keeps uploads serialized, so concurrent 64 MB writes never contend and the
 /// tokio pool stays free for decoding.
 struct UploadContext {
@@ -45,14 +45,14 @@ struct UploadContext {
     scale_factor: AtomicU32,
 }
 
-/// Work for the upload thread. Upload creates a texture off the render thread;
+/// Work for the upload thread. Upload creates a texture off the render thread.
 /// Drop frees one off the render thread too, since a 64 MB VRAM free on the
 /// render thread stalls the frame (iced drops on its worker for the same reason).
 enum Job {
     Upload {
         handle: Handle,
         /// Resolved with the keepalive once the texture is resident. The app
-        /// holds it for as long as it wants the image; dropping it frees the
+        /// holds it for as long as it wants the image. Dropping it frees the
         /// texture at once.
         ready: tokio::sync::oneshot::Sender<Keepalive>,
     },
@@ -70,18 +70,18 @@ enum Job {
 static UPLOAD_CONTEXT: OnceLock<UploadContext> = OnceLock::new();
 
 /// A GPU-resident image, owned by the app through its [`Keepalive`]. Dropping
-/// the last reference frees the texture off the render thread immediately, so a
-/// minimized or closed window reclaims its VRAM at once rather than waiting for
-/// some later frame to sweep it.
+/// the last reference frees the texture off the render thread at once, so a
+/// minimized or closed window reclaims its VRAM rather than waiting for some
+/// later frame to sweep it.
 ///
 /// A still too large for one texture is resident as a [`TileSet`] instead of a
-/// single texture; its tiles are small resident images themselves, so upload
+/// single texture. Its tiles are small resident images themselves, so upload
 /// and off-thread VRAM release work the same way tile by tile.
 pub struct ResidentImage {
     body: Resident,
 }
 
-/// The forms a resident image takes; each keepalive is exactly one of these.
+/// The forms a resident image takes. Each keepalive is exactly one of these.
 enum Resident {
     /// One texture, freed off the render thread through the channel.
     Texture {
@@ -161,9 +161,9 @@ impl ResidentImage {
 }
 
 /// Most tiles a pyramid keeps resident: a 4K viewport's worst-case wanted set
-/// (see [`UNIFORM_SLOTS`]) plus headroom, so a demand wave never evicts tiles
-/// it just produced. Older tiles drop (freeing their VRAM) and are re-produced
-/// from the RAM source on return.
+/// (see [`UNIFORM_SLOTS`]) plus headroom, so a demand wave never evicts its own
+/// freshly produced tiles. Older tiles drop (freeing their VRAM) and are
+/// re-produced from the RAM source on return.
 const MAX_CACHED_TILES: usize = 224;
 
 /// Most exact-scale tiles kept resident: the visible set plus pan margin
@@ -175,7 +175,7 @@ const MAX_EXACT_TILES: usize = 96;
 /// The exact-scale layer: tiles that are byte-exact crops of the one-pass
 /// downscale at `target`, keyed by grid position with `lod` fixed at 0.
 struct ExactLayer {
-    /// The whole-image size the tiles are exact for; (0, 0) before the
+    /// The whole-image size the tiles are exact for. (0, 0) before the
     /// first rest.
     target: (u32, u32),
     tiles: TileCache<Keepalive>,
@@ -213,9 +213,8 @@ pub struct TileSet {
     wanted_lod: AtomicU32,
     /// What the last tiled draw actually selected, stamped by `prepare_tiles`
     /// and read by the demand pass, so production always targets the level
-    /// the real placement samples (one source of truth for scale and
-    /// rounding). Holds [`DRAW_UNSTAMPED`] before any tiled draw and
-    /// [`DRAW_BASE_ONLY`] when the base layer alone sufficed.
+    /// the real placement samples. Holds [`DRAW_UNSTAMPED`] before any tiled
+    /// draw and [`DRAW_BASE_ONLY`] when the base layer alone sufficed.
     draw_lod: AtomicU32,
     /// The scale factor of the last tiled draw (`f32` bits), so the demand
     /// pass works in the physical pixels of the window actually drawing.
@@ -237,9 +236,9 @@ const CLAIM_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// What the demand pass should do, read back from the last real draw.
 pub enum DrawWant {
-    /// No tiled draw has happened; the caller derives the level itself.
+    /// No tiled draw has happened. The caller derives the level itself.
     Unknown,
-    /// The base layer sufficed; no tiles are needed.
+    /// The base layer sufficed. No tiles are needed.
     BaseOnly,
     /// The draw sampled this level.
     Level(u32),
@@ -376,14 +375,14 @@ impl TileSet {
             .unwrap_or(false)
     }
 
-    /// A production for `key` finished (either way); its claim is released.
+    /// A production for `key` finished (either way). Its claim is released.
     pub fn settle(&self, key: TileKey) {
         if let Ok(mut pending) = self.pending.lock() {
             pending.remove(&key);
         }
     }
 
-    /// Record the level the current view wants; stale productions bail.
+    /// Record the level the current view wants. Stale productions bail.
     pub fn set_wanted_lod(&self, lod: u32) {
         self.wanted_lod.store(lod, Ordering::Relaxed);
     }
@@ -429,7 +428,7 @@ impl Drop for ResidentImage {
 }
 
 /// The app-held handle that keeps an uploaded image resident. Cheap to clone
-/// (a refcount bump); the texture lives until the last clone drops.
+/// (a refcount bump). The texture lives until the last clone drops.
 pub type Keepalive = Arc<ResidentImage>;
 
 /// A keepalive with no texture, for tests that only need its refcount token.
@@ -443,7 +442,7 @@ pub fn test_keepalive() -> Keepalive {
 /// Persistent GPU state shared by every still-image draw.
 pub struct ImagePipeline {
     pipeline: wgpu::RenderPipeline,
-    /// Bound at slot 0; rust-gpu reserves set 0, so the real bindings are set 1.
+    /// Bound at slot 0. rust-gpu reserves set 0, so the real bindings are set 1.
     empty_bind: wgpu::BindGroup,
     uniforms: wgpu::Buffer,
     is_srgb: bool,
@@ -605,7 +604,7 @@ impl shader::Pipeline for ImagePipeline {
         let sampler_linear = device.create_sampler(&sampler_desc(wgpu::FilterMode::Linear));
         let sampler_nearest = device.create_sampler(&sampler_desc(wgpu::FilterMode::Nearest));
 
-        // Capture the device here (the only place wgpu hands it to us) and spawn
+        // Capture the device here (the only place wgpu exposes it) and spawn
         // the dedicated upload thread. It owns the cloned device/queue, drains
         // jobs serially, and feeds finished textures to prepare via `receiver`.
         let (jobs, jobs_rx) = unbounded_channel();
@@ -716,7 +715,7 @@ impl ImagePipeline {
         self.tile_draws.clear();
         let original = set.original();
         set.draw_scale.store(scale.to_bits(), Ordering::Relaxed);
-        // The physical size the WHOLE image is displayed at; demand targets
+        // The physical size the WHOLE image is displayed at. Demand targets
         // it. When zoomed in, `dst` is clipped to the viewport and `src`
         // holds the visible fraction, so the full extent is their ratio.
         let src_span = (src[2] - src[0], src[3] - src[1]);
@@ -732,7 +731,7 @@ impl ImagePipeline {
             (u64::from(shown.0) << 32) | u64::from(shown.1),
             Ordering::Relaxed,
         );
-        // Texels per physical pixel of the substrate; its inverse is the
+        // Texels per physical pixel of the substrate. Its inverse is the
         // physical zoom the LOD is chosen for.
         let footprint = [raw_footprint[0] / scale, raw_footprint[1] / scale];
         if let Some(base) = set.base()
@@ -765,11 +764,10 @@ impl ImagePipeline {
             // Exact-scale tiles cover the base wherever they have landed:
             // each is a byte-exact crop of the one-pass downscale at the
             // shown size, placed on integer pixels and drawn as aligned
-            // single taps, indistinguishable from a whole exact base. The
-            // placement is re-snapped against the exact grid itself, so a
-            // panned view still lands taps on texel centers, and each tile
-            // maps through the visible `src` window (dst only spans the
-            // viewport when zoomed in).
+            // single taps, indistinguishable from a whole exact base.
+            // Re-snapping against the exact grid keeps a panned view's taps
+            // on texel centers, and each tile maps through the visible
+            // `src` window (dst only spans the viewport when zoomed in).
             if shown != (0, 0) && set.exact_target() == shown {
                 let (edst, esrc) = crate::ui::image_display::snap_placement_to_pixels(
                     dst,
@@ -967,7 +965,7 @@ fn bind_texture(
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        // One slot's worth; the dynamic offset picks which.
+                        // One slot's worth. The dynamic offset picks which.
                         resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                             buffer: uniforms,
                             offset: 0,
@@ -1067,10 +1065,9 @@ struct UploadThread {
 }
 
 /// The dedicated upload thread, modeled on iced's image worker. It drains jobs
-/// one at a time and, after each upload, waits for the GPU on this thread so
-/// only one upload is ever in flight (back-pressure). The wait is off the render
-/// thread, so it never stalls a frame. View-res renders and texture frees
-/// (Job::Drop) also run here.
+/// one at a time and waits out each upload on this thread, so only one is ever
+/// in flight (back-pressure) and no frame stalls on the wait. View-res renders
+/// and texture frees (Job::Drop) also run here.
 fn spawn_upload_thread(
     t: UploadThread,
     mut jobs: UnboundedReceiver<Job>,
@@ -1091,12 +1088,32 @@ fn spawn_upload_thread(
         .name("scryglass-image-upload".into())
         .spawn(move || {
             // Upload through a recycled staging belt and copy_buffer_to_texture,
-            // like iced's worker, so GPU staging is reused rather than allocated
-            // per image. `staging` is the reused copy-source buffer.
+            // like iced's worker, so GPU staging is not allocated per image.
+            // `staging` is the reused copy-source buffer. It lives for one
+            // burst of jobs and is freed when the queue idles, so the largest
+            // upload ever made does not pin its size in VRAM for good.
             let mut belt = wgpu::util::StagingBelt::new(4 * 1024 * 1024);
             let mut staging: Option<wgpu::Buffer> = None;
             let mut staging_cap: u64 = 0;
-            while let Some(job) = jobs.blocking_recv() {
+            loop {
+                let job = match jobs.try_recv() {
+                    Ok(job) => job,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                        // The burst is over and every submission that used the
+                        // buffer was waited out, so destroy it before sleeping.
+                        // The poll has the driver reclaim it now.
+                        if let Some(buf) = staging.take() {
+                            staging_cap = 0;
+                            buf.destroy();
+                            let _ = device.poll(wgpu::PollType::Poll);
+                        }
+                        match jobs.blocking_recv() {
+                            Some(job) => job,
+                            None => break,
+                        }
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                };
                 match job {
                     Job::Upload { handle, ready } => {
                         let Handle::Rgba {
@@ -1106,7 +1123,7 @@ fn spawn_upload_thread(
                             ..
                         } = &handle
                         else {
-                            // Never reached (loads decode to Rgba); drop `ready`
+                            // Never reached (loads decode to Rgba). Drop `ready`
                             // so the awaiter sees no keepalive.
                             continue;
                         };
@@ -1114,7 +1131,6 @@ fn spawn_upload_thread(
                         let bytes_per_row =
                             (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
                         let total = bytes_per_row as u64 * height as u64;
-                        // TODO: free when idle to release the VRAM
                         if staging_cap < total {
                             staging = Some(device.create_buffer(&wgpu::BufferDescriptor {
                                 label: Some("scryglass image staging"),
@@ -1181,8 +1197,8 @@ fn spawn_upload_thread(
                             submission_index: Some(submission),
                             timeout: None,
                         });
-                        // The app holds this Arc (keeping the texture resident);
-                        // dropping the last Arc frees the texture via `drop_tx`.
+                        // The app holds this Arc (keeping the texture resident).
+                        // Dropping the last Arc frees the texture via `drop_tx`.
                         let resident = Arc::new(ResidentImage {
                             body: Resident::Texture {
                                 image,
@@ -1196,7 +1212,7 @@ fn spawn_upload_thread(
                         target,
                         ready,
                     } => {
-                        // Skip the tokenless test keepalive; the caller then falls
+                        // Skip the tokenless test keepalive. The caller then falls
                         // back to its CPU downscale.
                         let (Some(src_view), Some((sw, sh))) = (source.input_view(), source.size())
                         else {
@@ -1301,13 +1317,11 @@ fn spawn_upload_thread(
                         let _ = ready.send(resident);
                     }
                     Job::Drop(image) => {
-                        // Dropping the handles is not enough: the native texture
-                        // survives until wgpu's last internal reference unwinds,
-                        // which a minimized window (no frames, no sweeps) never
-                        // forces. destroy() queues the native free unconditionally;
-                        // the poll then has the driver reclaim the VRAM now. The
-                        // app only drops an image it will never draw again, so
-                        // nothing can submit the destroyed texture afterwards.
+                        // Dropping the handles alone does not free the native
+                        // texture for a minimized window (wgpu's last internal
+                        // reference never unwinds). destroy() plus the poll has
+                        // the driver reclaim the VRAM now. The app never draws
+                        // a dropped image again, so nothing can submit it.
                         image.texture.destroy();
                         drop(image);
                         let _ = device.poll(wgpu::PollType::Poll);
@@ -1333,7 +1347,7 @@ fn sampler_desc(filter: wgpu::FilterMode) -> wgpu::SamplerDescriptor<'static> {
 
 /// Pack the per-draw uniform block to match the shader `Uniforms` struct (80 bytes):
 /// the dst/src rects (0..32), the flags `UVec4` (32..48, x = sRGB, y = kernel), then
-/// footprint, tex_size, and the cubic `(B, C)` (48..72; 72..80 is tail padding).
+/// footprint, tex_size, and the cubic `(B, C)` (48..72). 72..80 is tail padding.
 #[allow(clippy::too_many_arguments)]
 fn build_uniforms(
     dst: [f32; 4],
