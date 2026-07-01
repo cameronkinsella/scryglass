@@ -10,7 +10,7 @@ pub enum Message {
         mode: iced::window::Mode,
         snapped: bool,
     },
-    /// The settle timer after a move or resize fired; a later event bumps the
+    /// The settle timer after a move or resize fired. A later event bumps the
     /// generation, so a mid-drag probe no-ops.
     ProbeWindowState {
         generation: u64,
@@ -46,7 +46,7 @@ pub enum Message {
 
 /// One stage of a backgrounded window's decay pipeline, run in this order
 /// and each at its own delay from when the window entered the state. The same
-/// stages serve both the unfocused and minimized states; only their configured
+/// stages serve both the unfocused and minimized states. Only their configured
 /// timers differ. Which stages apply depends on the on-screen media: a still runs
 /// demote/drop/evict, an animation only evict, a video only its session release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,7 +57,7 @@ pub enum DecayStage {
     DropVram,
     /// Evict this window's RAM sources, so they re-decode from disk on return.
     EvictRam,
-    /// Release an open video's whole decode session, freezing the last frame; a
+    /// Release an open video's whole decode session, freezing the last frame. A
     /// restore re-opens it at the saved position.
     EvictVideo,
     /// Release the furthest remaining ring of prefetched neighbors, then re-arm
@@ -97,6 +97,31 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 viewer.pan = clamp_pan(viewer.pan, img_w, img_h, viewport);
             }
 
+            // A new width would reveal strip only on the right (its offset is
+            // measured from the left). Shift by half the delta so it grows
+            // evenly. Skipped in fullscreen, where the strip is hidden, so the
+            // round trip back lands where it started.
+            let mut strip = Task::none();
+            if !win.fullscreen {
+                let id = win.id;
+                if let Some(viewer) = win.viewer_mut() {
+                    if viewer.filmstrip_width != 0.0 && viewer.filmstrip_width != size.width {
+                        let offset = crate::components::filmstrip::resized_offset(
+                            viewer.filmstrip_scroll_x,
+                            viewer.filmstrip_width,
+                            size.width,
+                            viewer.nav.len(),
+                        );
+                        viewer.filmstrip_scroll_x = offset;
+                        strip = iced::widget::operation::scroll_to(
+                            crate::components::filmstrip::filmstrip_id(id),
+                            iced::widget::scrollable::AbsoluteOffset { x: offset, y: 0.0 },
+                        );
+                    }
+                    viewer.filmstrip_width = size.width;
+                }
+            }
+
             // A resize changes the placement like a zoom, so its demand is
             // debounced too: it must run after a frame draws (and stamps)
             // the new geometry, and a live resize storm coalesces to one.
@@ -105,9 +130,9 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             // fullscreened window looks like any other resize here, so confirm
             // the state before persisting and let the windowed size stand.
             if win.fullscreen {
-                tiles
+                Task::batch([tiles, strip])
             } else {
-                Task::batch([tiles, debounce_window_state(win)])
+                Task::batch([tiles, strip, debounce_window_state(win)])
             }
         }
 
@@ -180,7 +205,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             }
             // Pause an open video the instant the window minimizes (audio stops at
             // once, not after the frame queue stalls), and resume on restore only
-            // if it was playing. The pause is opt-out via config; an unfocused but
+            // if it was playing. The pause is opt-out via config. An unfocused but
             // un-minimized video keeps playing regardless.
             let pause = shared.config.resource.minimized.pause_video;
             let mut resume = win.video_resumes_on_restore;
@@ -254,7 +279,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
 }
 
 /// How long a window must sit still before its state is probed for the
-/// geometry save. A drag streams events; probing only after they settle keeps
+/// geometry save. A drag streams events. Probing only after they settle keeps
 /// mid-drag positions (the instant before a snap layout applies) out of the
 /// saved geometry.
 const PROBE_SETTLE: Duration = Duration::from_millis(400);
@@ -291,18 +316,21 @@ fn check_window_state(id: iced::window::Id) -> Task<AppMessage> {
 /// A size worth remembering only when the window is plainly windowed: neither
 /// maximized, minimized, fullscreen, nor snapped. A snap layout is the OS
 /// placing the window, so reopening there would lose the size the user chose.
-fn should_persist(maximized: bool, minimized: bool, mode: iced::window::Mode, snapped: bool) -> bool {
+fn should_persist(
+    maximized: bool,
+    minimized: bool,
+    mode: iced::window::Mode,
+    snapped: bool,
+) -> bool {
     !maximized && !minimized && !snapped && mode == iced::window::Mode::Windowed
 }
 
-/// Query the OS minimize state. iced surfaces no minimize event on any backend
-/// (it drops winit's `Occluded`), so this polls `is_minimized` on the focus
-/// changes that bracket a minimize, plus a slow fallback for a minimize that
-/// lands while the window is already unfocused. The poll is deliberate, not a
-/// stopgap: the only event-driven alternative is a Windows-only 0x0 `Resized`,
-/// and a one-platform event cannot be regression-tested in CI the way an
-/// `is_minimized` poll can. The query reports on every backend but Wayland,
-/// which has no way to know its own minimize state.
+/// Query the OS minimize state. iced drops winit's `Occluded` and surfaces no
+/// minimize event, so polling `is_minimized` on the focus changes that bracket
+/// a minimize (plus a slow unfocused fallback) is deliberate, not a stopgap.
+/// The only event-driven alternative is a Windows-only 0x0 `Resized`, and a
+/// one-platform event cannot be regression-tested in CI the way a poll can.
+/// Wayland alone cannot know, and so never reports, its own minimize state.
 fn check_minimize(id: iced::window::Id) -> Task<AppMessage> {
     iced::window::is_minimized(id)
         .map(|m| AppMessage::Window(Message::Minimized(m.unwrap_or(false))))
@@ -339,11 +367,11 @@ fn run_decay_stage(
         let resume = win.video_resumes_on_restore;
         let minimized = win.minimized;
         if let Some(viewer) = win.viewer_mut() {
-            // Capture the session into a memo (which keeps the archive temp file alive)
-            // and drop it, freeing the decode threads, hardware decoder, audio sink,
-            // and GPU textures. The last `frame` stays on screen, so the video looks
-            // paused, not gone, until the window returns. `playing` resolves through
-            // the minimize-pause flag, which may have already cleared `session.playing`.
+            // Capture the session into a memo (keeps the archive temp file alive) and
+            // drop it, freeing decode threads, hardware decoder, audio sink, and GPU
+            // textures. The last `frame` stays on screen, so the video looks paused,
+            // not gone. `playing` resolves through the minimize-pause flag, which may
+            // have already cleared `session.playing`.
             let memo = viewer
                 .video
                 .session
@@ -373,7 +401,7 @@ fn run_decay_stage(
         return Task::none();
     };
     // A minimized window shows nothing, so its rotation override (a full
-    // texture the store does not govern) is pure waste; a restore re-derives
+    // texture the store does not govern) is pure waste. A restore re-derives
     // it. A visible window keeps it, or the image would snap unrotated.
     if minimized
         && let DisplayedImage::Full { rotated, .. } = &mut viewer.displayed
@@ -391,7 +419,7 @@ fn run_decay_stage(
             retarget_displayed(viewer, shared, Tier::View, &pipeline, view)
         }
         DecayStage::DropVram => {
-            // Drop the texture; the view falls back to the thumbnail blur, and a
+            // Drop the texture. The view falls back to the thumbnail blur, and a
             // refocus re-uploads from the RAM source with no disk read.
             retarget_displayed(viewer, shared, Tier::InRam, &pipeline, view)
         }
@@ -399,12 +427,10 @@ fn run_decay_stage(
             let is_anim = matches!(viewer.displayed, DisplayedImage::Animated { .. });
             if is_anim {
                 // Lower this window's demand on the shared frames to evicted, exactly
-                // like a still lowering its tier, and nothing more. The lease and the
-                // (now dormant) playback are kept, so the store's aggregate demand
-                // alone decides residency: the frames free only once every window has
-                // dropped to evicted, and they all evict together. When any window
-                // brings them back, every window's dormant playback resumes from where
-                // it was. That makes decay state shared across windows, like stills.
+                // like a still lowering its tier. The lease and dormant playback are
+                // kept, so aggregate demand alone decides residency: the frames free
+                // only once every window drops to evicted, and any window bringing
+                // them back resumes every playback. Decay is shared, like stills.
                 if let Some(path) = viewer.displayed_path.clone()
                     && let Some(lease) = viewer.anim_player.lease(&path)
                 {
@@ -414,7 +440,7 @@ fn run_decay_stage(
             } else {
                 // A still lowers its demand to evicted: the store frees its RAM once
                 // no window wants it higher. While another window holds the image it
-                // stays sharp; once the last holder releases it the cell empties and
+                // stays sharp. Once the last holder releases it the cell empties and
                 // the view falls back to the blur. A return re-decodes.
                 retarget_displayed(viewer, shared, Tier::Evicted, &pipeline, view)
             }
@@ -425,12 +451,11 @@ fn run_decay_stage(
     }
 }
 
-/// When the prefetch shedding starts, measured from state entry: the anchor
-/// resolves to the earliest armed stage at or after it in pipeline order, plus
-/// the configured delay. A skipped anchor stage falls through to the next one
-/// that actually runs, so `drop_on = "demote"` still sheds when only the drop
-/// stage is enabled. `None` (keep the prefetch) only when nothing at or after
-/// the anchor runs.
+/// When the prefetch shedding starts, measured from state entry: the earliest
+/// armed stage at or after the anchor in pipeline order, plus the configured
+/// delay. A skipped anchor falls through to the next stage that runs, so
+/// `drop_on = "demote"` still sheds when only the drop stage is enabled.
+/// `None` (keep the prefetch) when nothing at or after the anchor runs.
 fn shed_start(cfg: &PrefetchDecay, stages: &[(DecayStage, Duration)]) -> Option<Duration> {
     let anchor = match cfg.drop_on {
         PrefetchDropAnchor::Immediately => return Some(cfg.drop_after),
@@ -609,7 +634,7 @@ fn decay_schedule(
 /// Restore the on-screen image to what the window's new state needs: bring it
 /// back to a full-res texture (re-uploading from RAM, or re-decoding if it was
 /// evicted), and for a focused window re-warm the prefetch look-ahead. The
-/// display stays put; the view re-sharpens once the texture lands. A minimized
+/// display stays put. The view re-sharpens once the texture lands. A minimized
 /// window shows nothing, so nothing is restored.
 fn restore_display(
     win: &mut Window,
@@ -629,7 +654,7 @@ fn restore_display(
     let mut tasks = Vec::new();
     // A video released while backgrounded re-opens at its saved position now that the
     // window has returned. The frozen frame is already on screen, so the next frame
-    // tick (re-armed once the session exists) paints the fresh one over it; the first
+    // tick (re-armed once the session exists) paints the fresh one over it. The first
     // poll delivers it even while paused, so a paused video shows the right frame.
     if let Some(memo) = viewer.video.suspended.take() {
         viewer.video.session = Some(crate::video::VideoSession::resume(&memo));
@@ -638,7 +663,7 @@ fn restore_display(
         let is_anim = matches!(viewer.displayed, DisplayedImage::Animated { .. });
         if is_anim {
             // Re-lease the shared frames if any window still has them resident (no
-            // decode); otherwise re-decode through the still path, which re-discovers
+            // decode). Otherwise re-decode through the still path, which re-discovers
             // the animation and re-registers it in the shared store.
             if let Some(anim_task) =
                 try_start_shared_anim(&mut shared.anim_store, viewer, &displayed)
@@ -667,8 +692,8 @@ fn restore_display(
             tasks.push(fire_rotate(viewer, &shared.store));
         }
     }
-    // A focused window re-warms its look-ahead; a window only reactivated by a
-    // scroll restores just the visible image.
+    // A focused window re-warms its look-ahead. A window reactivated by a
+    // scroll restores only the visible image.
     if focused {
         tasks.extend(fire_prefetch(
             &mut shared.store,
@@ -754,7 +779,7 @@ mod tests {
         cache_image(&mut app, "a.png");
         app.viewer_mut().unwrap().displayed_path = Some("a.png".into());
 
-        // Minimizing arms the drop-VRAM stage (at 0s by default); fire it.
+        // Minimizing arms the drop-VRAM stage (at 0s by default). Fire it.
         let _ = update(&mut app.window, &mut app.shared, Message::Minimized(true));
         let generation = app.window.decay_generation;
         let _ = update(
@@ -766,7 +791,7 @@ mod tests {
             },
         );
 
-        // The image stays leased with its RAM in the store; only the shared
+        // The image stays leased with its RAM in the store. Only the shared
         // texture is dropped, so the lease now reads no texture.
         let key = ImageKey::new(
             &crate::media::pipeline::Source::Fs,
@@ -809,7 +834,7 @@ mod tests {
             },
         );
 
-        // The override's texture is freed; the wanted rotation survives so a
+        // The override's texture is freed. The wanted rotation survives so a
         // restore re-derives it.
         let v = app.viewer().unwrap();
         assert!(matches!(
@@ -946,9 +971,18 @@ mod tests {
         ];
 
         // Each anchor picks its own stage when armed.
-        assert_eq!(shed_start(&cfg(PrefetchDropAnchor::Demote), &full), Some(s(13)));
-        assert_eq!(shed_start(&cfg(PrefetchDropAnchor::Drop), &full), Some(s(23)));
-        assert_eq!(shed_start(&cfg(PrefetchDropAnchor::Evict), &full), Some(s(33)));
+        assert_eq!(
+            shed_start(&cfg(PrefetchDropAnchor::Demote), &full),
+            Some(s(13))
+        );
+        assert_eq!(
+            shed_start(&cfg(PrefetchDropAnchor::Drop), &full),
+            Some(s(23))
+        );
+        assert_eq!(
+            shed_start(&cfg(PrefetchDropAnchor::Evict), &full),
+            Some(s(33))
+        );
 
         // A skipped anchor falls through to the next stage that runs: demote
         // disabled, drop at 0s (the default minimized pipeline).
@@ -960,17 +994,29 @@ mod tests {
 
         // Nothing at or after the anchor runs: the prefetch is kept.
         let demote_only = [(DecayStage::Demote, s(15))];
-        assert_eq!(shed_start(&cfg(PrefetchDropAnchor::Evict), &demote_only), None);
+        assert_eq!(
+            shed_start(&cfg(PrefetchDropAnchor::Evict), &demote_only),
+            None
+        );
         assert_eq!(shed_start(&cfg(PrefetchDropAnchor::Demote), &[]), None);
 
         // A video's session release stands in for its evict, and earlier
         // anchors fall through to it.
         let video = [(DecayStage::EvictVideo, s(5))];
-        assert_eq!(shed_start(&cfg(PrefetchDropAnchor::Demote), &video), Some(s(8)));
-        assert_eq!(shed_start(&cfg(PrefetchDropAnchor::Evict), &video), Some(s(8)));
+        assert_eq!(
+            shed_start(&cfg(PrefetchDropAnchor::Demote), &video),
+            Some(s(8))
+        );
+        assert_eq!(
+            shed_start(&cfg(PrefetchDropAnchor::Evict), &video),
+            Some(s(8))
+        );
 
         // Immediately counts from state entry, whatever the pipeline runs.
-        assert_eq!(shed_start(&cfg(PrefetchDropAnchor::Immediately), &[]), Some(s(3)));
+        assert_eq!(
+            shed_start(&cfg(PrefetchDropAnchor::Immediately), &[]),
+            Some(s(3))
+        );
     }
 
     #[test]
@@ -982,7 +1028,7 @@ mod tests {
         app.viewer_mut().unwrap().displayed_path = Some("a.png".into());
 
         let _ = update(&mut app.window, &mut app.shared, Message::Focused(false));
-        // A refocus supersedes the drop; the old timer firing late must no-op.
+        // A refocus supersedes the drop. The old timer firing late must no-op.
         let stale = app.window.decay_generation;
         let _ = update(&mut app.window, &mut app.shared, Message::Focused(true));
         let _ = update(
@@ -1098,7 +1144,7 @@ mod tests {
             },
         };
 
-        // Demote plus a fixed evict; the disabled ("never") drop is skipped, and
+        // Demote plus a fixed evict. The disabled ("never") drop is skipped, and
         // the evict is clamped to land no earlier than the demote.
         assert_eq!(
             decay_schedule(&pipe(Some(s(15)), None, EvictPolicy::Fixed(s(60))), None),
@@ -1120,7 +1166,7 @@ mod tests {
         // Everything disabled: nothing decays.
         assert!(decay_schedule(&pipe(None, None, EvictPolicy::Never), None).is_empty());
 
-        // Dynamic eviction needs a measured decode time; without one it never
+        // Dynamic eviction needs a measured decode time. Without one it never
         // evicts (conservative), and with one it schedules a single evict stage.
         let dynamic = pipe(None, None, EvictPolicy::Dynamic);
         assert!(decay_schedule(&dynamic, None).is_empty());
@@ -1145,7 +1191,7 @@ mod tests {
             vec![(DecayStage::EvictRam, s(30))]
         );
 
-        // "never" arms nothing, so a backgrounded animation just keeps its frames.
+        // "never" arms nothing, so a backgrounded animation keeps its frames.
         let cfg = EvictConfig {
             evict_ram: EvictPolicy::Never,
             ..Default::default()
@@ -1174,7 +1220,7 @@ mod tests {
     }
 
     // The video session lifecycle is exercised on the stub (the real `open` spawns
-    // FFmpeg threads); the wiring it tests is identical in both builds.
+    // FFmpeg threads). The wiring it tests is identical in both builds.
     #[cfg(not(feature = "video"))]
     mod video {
         use super::*;
@@ -1611,7 +1657,7 @@ mod tests {
         let mut app = empty_app();
         app.shared.config.window_x = Some(10.0);
         // An open window moving while another window's geometry is saved must
-        // not overwrite it; only a close persists.
+        // not overwrite it. Only a close persists.
         app.window.window_size = Size::new(1024.0, 768.0);
         app.window.window_pos = iced::Point::new(500.0, 400.0);
         let _ = update(

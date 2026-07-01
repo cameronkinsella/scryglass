@@ -190,6 +190,11 @@ pub struct Viewer {
     pub drag: Option<DragState>,
     /// Filmstrip scroll offset in logical pixels. Drives virtualization.
     pub filmstrip_scroll_x: f32,
+    /// The width `filmstrip_scroll_x` was last computed against, so a resize
+    /// can shift the strip by half the delta. Zero until the first resize
+    /// stamps it. Kept through fullscreen (the strip is hidden there), so the
+    /// round trip back lands where it started.
+    pub filmstrip_width: f32,
     /// Whether a filmstrip-settle check is scheduled, so a moving scroll
     /// reuses one timer instead of arming one per scroll event.
     pub visible_settle_pending: bool,
@@ -243,6 +248,7 @@ impl Viewer {
             pan: (0.0, 0.0),
             drag: None,
             filmstrip_scroll_x: 0.0,
+            filmstrip_width: 0.0,
             visible_settle_pending: false,
             filmstrip_scrolled_at: Instant::now(),
             exif: None,

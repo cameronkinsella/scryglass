@@ -98,6 +98,13 @@ pub fn center_offset(cursor: usize, viewport_w: f32, len: usize) -> f32 {
     centering_offset(cursor, viewport_w).min(max_scroll(len, viewport_w))
 }
 
+/// Scroll offset after the strip's width changes: shifted by half the delta
+/// so the view grows or shrinks evenly on both sides instead of only at the
+/// right edge, clamped to the new scroll range.
+pub fn resized_offset(scroll_x: f32, old_w: f32, new_w: f32, len: usize) -> f32 {
+    (scroll_x - (new_w - old_w) / 2.0).clamp(0.0, max_scroll(len, new_w))
+}
+
 /// Smallest change from `scroll_x` that keeps `cursor`'s cell fully on
 /// screen: unchanged if it already is, otherwise its near edge pinned to the
 /// matching viewport edge.
@@ -343,6 +350,17 @@ mod tests {
         assert!(centered > 0.0 && centered < max_scroll(1000, 800.0));
         let cell_mid = 500.0 * STRIDE + STRIDE / 2.0;
         assert!((cell_mid - (centered + usable_width(800.0) / 2.0)).abs() < STRIDE);
+    }
+
+    #[test]
+    fn a_width_change_reveals_the_strip_evenly() {
+        // Widening by 200 shifts the view left by 100: half the new width
+        // appears on each side.
+        assert_eq!(resized_offset(500.0, 800.0, 1000.0, 1000), 400.0);
+        // Shrinking shifts back symmetrically.
+        assert_eq!(resized_offset(400.0, 1000.0, 800.0, 1000), 500.0);
+        // Clamped at the ends.
+        assert_eq!(resized_offset(30.0, 800.0, 1000.0, 1000), 0.0);
     }
 
     #[test]

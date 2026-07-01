@@ -123,7 +123,8 @@ fn settle_after(delay: Duration) -> Task<AppMessage> {
 }
 
 pub(crate) use widget::{
-    center_offset, cursor_on_screen, filmstrip_id, keep_visible_offset, open_offset, visible_range,
+    center_offset, cursor_on_screen, filmstrip_id, keep_visible_offset, open_offset,
+    resized_offset, visible_range,
 };
 mod widget;
 
