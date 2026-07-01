@@ -294,12 +294,21 @@ pub(crate) fn fire_thumb(
         return Task::none();
     }
 
+    // A full decode of this image is already in flight and will derive a
+    // thumbnail; only the cheap disk and prefix lookups are worth running.
+    let cheap_only = viewer.in_flight.contains(&path);
     viewer.in_flight_thumbs.insert(path.clone());
     let generation = pipeline.thumb_generation();
     let load: Pin<Box<dyn Future<Output = Result<ThumbData, MediaError>> + Send>> = if is_video {
         Box::pin(pipeline.load_video_thumb(path.clone(), urgency, generation))
     } else {
-        Box::pin(pipeline.load_thumb(viewer.source.clone(), path.clone(), urgency, generation))
+        Box::pin(pipeline.load_thumb(
+            viewer.source.clone(),
+            path.clone(),
+            urgency,
+            generation,
+            cheap_only,
+        ))
     };
     Task::perform(load, move |result| {
         Message::Media(MediaMessage::ThumbLoaded {

@@ -351,7 +351,6 @@ impl Viewer {
                 !thumbs.contains(&thumb_key(&self.source, p))
                     && !self.in_flight_thumbs.contains(*p)
                     && !self.failed_thumbs.contains(*p)
-                    && !self.in_flight.contains(*p)
                     // Video thumbs need a real file (FFmpeg first-frame
                     // grab), so skip them inside archives.
                     && (!crate::video::is_video(p) || matches!(self.source, Source::Fs))
@@ -447,14 +446,16 @@ mod tests {
     }
 
     #[test]
-    fn next_unthumbed_skips_done_in_flight_and_failed() {
+    fn next_unthumbed_skips_done_and_failed_but_not_in_flight_fulls() {
         let mut viewer = test_viewer(&["a.png", "b.png", "c.png", "d.png"], 0);
         viewer.in_flight_thumbs.insert("a.png".into());
         viewer.failed_thumbs.insert("b.png".into());
+        // A full load in flight still gets a thumb job: its persisted
+        // thumbnail loads from disk long before the decode lands.
         viewer.in_flight.insert("c.png".into());
         assert_eq!(
             viewer.next_unthumbed_in(&ImageCache::new(0), 0, 0..4),
-            Some(PathBuf::from("d.png"))
+            Some(PathBuf::from("c.png"))
         );
     }
 

@@ -122,7 +122,7 @@ impl Pipeline {
         }
     }
 
-    /// Adopt a changed RAM budget (config edit); takes effect on the next decode.
+    /// Adopt a changed RAM budget (config edit), effective on the next decode.
     /// Adopt the configured prefetch decode cap (boot and config changes).
     /// Loads already holding old permits finish under the old cap.
     pub fn set_prefetch_parallelism(&self, parallelism: crate::config::PrefetchParallelism) {
@@ -249,10 +249,9 @@ impl Pipeline {
 }
 
 /// A globally-unique key for an image's in-memory thumbnail, shared across all
-/// windows: its full disk path, or the archive path joined with the entry. So
-/// two windows on the same image share one thumbnail, and same-named entries in
-/// different archives never collide. For a filesystem image this is just its
-/// path, so within one window the key is unchanged.
+/// windows: its full disk path, or the archive path joined with the entry.
+/// Two windows on the same image share one thumbnail, and same-named entries in
+/// different archives never collide. For a filesystem image the key is its path.
 pub fn thumb_key(source: &Source, path: &std::path::Path) -> PathBuf {
     let (container, entry) = cache_key(source, path);
     container.join(entry)
@@ -295,6 +294,7 @@ impl Pipeline {
         path: PathBuf,
         urgency: ThumbUrgency,
         generation: u64,
+        cheap_only: bool,
     ) -> impl Future<Output = Result<ThumbData, MediaError>> + Send + 'static {
         let semaphore = match urgency {
             ThumbUrgency::Urgent => self.urgent_thumb_lane.clone(),
@@ -341,6 +341,11 @@ impl Pipeline {
             if let Some(thumb) = from_prefix {
                 persist(&disk, &container, &name, &thumb).await;
                 return Ok(thumb);
+            }
+            // An in-flight full decode will derive this thumbnail. Keep the
+            // slot and skip the redundant decode below.
+            if cheap_only {
+                return Err(MediaError::Cancelled);
             }
             if urgency == ThumbUrgency::Urgent {
                 return Err(MediaError::Unsupported);
@@ -638,7 +643,7 @@ mod tests {
         let path = write_png(&dir, "a.png", 4, 2);
         let pipeline = Pipeline::new(None);
         let result = pipeline
-            .load_thumb(Source::Fs, path, ThumbUrgency::Urgent, 0)
+            .load_thumb(Source::Fs, path, ThumbUrgency::Urgent, 0, false)
             .await;
         assert!(matches!(result, Err(MediaError::Unsupported)));
     }
@@ -651,7 +656,7 @@ mod tests {
         let stale = pipeline.thumb_generation();
         pipeline.bump_thumb_generation();
         let result = pipeline
-            .load_thumb(Source::Fs, path, ThumbUrgency::Background, stale)
+            .load_thumb(Source::Fs, path, ThumbUrgency::Background, stale, false)
             .await;
         assert!(matches!(result, Err(MediaError::Cancelled)));
     }
@@ -678,7 +683,7 @@ mod tests {
         let pipeline = Pipeline::new(None);
         pipeline.bump_thumb_generation();
         let result = pipeline
-            .load_thumb(Source::Fs, path, ThumbUrgency::Urgent, 0)
+            .load_thumb(Source::Fs, path, ThumbUrgency::Urgent, 0, false)
             .await;
         assert!(matches!(result, Err(MediaError::Unsupported)));
     }
@@ -689,10 +694,23 @@ mod tests {
         let path = write_png(&dir, "a.png", 600, 300);
         let pipeline = Pipeline::new(None);
         let thumb = pipeline
-            .load_thumb(Source::Fs, path, ThumbUrgency::Background, 0)
+            .load_thumb(Source::Fs, path, ThumbUrgency::Background, 0, false)
             .await
             .expect("fallback should produce a thumbnail");
         assert_eq!(thumb.original_size, (600, 300));
+    }
+
+    #[tokio::test]
+    async fn a_cheap_only_thumb_keeps_its_slot_instead_of_decoding() {
+        let dir = TempDir::new().unwrap();
+        // No embedded preview and no disk store: the cheap lookups miss, and
+        // the in-flight full decode owns the fallback.
+        let path = write_png(&dir, "a.png", 600, 300);
+        let pipeline = Pipeline::new(None);
+        let result = pipeline
+            .load_thumb(Source::Fs, path, ThumbUrgency::Background, 0, true)
+            .await;
+        assert!(matches!(result, Err(MediaError::Cancelled)));
     }
 
     #[tokio::test]
@@ -716,7 +734,7 @@ mod tests {
 
         let pipeline = Pipeline::new(None);
         let thumb = pipeline
-            .load_thumb(Source::Fs, path, ThumbUrgency::Background, 0)
+            .load_thumb(Source::Fs, path, ThumbUrgency::Background, 0, false)
             .await
             .expect("animated fallback should produce a thumbnail");
         assert_eq!(thumb.original_size, (4, 4));
