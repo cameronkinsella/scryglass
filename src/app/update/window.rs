@@ -64,7 +64,7 @@ use std::time::Duration;
 
 use iced::{Size, Task};
 
-use super::{fire_load, fire_prefetch, run_jobs_at, try_start_shared_anim};
+use super::{fire_load, fire_prefetch, fire_rotate, run_jobs_at, try_start_shared_anim};
 use crate::app::state::{DisplayedImage, Viewer};
 use crate::app::viewer_math::{clamp_pan, compute_zoom};
 use crate::app::{Message as AppMessage, Shared, Window, recalc_viewport};
@@ -333,10 +333,21 @@ fn run_decay_stage(
         return Task::none();
     }
     let view = win.viewport_size;
+    let minimized = win.minimized;
     let pipeline = shared.pipeline.clone();
     let Some(viewer) = win.viewer_mut() else {
         return Task::none();
     };
+    // A minimized window shows nothing, so its rotation override (a full
+    // texture the store does not govern) is pure waste; a restore re-derives
+    // it. A visible window keeps it, or the image would snap unrotated.
+    if minimized
+        && let DisplayedImage::Full { rotated, .. } = &mut viewer.displayed
+        && rotated.is_some()
+    {
+        *rotated = None;
+        viewer.displayed_rotation = 0;
+    }
     // Each stage lowers this window's demand on its leases. The store frees an
     // image only once no window still wants it higher, so a shared image a
     // focused window holds never blanks from a background window's decay.
@@ -618,6 +629,8 @@ fn restore_display(
                 Tier::Full,
                 view,
             ));
+            // Re-derive a rotation override the minimized decay dropped
+            tasks.push(fire_rotate(viewer, &shared.store));
         }
     }
     // A focused window re-warms its look-ahead; a window only reactivated by a
@@ -735,6 +748,79 @@ mod tests {
                 .texture()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn minimizing_drops_the_rotation_override() {
+        use crate::app::test_support::viewing_app;
+        let mut app = viewing_app(&["a.png"], 0);
+        cache_image(&mut app, "a.png");
+        let viewer = app.viewer_mut().unwrap();
+        viewer.displayed_path = Some("a.png".into());
+        viewer.displayed = DisplayedImage::Full {
+            original_size: (2, 2),
+            rotated: Some(crate::ui::image_surface::test_keepalive()),
+        };
+        viewer.rotation = 1;
+        viewer.displayed_rotation = 1;
+
+        let _ = update(&mut app.window, &mut app.shared, Message::Minimized(true));
+        let generation = app.window.decay_generation;
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::Decay {
+                generation,
+                stage: DecayStage::DropVram,
+            },
+        );
+
+        // The override's texture is freed; the wanted rotation survives so a
+        // restore re-derives it.
+        let v = app.viewer().unwrap();
+        assert!(matches!(
+            v.displayed,
+            DisplayedImage::Full { rotated: None, .. }
+        ));
+        assert_eq!(v.displayed_rotation, 0);
+        assert_eq!(v.rotation, 1);
+    }
+
+    #[test]
+    fn an_unfocused_window_keeps_the_rotation_override() {
+        use crate::app::test_support::viewing_app;
+        let mut app = viewing_app(&["a.png"], 0);
+        cache_image(&mut app, "a.png");
+        let viewer = app.viewer_mut().unwrap();
+        viewer.displayed_path = Some("a.png".into());
+        viewer.displayed = DisplayedImage::Full {
+            original_size: (2, 2),
+            rotated: Some(crate::ui::image_surface::test_keepalive()),
+        };
+        viewer.rotation = 1;
+        viewer.displayed_rotation = 1;
+
+        // Still visible: dropping the override would snap the image unrotated.
+        let _ = update(&mut app.window, &mut app.shared, Message::Focused(false));
+        let generation = app.window.decay_generation;
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::Decay {
+                generation,
+                stage: DecayStage::Demote,
+            },
+        );
+
+        let v = app.viewer().unwrap();
+        assert!(matches!(
+            v.displayed,
+            DisplayedImage::Full {
+                rotated: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(v.displayed_rotation, 1);
     }
 
     #[test]

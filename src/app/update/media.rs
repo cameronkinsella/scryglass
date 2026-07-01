@@ -54,7 +54,7 @@ pub enum Message {
         epoch: u64,
     },
     /// An exact-scale tile finished: install it in the pyramid's exact
-    /// layer for `target`, or just release its claim on `None`.
+    /// layer for `target`, or release its claim on `None`.
     ExactReady {
         key: ImageKey,
         target: (u32, u32),
@@ -62,7 +62,7 @@ pub enum Message {
         texture: Option<Keepalive>,
         pyramid: Keepalive,
     },
-    /// An upload could not reach the GPU after retries; clear the pending mark so
+    /// An upload could not reach the GPU after retries. Clear the pending mark so
     /// a later pass can try again.
     MintFailed {
         key: ImageKey,
@@ -75,7 +75,7 @@ pub enum Message {
         err: MediaError,
     },
     /// A store decode turned out to be an animation. The still store forgets the
-    /// key; the frames are registered in the shared animation store instead, where
+    /// key. The frames are registered in the shared animation store instead, where
     /// other windows share them. `decode_time` feeds that store's dynamic evict.
     AnimDecoded {
         key: ImageKey,
@@ -129,7 +129,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             let viewport = win.viewport_size;
             let pipeline = shared.pipeline.clone();
             let original_size = ram.original_size;
-            // Install the RAM source; the store answers with the upload job that
+            // Install the RAM source. The store answers with the upload job that
             // mints the texture at the tier this image is wanted.
             let outcome = shared.store.on_decoded(key, *ram);
             if let Some(viewer) = win.viewer_mut() {
@@ -140,7 +140,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                         .thumbs
                         .insert(thumb_key(&viewer.source, &path), thumb, cost);
                 }
-                // Put it on screen now; the texture lands shortly via
+                // Put it on screen now. The texture lands shortly via
                 // TextureReady, and the blur stands in until it does.
                 if viewer.nav.current() == path {
                     show_loaded(viewer, &path, original_size, zoom_mode, viewport);
@@ -155,12 +155,13 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             let zoom_mode = shared.config.zoom_mode;
             let pipeline = shared.pipeline.clone();
             let tiled = texture.tiles().is_some();
-            // Swap the shared cell; every window leasing this image now draws it.
+            // Swap the shared cell. Every window leasing this image now draws it.
             let outcome = shared.store.on_minted(key.clone(), tier, texture);
             // If the on-screen image is still standing in with its blur, promote it
             // to the full display now that a texture exists. This covers the image
             // that became resident via a shared upload (another window's decode),
             // so no decode of its own ever fired show_loaded.
+            let mut rotate = Task::none();
             if let Some(viewer) = win.viewer_mut() {
                 let target = match &viewer.displayed {
                     DisplayedImage::Placeholder(_) => viewer.displayed_path.clone(),
@@ -177,13 +178,15 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 {
                     show_loaded(viewer, &path, ram.original_size, zoom_mode, viewport);
                 }
+                // A rotated image returning from decay re-derives its override
+                rotate = fire_rotate(viewer, &shared.store);
             }
             let jobs = run_jobs(outcome.jobs, &pipeline, Lane::Current, viewport);
             if tiled {
                 // A freshly minted pyramid is empty: fill its visible set now.
-                return Task::batch([jobs, super::media_tasks::fire_tiles(win, shared)]);
+                return Task::batch([jobs, rotate, super::media_tasks::fire_tiles(win, shared)]);
             }
-            jobs
+            Task::batch([jobs, rotate])
         }
 
         Message::MintFailed { key } => {
@@ -267,7 +270,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             }
             // Register the frames in the shared animation store and lease them here,
             // so a second window on this GIF shares the one decode and its decay. The
-            // request emits a decode job we drop: `on_decoded` resolves the demand
+            // request's decode job is dropped: `on_decoded` resolves the demand
             // from the frames already in hand. If another window decoded it first,
             // `on_decoded` is a no-op and the lease shares those frames.
             let (lease, _) = shared.anim_store.request(
@@ -511,7 +514,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 return Task::none();
             }
             // Raise the on-screen image's lease to a full-res texture for crisp
-            // zoom; the store re-uploads from the RAM it already holds.
+            // zoom. The store re-uploads from the RAM it already holds.
             let Some(lease) = viewer.cache.get(&path) else {
                 return Task::none();
             };
