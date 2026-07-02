@@ -207,13 +207,21 @@ fn snap_axis(
     // legitimately exceeds `tex`. Only the near-1:1 copy caps at the texture, so its
     // source window below stays within bounds. Capping a magnification would pin the
     // image to a native-size box and crop it as the zoom grows.
-    let mut pixels = ((d1 - d0) * phys).round().max(1.0);
-    if align_src {
-        pixels = pixels.min(tex);
-    }
+    let want = ((d1 - d0) * phys).round().max(1.0);
+    // The texel-exact copy only exists when the pixel span matches the requested
+    // source window to within rounding dust. A full-source fit gets no slack
+    // beyond rounding: every windowed texel visibly shaves its edges, as when a
+    // base or view-res copy sits a hair finer than a shrinking fit. A tidied
+    // zoom crop keeps a few texels of slack, since its edges are already
+    // mid-content and the pan can reach them.
+    let src_texels = (s1 - s0) * tex;
+    let full_src = s0 * tex <= 0.5 && (1.0 - s1) * tex <= 0.5;
+    let dust = if full_src { 1.0 } else { 3.0 };
+    let align = align_src && (src_texels - want).abs() <= dust;
+    let pixels = if align { want.min(tex) } else { want };
     let center = (d0 + d1) * 0.5 * phys;
     let a0 = (center - pixels * 0.5).round();
-    let (src0, src1) = if align_src {
+    let (src0, src1) = if align {
         let src_center = (s0 + s1) * 0.5 * tex;
         let t0 = (src_center - pixels * 0.5).round().clamp(0.0, tex - pixels);
         (t0 / tex, (t0 + pixels) / tex)
@@ -582,6 +590,35 @@ mod tests {
         assert!((shown_px - 631.0).abs() < 1e-2, "shown_px {shown_px}");
         assert!((shown_tex - 631.0).abs() < 1e-2, "shown_tex {shown_tex}");
         assert!((src[1] * 636.0).fract().abs() < 1e-2);
+    }
+
+    #[test]
+    fn a_finer_texture_shrinks_unaligned_instead_of_cropping() {
+        // A 625x585 exact base under a width-driven fit that wants 615x575 px:
+        // inside the near-1:1 band, but aligning would window 615 of the 625
+        // texels and shave the edges off a fully-fit image.
+        let dst = [0.0, 0.0, 615.0 / 640.0, 575.0 / 600.0];
+        let src = [0.0, 0.0, 1.0, 1.0];
+        let (sdst, ssrc) = snap_placement_to_pixels(dst, src, (625.0, 585.0), (640.0, 600.0), true);
+        assert_eq!(ssrc, src, "the full source must survive");
+        let span = (sdst[2] - sdst[0]) * 640.0;
+        assert!((span - 615.0).abs() < 0.5, "span {span}");
+
+        // Even a two-texel window off a full-source fit is a visible shave.
+        let dst = [0.0, 0.0, 623.0 / 640.0, 583.0 / 600.0];
+        let (_, ssrc) = snap_placement_to_pixels(dst, src, (625.0, 585.0), (640.0, 600.0), true);
+        assert_eq!(ssrc, src, "two texels of window still crop content");
+    }
+
+    #[test]
+    fn a_true_copy_still_aligns_to_texels() {
+        // Within rounding dust of the texture size the exact copy engages.
+        let dst = [0.0, 0.0, 625.4 / 640.0, 585.4 / 600.0];
+        let src = [0.0, 0.0, 1.0, 1.0];
+        let (sdst, ssrc) = snap_placement_to_pixels(dst, src, (625.0, 585.0), (640.0, 600.0), true);
+        assert_eq!(ssrc, src);
+        let span = (sdst[2] - sdst[0]) * 640.0;
+        assert!((span - 625.0).abs() < 0.5, "span {span}");
     }
 
     #[test]
