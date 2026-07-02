@@ -61,26 +61,23 @@ pub fn vs(
     *out_uv = uni.src_min + (uni.src_max - uni.src_min) * c;
 }
 
-/// sRGB gamma -> linear light, per IEC 61966-2-1 (see the module source).
+/// sRGB gamma -> linear light per lane, through the scalar transfer shared in
+/// `scryglass-shader-common`.
 fn srgb_to_linear(c: Vec3) -> Vec3 {
-    let lo = c / 12.92;
-    let hi = ((c + Vec3::splat(0.055)) / 1.055).powf(2.4);
     Vec3::new(
-        if c.x <= 0.04045 { lo.x } else { hi.x },
-        if c.y <= 0.04045 { lo.y } else { hi.y },
-        if c.z <= 0.04045 { lo.z } else { hi.z },
+        scryglass_shader_common::srgb_to_linear(c.x),
+        scryglass_shader_common::srgb_to_linear(c.y),
+        scryglass_shader_common::srgb_to_linear(c.z),
     )
 }
 
 /// Linear light -> sRGB gamma, the inverse of [`srgb_to_linear`]. Needed only for a
 /// linear render target, which stores the encoded value the multi-tap average is in.
 fn linear_to_srgb(c: Vec3) -> Vec3 {
-    let lo = c * 12.92;
-    let hi = c.powf(1.0 / 2.4) * 1.055 - Vec3::splat(0.055);
     Vec3::new(
-        if c.x <= 0.003_130_8 { lo.x } else { hi.x },
-        if c.y <= 0.003_130_8 { lo.y } else { hi.y },
-        if c.z <= 0.003_130_8 { lo.z } else { hi.z },
+        scryglass_shader_common::linear_to_srgb(c.x),
+        scryglass_shader_common::linear_to_srgb(c.y),
+        scryglass_shader_common::linear_to_srgb(c.z),
     )
 }
 

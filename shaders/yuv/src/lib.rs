@@ -73,29 +73,24 @@ pub fn vs(
     *out_uv = uni.src_min + (uni.src_max - uni.src_min) * c;
 }
 
-/// sRGB gamma -> linear light (IEC 61966-2-1, see the module sources). The
-/// breakpoint 0.04045, the linear slope 12.92, and the (0.055, 1.055, 2.4) curve are
-/// the standard's decode values.
+/// sRGB gamma -> linear light per lane (IEC 61966-2-1), through the scalar
+/// transfer shared in `scryglass-shader-common`.
 fn srgb_to_linear(c: Vec3) -> Vec3 {
-    let lo = c / 12.92;
-    let hi = ((c + Vec3::splat(0.055)) / 1.055).powf(2.4);
     Vec3::new(
-        if c.x <= 0.04045 { lo.x } else { hi.x },
-        if c.y <= 0.04045 { lo.y } else { hi.y },
-        if c.z <= 0.04045 { lo.z } else { hi.z },
+        scryglass_shader_common::srgb_to_linear(c.x),
+        scryglass_shader_common::srgb_to_linear(c.y),
+        scryglass_shader_common::srgb_to_linear(c.z),
     )
 }
 
 /// Linear light -> sRGB gamma, the inverse of [`srgb_to_linear`] (IEC 61966-2-1).
 /// Encodes the multi-tap linear-light average for a non-sRGB target, which stores the
-/// gamma value as-is. Breakpoint 0.0031308, the encode mirror of the decode curve.
+/// gamma value as-is.
 fn linear_to_srgb(c: Vec3) -> Vec3 {
-    let lo = c * 12.92;
-    let hi = c.powf(1.0 / 2.4) * 1.055 - Vec3::splat(0.055);
     Vec3::new(
-        if c.x <= 0.003_130_8 { lo.x } else { hi.x },
-        if c.y <= 0.003_130_8 { lo.y } else { hi.y },
-        if c.z <= 0.003_130_8 { lo.z } else { hi.z },
+        scryglass_shader_common::linear_to_srgb(c.x),
+        scryglass_shader_common::linear_to_srgb(c.y),
+        scryglass_shader_common::linear_to_srgb(c.z),
     )
 }
 

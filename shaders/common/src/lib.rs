@@ -1,4 +1,5 @@
-//! Resampling kernel weights shared by the image and video shaders.
+//! Resampling kernel weights and the sRGB transfer pair, shared by the image
+//! and video shaders.
 //!
 //! Both shaders downscale by summing source taps weighted by a kernel that widens
 //! with the downscale ratio (the "factor-aware" prefilter). The weight math is
@@ -9,7 +10,9 @@
 //! - Mitchell-Netravali cubic family: Mitchell & Netravali, "Reconstruction
 //!   Filters in Computer Graphics" (SIGGRAPH 1988). Mitchell = (1/3, 1/3),
 //!   Catmull-Rom = (0, 1/2), B-spline = (1, 0).
-//! - Lanczos windowed sinc: A. Lanczos, windowed-sinc reconstruction.
+//!   https://en.wikipedia.org/wiki/Mitchell%E2%80%93Netravali_filters
+//! - Lanczos windowed sinc:
+//!   https://en.wikipedia.org/wiki/Lanczos_resampling
 
 #![cfg_attr(target_arch = "spirv", no_std)]
 
@@ -61,6 +64,25 @@ fn sinc(x: f32) -> f32 {
 /// shader's `no_std`.
 fn abs(x: f32) -> f32 {
     if x < 0.0 { -x } else { x }
+}
+
+/// sRGB gamma to linear light for one channel, per IEC 61966-2-1.
+/// https://en.wikipedia.org/wiki/SRGB#Transfer_function_(%22gamma%22)
+pub fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        libm::powf((c + 0.055) / 1.055, 2.4)
+    }
+}
+
+/// Linear light to sRGB gamma for one channel, the inverse of [`srgb_to_linear`].
+pub fn linear_to_srgb(c: f32) -> f32 {
+    if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        libm::powf(c, 1.0 / 2.4) * 1.055 - 0.055
+    }
 }
 
 #[cfg(test)]
@@ -155,5 +177,25 @@ mod tests {
             assert!(close(lanczos3_weight(x), lanczos3_weight(-x)));
         }
         assert!(lanczos3_weight(1.5) < 0.0);
+    }
+
+    #[test]
+    fn srgb_transfer_matches_the_iec_reference_points() {
+        // Below the breakpoint the curve is linear.
+        assert!(close(srgb_to_linear(0.04045), 0.04045 / 12.92));
+        assert!(close(linear_to_srgb(0.003_130_8), 0.003_130_8 * 12.92));
+        // 18% gray and mid-gray, IEC 61966-2-1 curve.
+        assert!(close(srgb_to_linear(0.5), 0.214_041_14));
+        assert!(close(linear_to_srgb(0.18), 0.461_356_13));
+        assert!(close(srgb_to_linear(0.0), 0.0));
+        assert!(close(srgb_to_linear(1.0), 1.0));
+    }
+
+    #[test]
+    fn srgb_transfer_round_trips() {
+        for c in [0.0, 0.002, 0.04, 0.1, 0.5, 0.73, 1.0] {
+            assert!(close(linear_to_srgb(srgb_to_linear(c)), c), "c {c}");
+            assert!(close(srgb_to_linear(linear_to_srgb(c)), c), "c {c}");
+        }
     }
 }
