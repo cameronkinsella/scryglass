@@ -5,6 +5,7 @@
 //! screen and fires a cancellable load. Whatever load finishes for the
 //! path under the cursor wins ("latest wins" by path equality).
 
+pub(crate) mod decay;
 pub(super) mod file_ops;
 pub(crate) mod media;
 pub(super) mod media_tasks;
