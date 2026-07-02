@@ -10,7 +10,7 @@ use iced::{Element, Length, Rectangle, mouse, wgpu};
 
 use super::pipeline::VideoPipeline;
 use crate::app::Message;
-use crate::ui::image_display::{self, SurfacePlacement, snap_footprint_to_unit};
+use crate::ui::geometry::{self, SurfacePlacement, snap_footprint_to_unit};
 use crate::video::VideoFrame;
 
 /// Build the video surface element for the current frame at the given zoom/pan.
@@ -134,8 +134,7 @@ impl shader::Primitive for VideoPrimitive {
             // near-1:1 frame snaps to a single tap, so 1:1 playback pays no kernel.
             let vp = (bounds.width, bounds.height);
             let tex_dims = (self.frame.width, self.frame.height);
-            let raw =
-                image_display::footprint(self.placement.dst, self.placement.src, tex_dims, vp);
+            let raw = geometry::footprint(self.placement.dst, self.placement.src, tex_dims, vp);
             let scale = viewport.scale_factor().max(1.0);
             let footprint = [
                 snap_footprint_to_unit(raw[0] / scale),

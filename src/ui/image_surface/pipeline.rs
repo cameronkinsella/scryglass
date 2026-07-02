@@ -12,7 +12,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::config::DownscaleKernel;
 use crate::media::tiles::{TileCache, TileKey};
-use crate::ui::image_display::snap_footprint_to_unit;
+use crate::ui::geometry::snap_footprint_to_unit;
 
 const UNIFORM_SIZE: u64 = 80;
 
@@ -744,12 +744,12 @@ impl ImagePipeline {
             // A base at its shown size aligns its source to its own texel
             // grid, the exact snap the View tier gets, so its single taps
             // are texel-exact even when only part of the image is visible.
-            let (bdst, bsrc) = crate::ui::image_display::snap_placement_to_pixels(
+            let (bdst, bsrc) = crate::ui::geometry::snap_placement_to_pixels(
                 dst,
                 src,
                 (bw as f32, bh as f32),
                 viewport_phys,
-                crate::ui::image_display::near_one_to_one(base_fp),
+                crate::ui::geometry::near_one_to_one(base_fp),
             );
             self.write_uniforms(
                 queue,
@@ -769,7 +769,7 @@ impl ImagePipeline {
             // on texel centers, and each tile maps through the visible
             // `src` window (dst only spans the viewport when zoomed in).
             if shown != (0, 0) && set.exact_target() == shown {
-                let (edst, esrc) = crate::ui::image_display::snap_placement_to_pixels(
+                let (edst, esrc) = crate::ui::geometry::snap_placement_to_pixels(
                     dst,
                     src,
                     (shown.0 as f32, shown.1 as f32),
@@ -818,7 +818,7 @@ impl ImagePipeline {
             // exact base a hair either side of 1.0, and the snap only caps
             // from above, so a bare >= 1.0 test lets one axis reading
             // 0.9999 invite cascade tiles over an exact copy.
-            if crate::ui::image_display::near_one_to_one(base_fp)
+            if crate::ui::geometry::near_one_to_one(base_fp)
                 || (base_fp[0] >= 1.0 && base_fp[1] >= 1.0)
             {
                 set.draw_lod.store(DRAW_BASE_ONLY, Ordering::Relaxed);

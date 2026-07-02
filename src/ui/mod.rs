@@ -1,6 +1,7 @@
 //! Shared visual primitives and formatting helpers.
 
 pub mod checkerboard;
+pub mod geometry;
 pub mod icons;
 pub mod image_display;
 pub mod image_surface;

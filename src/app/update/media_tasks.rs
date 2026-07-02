@@ -699,7 +699,7 @@ pub(crate) fn fire_tiles(win: &Window, shared: &Shared) -> Task<Message> {
         original.1 as f32 * substrate_zoom * scale,
     );
     // The placement geometry runs in displayed coordinates, like the draw's.
-    let Some((_, src)) = crate::ui::image_display::display_geometry(
+    let Some((_, src)) = crate::ui::geometry::display_geometry(
         zoom,
         viewer.pan,
         (viewport.width, viewport.height),

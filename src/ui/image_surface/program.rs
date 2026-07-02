@@ -12,7 +12,7 @@ use super::pipeline::{ImagePipeline, Keepalive, ResidentImage};
 use crate::app::Message;
 use crate::app::viewer_math::compute_zoom;
 use crate::config::{DownscaleKernel, ZoomMode};
-use crate::ui::image_display::{
+use crate::ui::geometry::{
     self, SurfacePlacement, near_one_to_one, snap_footprint_to_unit, snap_placement_to_pixels,
 };
 
@@ -224,7 +224,7 @@ impl shader::Primitive for ImagePrimitive {
             // pixel. Snap a near-1:1 footprint to a single exact tap so a view-res
             // copy shown at its baked size skips a redundant kernel pass.
             let tex_dims = (self.tex_size[0] as u32, self.tex_size[1] as u32);
-            let raw = image_display::footprint(placement.dst, placement.src, tex_dims, vp);
+            let raw = geometry::footprint(placement.dst, placement.src, tex_dims, vp);
             let scale = viewport.scale_factor().max(1.0);
             let footprint = [
                 snap_footprint_to_unit(raw[0] / scale),
