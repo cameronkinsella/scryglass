@@ -431,7 +431,17 @@ pub(crate) fn resolve_pending_nav(win: &mut Window, shared: &mut Shared) -> Task
     let Some(target_index) = viewer.pending_nav else {
         return Task::none();
     };
-    let target_path = viewer.nav.files()[target_index].to_path_buf();
+    let Some(target_path) = viewer
+        .nav
+        .files()
+        .get(target_index)
+        .map(|p| p.to_path_buf())
+    else {
+        // The folder shrank while the move was pending (a file deleted outside
+        // the app). The target is gone, so the move is abandoned.
+        viewer.pending_nav = None;
+        return Task::none();
+    };
     if viewer.displayable(&shared.thumbs, &target_path) {
         // No generation bump: the in-flight load for this very image must
         // survive the move (a bump would cancel it and double the decode).
@@ -676,6 +686,22 @@ mod tests {
         let v = app.viewer().unwrap();
         assert_eq!(v.nav.cursor(), 0); // never moved
         assert_eq!(v.pending_nav, Some(1)); // pending target untouched
+    }
+
+    #[test]
+    fn a_pending_move_survives_the_folder_shrinking() {
+        let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
+        app.viewer_mut().unwrap().pending_nav = Some(2);
+        // Two files vanish out from under the pending move (an external
+        // delete plus rescan).
+        app.viewer_mut()
+            .unwrap()
+            .nav
+            .replace_files(vec!["a.png".into()]);
+        let _ = resolve_pending_nav(&mut app.window, &mut app.shared);
+        let v = app.viewer().unwrap();
+        assert!(v.pending_nav.is_none());
+        assert_eq!(v.nav.cursor(), 0);
     }
 
     #[test]

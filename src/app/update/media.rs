@@ -320,10 +320,16 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 return retry_jobs;
             }
 
-            let pending_index = viewer.pending_nav;
-            let pending_path = pending_index.map(|i| viewer.nav.files()[i].to_path_buf());
+            let pending = viewer
+                .pending_nav
+                .and_then(|i| viewer.nav.files().get(i).map(|p| (i, p.to_path_buf())));
+            if viewer.pending_nav.is_some() && pending.is_none() {
+                // The folder shrank while the move was pending: the target is
+                // gone and the move can never resolve.
+                viewer.pending_nav = None;
+            }
             let is_current = viewer.nav.current() == path;
-            let is_pending = pending_path.as_deref() == Some(&*path);
+            let is_pending = pending.as_ref().is_some_and(|(_, target)| *target == *path);
             if !is_current && !is_pending {
                 return retry_jobs;
             }
@@ -355,7 +361,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             let message = format!("{name}\n\n{err}");
             viewer.failed_loads.insert(path.clone(), message.clone());
 
-            if is_pending && let Some(index) = pending_index {
+            if is_pending && let Some((index, _)) = pending {
                 return Task::batch([retry_jobs, complete_navigation(win, shared, index, false)]);
             }
             // The current file failed in place: show the error unless a good
