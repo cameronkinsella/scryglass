@@ -263,11 +263,6 @@ pub(crate) struct SurfacePlacement {
     pub dst: [f32; 4],
     /// Source rect in texture UV space: u0, v0, u1, v1.
     pub src: [f32; 4],
-    /// Nearest sampling when zoomed past 100% with crisp pixels on. Read by the
-    /// video surface. The still surface derives its own from the zoom, since it
-    /// resolves the placement at draw time and the sampler is picked before then.
-    #[cfg_attr(not(feature = "video"), allow(dead_code))]
-    pub nearest: bool,
 }
 
 impl SurfacePlacement {
@@ -276,17 +271,13 @@ impl SurfacePlacement {
         pan: (f32, f32),
         viewport: (f32, f32),
         original: (u32, u32),
-        pixelated: bool,
     ) -> Self {
-        let nearest = pixelated && zoom > 1.0;
         match display_geometry(zoom, pan, viewport, original) {
             Some((dst, src)) => Self {
                 valid: true,
                 dst,
                 src,
-                nearest,
             },
-            // `nearest` is unread while `valid` is false, so the empty placement stands.
             None => Self::empty(),
         }
     }
@@ -297,7 +288,6 @@ impl SurfacePlacement {
             valid: false,
             dst: [0.0; 4],
             src: [0.0; 4],
-            nearest: false,
         }
     }
 }

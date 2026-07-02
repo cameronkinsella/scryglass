@@ -6,10 +6,12 @@
 use std::sync::Arc;
 
 use iced::widget::shader;
-use iced::{Element, Length, Rectangle, mouse, wgpu};
+use iced::{Element, Length, Rectangle, Size, mouse, wgpu};
 
 use super::pipeline::VideoPipeline;
 use crate::app::Message;
+use crate::app::viewer_math::compute_zoom;
+use crate::config::ZoomMode;
 use crate::ui::geometry::{self, SurfacePlacement, snap_footprint_to_unit};
 use crate::video::VideoFrame;
 
@@ -17,55 +19,45 @@ use crate::video::VideoFrame;
 /// `high_quality` selects the factor-aware downscale for a minified frame. `playing`
 /// asks the compositor to redraw every display refresh so playback is vsync-paced.
 /// Fills the image area like the still-image widget does.
+#[allow(clippy::too_many_arguments)]
 pub fn view(
     frame: Arc<VideoFrame>,
     zoom: f32,
     pan: (f32, f32),
-    viewport: (f32, f32),
     pixelated: bool,
     high_quality: bool,
+    zoom_mode: ZoomMode,
+    manual_zoom: bool,
     playing: bool,
 ) -> Element<'static, Message> {
-    shader::Shader::new(VideoSurface::new(
+    shader::Shader::new(VideoSurface {
         frame,
         zoom,
         pan,
-        viewport,
         pixelated,
+        zoom_mode,
+        manual_zoom,
         high_quality,
         playing,
-    ))
+    })
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
 }
 
-/// The shader program: holds the frame to show and where to put it.
+/// The shader program: holds the frame to show and the zoom state that
+/// places it. The placement itself is resolved at draw time from iced's
+/// real widget size, like the still surface, so a live resize never draws
+/// a frame-stale geometry.
 struct VideoSurface {
     frame: Arc<VideoFrame>,
-    placement: SurfacePlacement,
+    zoom: f32,
+    pan: (f32, f32),
+    pixelated: bool,
+    zoom_mode: ZoomMode,
+    manual_zoom: bool,
     high_quality: bool,
     playing: bool,
-}
-
-impl VideoSurface {
-    fn new(
-        frame: Arc<VideoFrame>,
-        zoom: f32,
-        pan: (f32, f32),
-        viewport: (f32, f32),
-        pixelated: bool,
-        high_quality: bool,
-        playing: bool,
-    ) -> Self {
-        let original = (frame.width, frame.height);
-        Self {
-            frame,
-            placement: SurfacePlacement::new(zoom, pan, viewport, original, pixelated),
-            high_quality,
-            playing,
-        }
-    }
 }
 
 impl<T> shader::Program<T> for VideoSurface {
@@ -95,8 +87,12 @@ impl<T> shader::Program<T> for VideoSurface {
     ) -> VideoPrimitive {
         VideoPrimitive {
             frame: self.frame.clone(),
-            placement: self.placement,
+            zoom: self.zoom,
+            pan: self.pan,
+            zoom_mode: self.zoom_mode,
+            manual_zoom: self.manual_zoom,
             high_quality: self.high_quality,
+            nearest: self.pixelated && self.zoom > 1.0,
         }
     }
 }
@@ -104,15 +100,36 @@ impl<T> shader::Program<T> for VideoSurface {
 /// A single frame's worth of work handed to the renderer.
 pub struct VideoPrimitive {
     frame: Arc<VideoFrame>,
-    placement: SurfacePlacement,
+    zoom: f32,
+    pan: (f32, f32),
+    zoom_mode: ZoomMode,
+    manual_zoom: bool,
     high_quality: bool,
+    nearest: bool,
+}
+
+impl VideoPrimitive {
+    /// Resolve the placement for the render-time image-area size (`bounds`).
+    fn placement(&self, viewport: (f32, f32)) -> SurfacePlacement {
+        let zoom = if self.manual_zoom {
+            self.zoom
+        } else {
+            compute_zoom(
+                self.zoom_mode,
+                self.frame.width,
+                self.frame.height,
+                Size::new(viewport.0, viewport.1),
+            )
+        };
+        let original = (self.frame.width, self.frame.height);
+        SurfacePlacement::new(zoom, self.pan, viewport, original)
+    }
 }
 
 impl std::fmt::Debug for VideoPrimitive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VideoPrimitive")
             .field("frame_id", &self.frame.id)
-            .field("valid", &self.placement.valid)
             .finish()
     }
 }
@@ -128,13 +145,17 @@ impl shader::Primitive for VideoPrimitive {
         bounds: &Rectangle,
         viewport: &shader::Viewport,
     ) {
-        if self.placement.valid {
+        // Resolve the placement against iced's real widget size now, so the
+        // geometry matches the size actually drawn into rather than the app's
+        // viewport estimate, which lags a frame behind during a resize.
+        let vp = (bounds.width, bounds.height);
+        let placement = self.placement(vp);
+        if placement.valid {
             // Downscale ratio for the frame placed in the real widget area, taken to
             // physical pixels by the scale factor (matching the still shader). A
             // near-1:1 frame snaps to a single tap, so 1:1 playback pays no kernel.
-            let vp = (bounds.width, bounds.height);
             let tex_dims = (self.frame.width, self.frame.height);
-            let raw = geometry::footprint(self.placement.dst, self.placement.src, tex_dims, vp);
+            let raw = geometry::footprint(placement.dst, placement.src, tex_dims, vp);
             let scale = viewport.scale_factor().max(1.0);
             let footprint = [
                 snap_footprint_to_unit(raw[0] / scale),
@@ -144,16 +165,16 @@ impl shader::Primitive for VideoPrimitive {
                 device,
                 queue,
                 &self.frame,
-                self.placement.dst,
-                self.placement.src,
+                placement.dst,
+                placement.src,
                 footprint,
             );
         }
     }
 
     fn draw(&self, pipeline: &VideoPipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
-        if self.placement.valid {
-            pipeline.draw(render_pass, self.placement.nearest, self.high_quality);
+        if self.frame.width > 0 && self.frame.height > 0 && self.zoom > 0.0 {
+            pipeline.draw(render_pass, self.nearest, self.high_quality);
         }
         true
     }

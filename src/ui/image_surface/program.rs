@@ -71,7 +71,6 @@ struct ImageSurface {
     original: (u32, u32),
     zoom: f32,
     pan: (f32, f32),
-    pixelated: bool,
     kernel: DownscaleKernel,
     zoom_mode: ZoomMode,
     manual_zoom: bool,
@@ -107,7 +106,6 @@ impl ImageSurface {
             original,
             zoom,
             pan,
-            pixelated,
             kernel,
             zoom_mode,
             manual_zoom,
@@ -123,7 +121,6 @@ impl ImageSurface {
             original: (0, 0),
             zoom: 1.0,
             pan: (0.0, 0.0),
-            pixelated: false,
             kernel: DownscaleKernel::default(),
             zoom_mode: ZoomMode::default(),
             manual_zoom: false,
@@ -148,7 +145,6 @@ impl<T> shader::Program<T> for ImageSurface {
             original: self.original,
             zoom: self.zoom,
             pan: self.pan,
-            pixelated: self.pixelated,
             kernel: self.kernel,
             zoom_mode: self.zoom_mode,
             manual_zoom: self.manual_zoom,
@@ -168,7 +164,6 @@ pub struct ImagePrimitive {
     original: (u32, u32),
     zoom: f32,
     pan: (f32, f32),
-    pixelated: bool,
     kernel: DownscaleKernel,
     zoom_mode: ZoomMode,
     manual_zoom: bool,
@@ -189,7 +184,7 @@ impl ImagePrimitive {
                 Size::new(viewport.0, viewport.1),
             )
         };
-        SurfacePlacement::new(zoom, self.pan, viewport, self.original, self.pixelated)
+        SurfacePlacement::new(zoom, self.pan, viewport, self.original)
     }
 }
 
