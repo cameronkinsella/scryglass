@@ -540,6 +540,39 @@ pub struct ResourceConfig {
     pub working_set: WorkingSetConfig,
 }
 
+/// One backgrounded state's decay tree, viewed uniformly whether the window is
+/// unfocused or minimized. The decay engine reads the four subtrees through this
+/// view, so the two states are interchangeable values of one shape. Only the
+/// minimized-specific extras (`pause_video`) sit outside it.
+#[derive(Clone, Copy)]
+pub struct StateDecayRef<'a> {
+    pub still: &'a DecayPipeline,
+    pub animated: &'a EvictConfig,
+    pub video: &'a VideoDecay,
+    pub prefetch: &'a PrefetchDecay,
+}
+
+impl ResourceConfig {
+    /// The decay tree governing a backgrounded window in the given state.
+    pub fn for_state(&self, minimized: bool) -> StateDecayRef<'_> {
+        if minimized {
+            StateDecayRef {
+                still: &self.minimized.still,
+                animated: &self.minimized.animated,
+                video: &self.minimized.video,
+                prefetch: &self.minimized.prefetch,
+            }
+        } else {
+            StateDecayRef {
+                still: &self.unfocused.still,
+                animated: &self.unfocused.animated,
+                video: &self.unfocused.video,
+                prefetch: &self.unfocused.prefetch,
+            }
+        }
+    }
+}
+
 impl Default for ResourceConfig {
     fn default() -> Self {
         Self {
@@ -620,6 +653,17 @@ impl Default for ResourceConfig {
 mod tests {
     use super::*;
     use crate::config::AppConfig;
+
+    #[test]
+    fn for_state_borrows_the_matching_subtree() {
+        let res = ResourceConfig::default();
+        let min = res.for_state(true);
+        assert!(std::ptr::eq(min.still, &res.minimized.still));
+        assert!(std::ptr::eq(min.prefetch, &res.minimized.prefetch));
+        let unf = res.for_state(false);
+        assert!(std::ptr::eq(unf.animated, &res.unfocused.animated));
+        assert!(std::ptr::eq(unf.video, &res.unfocused.video));
+    }
 
     #[test]
     fn prefetch_decay_defaults_differ_by_state() {

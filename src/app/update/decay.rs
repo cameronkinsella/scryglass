@@ -10,7 +10,9 @@ use super::window::Message;
 use super::{fire_load, fire_prefetch, fire_rotate, run_jobs_at, try_start_shared_anim};
 use crate::app::state::{DisplayedImage, Viewer};
 use crate::app::{Message as AppMessage, Shared, Window};
-use crate::config::{EvictConfig, PrefetchDecay, PrefetchDropAnchor, PrefetchVram, VideoDecay};
+use crate::config::{
+    EvictConfig, PrefetchDecay, PrefetchDropAnchor, PrefetchVram, StateDecayRef, VideoDecay,
+};
 use crate::media::pipeline::{Lane, Pipeline};
 use crate::media::store::{ImageKey, Tier};
 
@@ -51,11 +53,12 @@ pub(super) fn run_decay_stage(
     // The shedding walks in one ring per firing: release the furthest ring and,
     // while any neighbor remains, come back after the configured interval.
     if stage == DecayStage::ShedPrefetch {
-        let interval = if win.minimized {
-            shared.config.resource.minimized.prefetch.drop_interval
-        } else {
-            shared.config.resource.unfocused.prefetch.drop_interval
-        };
+        let interval = shared
+            .config
+            .resource
+            .for_state(win.minimized)
+            .prefetch
+            .drop_interval;
         let more = win.viewer_mut().is_some_and(Viewer::drop_prefetch_ring);
         if more {
             return arm_decay(generation, DecayStage::ShedPrefetch, interval);
@@ -225,12 +228,7 @@ pub(super) fn restart_decay(win: &mut Window, shared: &mut Shared) -> Task<AppMe
     }
     // A video on screen owns the window's decay (it is keyed off the session, alive
     // or suspended, since a video minimized during warmup never latches `displayed`).
-    let displayed_is_video = win
-        .viewer()
-        .is_some_and(|v| v.video.session.is_some() || v.video.suspended.is_some());
-    let displayed_is_anim = win
-        .viewer()
-        .is_some_and(|v| matches!(v.displayed, DisplayedImage::Animated { .. }));
+    let media = decay_media(win);
 
     // The eviction delay scales with the on-screen image's decode time, measured at
     // decode by whichever store owns it (the animation store for a GIF). A video has
@@ -238,48 +236,19 @@ pub(super) fn restart_decay(win: &mut Window, shared: &mut Shared) -> Task<AppMe
     let decode = win.viewer().and_then(|v| {
         let path = v.displayed_path.as_deref()?;
         let key = ImageKey::new(&v.source, path);
-        if displayed_is_anim {
+        if media == DecayMedia::Animated {
             shared.anim_store.decode_time(&key)
         } else {
             shared.store.decode_time(&key)
         }
     });
 
-    // Each media kind decays differently and they are mutually exclusive on screen: a
-    // video releases its whole decode session, an animation evicts its RAM frames, a
-    // still runs the full demote/drop/evict pipeline.
-    let res = &shared.config.resource;
-    let stages = if displayed_is_video {
-        let cfg = if win.minimized {
-            &res.minimized.video
-        } else {
-            &res.unfocused.video
-        };
-        video_decay_schedule(cfg)
-    } else if displayed_is_anim {
-        let cfg = if win.minimized {
-            &res.minimized.animated
-        } else {
-            &res.unfocused.animated
-        };
-        anim_decay_schedule(cfg, decode)
-    } else {
-        let cfg = if win.minimized {
-            &res.minimized.still
-        } else {
-            &res.unfocused.still
-        };
-        decay_schedule(cfg, decode)
-    };
+    let state = shared.config.resource.for_state(win.minimized);
+    let stages = schedule_for(media, state, decode);
     // The shedding's start is resolved against the stages that actually run
     // (a skipped anchor falls through), so it is armed here as one absolute
     // timer from state entry, like the stages themselves.
-    let prefetch = if win.minimized {
-        &res.minimized.prefetch
-    } else {
-        &res.unfocused.prefetch
-    };
-    if let Some(delay) = shed_start(prefetch, &stages) {
+    if let Some(delay) = shed_start(state.prefetch, &stages) {
         tasks.push(arm_decay(generation, DecayStage::ShedPrefetch, delay));
     }
     for (stage, delay) in stages {
@@ -288,8 +257,45 @@ pub(super) fn restart_decay(win: &mut Window, shared: &mut Shared) -> Task<AppMe
     Task::batch(tasks)
 }
 
+/// Which decay pipeline the on-screen media runs. The kinds are mutually
+/// exclusive on screen: a video releases its whole decode session, an animation
+/// evicts its RAM frames, a still runs the full demote/drop/evict pipeline.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DecayMedia {
+    Still,
+    Animated,
+    Video,
+}
+
+/// The media kind whose decay pipeline governs the window right now.
+fn decay_media(win: &Window) -> DecayMedia {
+    let Some(viewer) = win.viewer() else {
+        return DecayMedia::Still;
+    };
+    if viewer.video.session.is_some() || viewer.video.suspended.is_some() {
+        DecayMedia::Video
+    } else if matches!(viewer.displayed, DisplayedImage::Animated { .. }) {
+        DecayMedia::Animated
+    } else {
+        DecayMedia::Still
+    }
+}
+
+/// The stages the given media kind arms in the given state.
+fn schedule_for(
+    media: DecayMedia,
+    state: StateDecayRef<'_>,
+    decode: Option<Duration>,
+) -> Vec<(DecayStage, Duration)> {
+    match media {
+        DecayMedia::Video => video_decay_schedule(state.video),
+        DecayMedia::Animated => anim_decay_schedule(state.animated, decode),
+        DecayMedia::Still => decay_schedule(state.still, decode),
+    }
+}
+
 /// The evict stage and its delay for an animation, given its `.animated` config.
-/// An animation has no VRAM tier, so eviction is the only stage it can ever run;
+/// An animation has no VRAM tier, so eviction is the only stage it can ever run.
 /// `EvictConfig` makes demote/drop unrepresentable, so there is nothing to clamp.
 fn anim_decay_schedule(cfg: &EvictConfig, decode: Option<Duration>) -> Vec<(DecayStage, Duration)> {
     cfg.evict_delay(decode)
@@ -441,6 +447,22 @@ mod tests {
     use super::*;
     use crate::app::test_support::cache_image;
     use crate::app::update::window::update;
+
+    #[test]
+    fn schedule_for_dispatches_by_media_kind() {
+        let res = crate::config::ResourceConfig::default();
+        let min = res.for_state(true);
+
+        let video = schedule_for(DecayMedia::Video, min, None);
+        assert!(matches!(video.as_slice(), [(DecayStage::EvictVideo, _)]));
+
+        let anim = schedule_for(DecayMedia::Animated, min, Some(Duration::ZERO));
+        assert!(matches!(anim.as_slice(), [(DecayStage::EvictRam, _)]));
+
+        let still = schedule_for(DecayMedia::Still, min, Some(Duration::ZERO));
+        assert!(still.iter().any(|(s, _)| *s == DecayStage::DropVram));
+        assert!(still.iter().all(|(s, _)| *s != DecayStage::EvictVideo));
+    }
 
     #[test]
     fn minimizing_drops_the_texture_but_keeps_the_ram() {

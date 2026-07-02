@@ -19,7 +19,8 @@ mod ui;
 pub use resource::WorkingSetTrim;
 pub use resource::{
     DecayPipeline, EvictConfig, PrefetchDecay, PrefetchDropAnchor, PrefetchParallelism,
-    PrefetchScaler, PrefetchVram, RamBudget, ResourceConfig, VideoDecay, total_system_ram,
+    PrefetchScaler, PrefetchVram, RamBudget, ResourceConfig, StateDecayRef, VideoDecay,
+    total_system_ram,
 };
 // Reached as `crate::config::EvictPolicy` only from another module's tests, so a
 // plain (test-less) build sees this re-export as unused though it is not.
