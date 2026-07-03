@@ -51,6 +51,17 @@ fn kind_of(path: &Path) -> Option<Kind> {
     }
 }
 
+/// Cap on buffer pre-reservation from a header-declared entry size. The
+/// header is untrusted, so a corrupt multi-GB size must not drive
+/// `with_capacity` (an allocation failure aborts the process). Reads
+/// reserve at most this much and let `read_to_end` grow with real data.
+const MAX_ENTRY_PREALLOC: u64 = 8 * 1024 * 1024;
+
+/// A read buffer pre-sized from an untrusted declared size, clamped.
+fn entry_buf(declared: u64) -> Vec<u8> {
+    Vec::with_capacity(declared.min(MAX_ENTRY_PREALLOC) as usize)
+}
+
 /// Metadata for one image entry inside an archive.
 #[derive(Debug, Clone)]
 struct Entry {
@@ -150,7 +161,7 @@ fn list_zip(path: &Path) -> Result<Vec<Entry>> {
 fn read_zip(path: &Path, name: &str) -> Result<Vec<u8>> {
     let mut archive = zip::ZipArchive::new(BufReader::new(File::open(path)?))?;
     let mut file = archive.by_name(name)?;
-    let mut buf = Vec::with_capacity(file.size() as usize);
+    let mut buf = entry_buf(file.size());
     file.read_to_end(&mut buf)?;
     Ok(buf)
 }
@@ -185,7 +196,7 @@ fn read_tar<R: Read>(mut archive: tar::Archive<R>, name: &str) -> Result<Vec<u8>
     for entry in archive.entries()? {
         let mut entry = entry?;
         if entry.path()?.to_string_lossy() == name {
-            let mut buf = Vec::with_capacity(entry.header().size()? as usize);
+            let mut buf = entry_buf(entry.header().size()?);
             entry.read_to_end(&mut buf)?;
             return Ok(buf);
         }
@@ -338,6 +349,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let index = ArchiveIndex::open(&write_zip(&dir)).unwrap();
         assert!(index.read(Path::new("nope.png")).is_err());
+    }
+
+    #[test]
+    fn entry_buf_clamps_corrupt_declared_sizes() {
+        // A lying header must not drive the reservation past the clamp.
+        assert!(entry_buf(u64::MAX).capacity() < 2 * MAX_ENTRY_PREALLOC as usize);
+        // Honest small sizes still get their exact reservation.
+        assert!(entry_buf(64).capacity() >= 64);
     }
 
     #[test]
