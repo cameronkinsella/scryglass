@@ -79,8 +79,7 @@ ffmpeg-next = { version = "8", default-features = false, features = ["codec", "f
 # Enable wgpu's SPIR-V frontend (custom shaders).
 # Pinned to match iced's wgpu version.
 wgpu = { version = "27", features = ["spirv"] }
-# Manual update check (the `update-check` feature). rustls only, never
-# native-tls: TLS in this app must be rustls (a hard project rule).
+# Manual update check (the `update-check` feature). rustls only.
 ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }
 serde_json = { version = "1", optional = true }
 semver = { version = "1", optional = true }
@@ -112,15 +111,13 @@ zune-core = "0.5.1"
 zune-jpegxl = "0.5.2"
 
 [features]
-# RAR support builds the vendored unrar C++ sources. On by default,
-# disable with --no-default-features if the toolchain can't build it.
 default = ["rar", "disk-thumbs", "jxl", "svg", "raw", "update-check"]
 rar = ["dep:unrar"]
-# Manual "check for updates" button in settings (queries the GitHub releases
-# API). Off => no network code compiles at all.
+# Manual "check for updates" button in settings
+# (queries the GitHub releases API).
+# Off => no network code compiles at all.
 update-check = ["dep:ureq", "dep:serde_json", "dep:semver"]
-# Persistent thumbnail cache on disk (privacy-conscious: reconciled
-# against deleted files on folder open, 90-day expiry, size-capped).
+# Persistent thumbnail cache on disk.
 # Also gated at runtime by the `disk_thumbs` config setting.
 disk-thumbs = []
 # Pure-Rust format decoders, on by default.
@@ -133,8 +130,8 @@ heif = ["dep:libheif-rs"]
 # needs an FFmpeg dev package (FFMPEG_DIR) and libclang. With shared
 # libraries the FFmpeg DLLs must be beside the exe at runtime. Opt-in.
 video = ["dep:ffmpeg-next", "dep:rodio"]
-# Fully self-contained executable: links FFmpeg statically. Point
-# FFMPEG_DIR at a static build (e.g. vcpkg's x64-windows-static-md);
+# Link FFmpeg statically.
+# Point FFMPEG_DIR at a static build (e.g. vcpkg's x64-windows-static-md).
 # build.rs rejects shared builds to prevent silently DLL-dependent
 # binaries. See README for the licensing note (LGPL relink terms).
 video-static = ["video", "ffmpeg-next/static"]
