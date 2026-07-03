@@ -216,6 +216,22 @@ pub struct Viewer {
     /// new order. Set when a folder or archive was opened rather than a
     /// specific file.
     pub resort_to_first: bool,
+    /// Resume point for the background thumbnail scan, so each completion
+    /// continues where the walk left off instead of rescanning from the
+    /// center (quadratic over the directory).
+    thumb_scan: Option<ThumbScan>,
+}
+
+/// Frontier of one background thumbnail walk. Valid only for the focus it
+/// was computed for: any center, range, or center-file change resets it.
+struct ThumbScan {
+    center: usize,
+    range: std::ops::Range<usize>,
+    /// The file at `center` when the walk started, so a resort under an
+    /// unmoved cursor invalidates the frontier.
+    center_path: PathBuf,
+    /// Fan steps below this hold nothing pickable until the focus moves.
+    next_d: usize,
 }
 
 impl Viewer {
@@ -256,6 +272,7 @@ impl Viewer {
             displayed_rotation: 0,
             video: VideoState::default(),
             resort_to_first: false,
+            thumb_scan: None,
         }
     }
 
@@ -269,17 +286,22 @@ impl Viewer {
             .chain(self.displayed_path.clone())
             .collect();
         let nav = &self.nav;
-        let Some(ring) = self
+        // Each distance is a linear scan of the file list, so compute them
+        // once instead of once for the max and again per retained entry.
+        let distances: Vec<(PathBuf, usize)> = self
             .cache
             .keys()
             .filter(|p| !keep.contains(*p))
-            .map(|p| nav.distance(p).unwrap_or(usize::MAX))
-            .max()
-        else {
+            .map(|p| (p.clone(), nav.distance(p).unwrap_or(usize::MAX)))
+            .collect();
+        let Some(ring) = distances.iter().map(|(_, d)| *d).max() else {
             return false;
         };
-        self.cache
-            .retain(|p, _| keep.contains(p) || nav.distance(p).unwrap_or(usize::MAX) != ring);
+        for (path, distance) in &distances {
+            if *distance == ring {
+                self.cache.remove(path);
+            }
+        }
         self.cache.keys().any(|p| !keep.contains(p))
     }
 
@@ -333,35 +355,72 @@ impl Viewer {
     /// The next file for the background thumbnailer to pick within `range`,
     /// fanning outward from `center` (center, +1, -1, +2, -2, ...): one with
     /// no thumbnail, none in flight, and no full load underway (a full load
-    /// produces a thumbnail anyway).
+    /// produces a thumbnail anyway). Resumes from the walk's frontier, so a
+    /// settled span is never rescanned and a thumb evicted behind the
+    /// frontier is not re-decoded until the focus moves.
     pub fn next_unthumbed_in(
-        &self,
+        &mut self,
         thumbs: &ImageCache<Thumb>,
         center: usize,
         range: std::ops::Range<usize>,
     ) -> Option<PathBuf> {
         let files = self.nav.files();
         let span = range.end.saturating_sub(range.start);
-        (0..span)
-            .flat_map(|d| {
-                let forward = center.checked_add(d).filter(|i| range.contains(i));
-                let backward = (d > 0)
-                    .then(|| center.checked_sub(d))
-                    .flatten()
-                    .filter(|i| range.contains(i));
-                [forward, backward]
-            })
-            .flatten()
-            .map(|i| &files[i])
-            .find(|p| {
-                !thumbs.contains(&thumb_key(&self.source, p))
-                    && !self.in_flight_thumbs.contains(*p)
-                    && !self.failed_thumbs.contains(*p)
+        let center_path = files.get(center).cloned().unwrap_or_default();
+        let resume = match &self.thumb_scan {
+            Some(scan)
+                if scan.center == center
+                    && scan.range == range
+                    && scan.center_path == center_path =>
+            {
+                scan.next_d
+            }
+            _ => 0,
+        };
+
+        // Steps whose candidates are all permanently settled (thumbed, failed,
+        // or never thumbable) advance the frontier. In-flight candidates only
+        // pause it: a navigation can clear the in-flight set, and those slots
+        // must be re-picked.
+        let mut settled = resume;
+        let mut found = None;
+        'fan: for d in resume..span {
+            let forward = center.checked_add(d).filter(|i| range.contains(i));
+            let backward = (d > 0)
+                .then(|| center.checked_sub(d))
+                .flatten()
+                .filter(|i| range.contains(i));
+            let mut step_settled = true;
+            for path in [forward, backward].into_iter().flatten().map(|i| &files[i]) {
+                // Cheap set probes first; thumb_key allocates.
+                if self.failed_thumbs.contains(path)
                     // Video thumbs need a real file (FFmpeg first-frame
                     // grab), so skip them inside archives.
-                    && (!crate::video::is_video(p) || matches!(self.source, Source::Fs))
-            })
-            .cloned()
+                    || (crate::video::is_video(path) && !matches!(self.source, Source::Fs))
+                {
+                    continue;
+                }
+                if self.in_flight_thumbs.contains(path) {
+                    step_settled = false;
+                    continue;
+                }
+                if thumbs.contains(&thumb_key(&self.source, path)) {
+                    continue;
+                }
+                found = Some(path.clone());
+                break 'fan;
+            }
+            if step_settled && settled == d {
+                settled = d + 1;
+            }
+        }
+        self.thumb_scan = Some(ThumbScan {
+            center,
+            range,
+            center_path,
+            next_d: settled,
+        });
+        found
     }
 
     /// The on-disk file behind the current image: the file itself, or the
@@ -470,6 +529,85 @@ mod tests {
         let mut viewer = test_viewer(&["a.png"], 0);
         viewer.failed_thumbs.insert("a.png".into());
         assert_eq!(viewer.next_unthumbed_in(&ImageCache::new(0), 0, 0..1), None);
+    }
+
+    fn test_thumb() -> Thumb {
+        Thumb {
+            handle: Handle::from_rgba(1, 1, vec![0u8; 4]),
+            size: (1, 1),
+            original_size: (1, 1),
+        }
+    }
+
+    #[test]
+    fn a_thumb_evicted_behind_the_frontier_waits_for_a_focus_move() {
+        let mut viewer = test_viewer(&["a.png", "b.png", "c.png"], 1);
+        let mut thumbs = ImageCache::new(usize::MAX);
+        // Walk the whole range to completion: b, c, a.
+        for name in ["b.png", "c.png", "a.png"] {
+            assert_eq!(
+                viewer.next_unthumbed_in(&thumbs, 1, 0..3),
+                Some(PathBuf::from(name))
+            );
+            thumbs.insert(name.into(), test_thumb(), 1);
+        }
+        assert_eq!(viewer.next_unthumbed_in(&thumbs, 1, 0..3), None);
+
+        // An eviction behind the frontier is not re-picked at the same focus,
+        // so budget eviction cannot start a decode-evict loop.
+        thumbs.remove(Path::new("b.png"));
+        assert_eq!(viewer.next_unthumbed_in(&thumbs, 1, 0..3), None);
+
+        // A focus move rescans and picks the hole up again.
+        assert_eq!(
+            viewer.next_unthumbed_in(&thumbs, 0, 0..3),
+            Some(PathBuf::from("b.png"))
+        );
+    }
+
+    #[test]
+    fn a_resort_under_the_cursor_resets_the_scan_frontier() {
+        let mut viewer = test_viewer(&["a.png", "b.png", "c.png"], 0);
+        let thumbs = ImageCache::new(usize::MAX);
+        for name in ["a.png", "b.png", "c.png"] {
+            viewer.failed_thumbs.insert(name.into());
+        }
+        assert_eq!(viewer.next_unthumbed_in(&thumbs, 0, 0..3), None);
+
+        // A resort swaps in different files at the same indexes. The center
+        // file changed, so the settled frontier must not carry over.
+        viewer
+            .nav
+            .replace_files(vec!["x.png".into(), "y.png".into(), "z.png".into()]);
+        assert_eq!(
+            viewer.next_unthumbed_in(&thumbs, 0, 0..3),
+            Some(PathBuf::from("x.png"))
+        );
+    }
+
+    #[test]
+    fn cleared_in_flight_slots_are_repicked_at_the_same_focus() {
+        let mut viewer = test_viewer(&["a.png", "b.png"], 0);
+        let thumbs = ImageCache::new(usize::MAX);
+        assert_eq!(
+            viewer.next_unthumbed_in(&thumbs, 0, 0..2),
+            Some(PathBuf::from("a.png"))
+        );
+        viewer.in_flight_thumbs.insert("a.png".into());
+        assert_eq!(
+            viewer.next_unthumbed_in(&thumbs, 0, 0..2),
+            Some(PathBuf::from("b.png"))
+        );
+        viewer.in_flight_thumbs.insert("b.png".into());
+        assert_eq!(viewer.next_unthumbed_in(&thumbs, 0, 0..2), None);
+
+        // A same-position navigation cancels and clears the in-flight set.
+        // In-flight candidates only pause the frontier, so they come back.
+        viewer.in_flight_thumbs.clear();
+        assert_eq!(
+            viewer.next_unthumbed_in(&thumbs, 0, 0..2),
+            Some(PathBuf::from("a.png"))
+        );
     }
 
     #[test]
