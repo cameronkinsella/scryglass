@@ -316,15 +316,8 @@ impl Pipeline {
             let (container, name) = cache_key(&source, &path);
 
             // Fastest path: a thumbnail persisted by an earlier session.
-            if let Some(disk) = disk.clone() {
-                let (c, n) = (container.clone(), name.clone());
-                let hit = tokio::task::spawn_blocking(move || disk.load(&c, &n))
-                    .await
-                    .ok()
-                    .flatten();
-                if let Some(thumb) = hit {
-                    return Ok(thumb);
-                }
+            if let Some(thumb) = disk_hit(&disk, &container, &name).await {
+                return Ok(thumb);
             }
 
             // Cheap path: embedded EXIF preview from the file prefix.
@@ -429,25 +422,11 @@ impl Pipeline {
             let (container, name) = cache_key(&Source::Fs, &path);
 
             // Fastest path: a thumbnail persisted by an earlier session.
-            if let Some(disk) = disk.clone() {
-                let (c, n) = (container.clone(), name.clone());
-                let hit = tokio::task::spawn_blocking(move || disk.load(&c, &n))
-                    .await
-                    .ok()
-                    .flatten();
-                if let Some(thumb) = hit {
-                    return Ok(thumb);
-                }
+            if let Some(thumb) = disk_hit(&disk, &container, &name).await {
+                return Ok(thumb);
             }
 
-            let thumb = tokio::task::spawn_blocking(move || {
-                crate::video::first_frame_thumb(&path, super::THUMB_DIM)
-            })
-            .await
-            .map_err(|e| MediaError::Decode(e.to_string()))?
-            .ok_or(MediaError::Unsupported)?;
-            persist(&disk, &container, &name, &thumb).await;
-            Ok(thumb)
+            grab_video_thumb(path, &disk, &container, &name).await
         }
     }
 
@@ -468,25 +447,11 @@ impl Pipeline {
             let (container, name) = cache_key(&source, &entry);
 
             // Fastest path: a thumbnail persisted by an earlier open.
-            if let Some(disk) = disk.clone() {
-                let (c, n) = (container.clone(), name.clone());
-                let hit = tokio::task::spawn_blocking(move || disk.load(&c, &n))
-                    .await
-                    .ok()
-                    .flatten();
-                if let Some(thumb) = hit {
-                    return Ok(thumb);
-                }
+            if let Some(thumb) = disk_hit(&disk, &container, &name).await {
+                return Ok(thumb);
             }
 
-            let thumb = tokio::task::spawn_blocking(move || {
-                crate::video::first_frame_thumb(&file, super::THUMB_DIM)
-            })
-            .await
-            .map_err(|e| MediaError::Decode(e.to_string()))?
-            .ok_or(MediaError::Unsupported)?;
-            persist(&disk, &container, &name, &thumb).await;
-            Ok(thumb)
+            grab_video_thumb(file, &disk, &container, &name).await
         }
     }
 }
@@ -499,6 +464,38 @@ pub async fn load_info(source: Source, path: PathBuf) -> Vec<(String, String)> {
     tokio::task::spawn_blocking(move || super::info::exif_fields(&prefix))
         .await
         .unwrap_or_default()
+}
+
+/// The fastest path shared by every thumbnail loader: a thumbnail
+/// persisted by an earlier session, when the store is enabled.
+async fn disk_hit(
+    disk: &Option<DiskThumbs>,
+    container: &std::path::Path,
+    name: &std::ffi::OsStr,
+) -> Option<ThumbData> {
+    let disk = disk.clone()?;
+    let (container, name) = (container.to_path_buf(), name.to_owned());
+    tokio::task::spawn_blocking(move || disk.load(&container, &name))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Grab a video file's first frame as its thumbnail and persist it.
+async fn grab_video_thumb(
+    file: PathBuf,
+    disk: &Option<DiskThumbs>,
+    container: &std::path::Path,
+    name: &std::ffi::OsStr,
+) -> Result<ThumbData, MediaError> {
+    let thumb = tokio::task::spawn_blocking(move || {
+        crate::video::first_frame_thumb(&file, super::THUMB_DIM)
+    })
+    .await
+    .map_err(|e| MediaError::Decode(e.to_string()))?
+    .ok_or(MediaError::Unsupported)?;
+    persist(disk, container, name, &thumb).await;
+    Ok(thumb)
 }
 
 /// Write a thumbnail to the persistent store, off-thread.
