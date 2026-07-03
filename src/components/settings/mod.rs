@@ -145,7 +145,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
         }
 
         Message::SetPrefetchDepth(depth) => {
-            shared.config.prefetch_depth = depth.clamp(1, 10);
+            shared.config.prefetch_depth = depth.min(10);
             save_config(win, shared)
         }
 
@@ -256,14 +256,15 @@ mod tests {
     }
 
     #[test]
-    fn prefetch_depth_clamps_to_one_through_ten() {
+    fn prefetch_depth_clamps_to_zero_through_ten() {
         let mut app = empty_app();
         let _ = update(
             &mut app.window,
             &mut app.shared,
             Message::SetPrefetchDepth(0),
         );
-        assert_eq!(app.shared.config.prefetch_depth, 1);
+        // Zero is a real choice: it turns prefetch off entirely.
+        assert_eq!(app.shared.config.prefetch_depth, 0);
         let _ = update(
             &mut app.window,
             &mut app.shared,

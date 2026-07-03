@@ -76,7 +76,7 @@ pub fn settings<'a>(
         stepper(
             "Prefetch depth",
             depth.to_string(),
-            (depth > 1).then(|| SettingsMessage::SetPrefetchDepth(depth - 1)),
+            (depth > 0).then(|| SettingsMessage::SetPrefetchDepth(depth - 1)),
             (depth < 10).then(|| SettingsMessage::SetPrefetchDepth(depth + 1)),
         ),
     ]
