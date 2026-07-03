@@ -82,50 +82,51 @@ pub(crate) fn view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Messa
                 .into();
 
             // Info panel sits beside the image (not over it).
-            let image_cell: Element<'_, Message> = if !win.fullscreen && shared.config.show_info {
-                let file_name = viewer
-                    .nav
-                    .current()
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let details: Vec<(String, String)> = vec![
-                    (
-                        "Dimensions".to_string(),
-                        viewer
-                            .displayed
-                            .original_size()
-                            .map(|(w, h)| ui::format_dimensions(w, h))
-                            .unwrap_or_else(|| "…".to_string()),
-                    ),
-                    (
-                        "File size".to_string(),
-                        ui::file_size_label(viewer.current_file_size),
-                    ),
-                    ("Position".to_string(), viewer.nav.position_label()),
-                ];
-                let exif = viewer
-                    .exif
-                    .as_ref()
-                    .filter(|(p, _)| p.as_path() == viewer.nav.current())
-                    .map(|(_, fields)| fields.as_slice());
-                iced::widget::row![media, info_panel::view(&file_name, &details, exif)].into()
-            } else {
-                media
-            };
+            let image_cell: Element<'_, Message> =
+                if !win.fullscreen && shared.config.standard.chrome.info {
+                    let file_name = viewer
+                        .nav
+                        .current()
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let details: Vec<(String, String)> = vec![
+                        (
+                            "Dimensions".to_string(),
+                            viewer
+                                .displayed
+                                .original_size()
+                                .map(|(w, h)| ui::format_dimensions(w, h))
+                                .unwrap_or_else(|| "…".to_string()),
+                        ),
+                        (
+                            "File size".to_string(),
+                            ui::file_size_label(viewer.current_file_size),
+                        ),
+                        ("Position".to_string(), viewer.nav.position_label()),
+                    ];
+                    let exif = viewer
+                        .exif
+                        .as_ref()
+                        .filter(|(p, _)| p.as_path() == viewer.nav.current())
+                        .map(|(_, fields)| fields.as_slice());
+                    iced::widget::row![media, info_panel::view(&file_name, &details, exif)].into()
+                } else {
+                    media
+                };
 
             // The chrome below renders in every display state. It must
             // never flash away while an image loads.
             let mut col = column![image_cell];
 
             if !win.fullscreen {
-                if shared.config.show_filmstrip {
+                if shared.config.standard.chrome.filmstrip {
                     col = col.push(filmstrip::view(win, shared));
                 }
-                if shared.config.show_slider {
+                if shared.config.standard.chrome.slider {
                     col = col.push(nav_slider::view(win, shared));
                 }
-                if shared.config.show_footer {
+                if shared.config.standard.chrome.footer {
                     let dims = viewer
                         .displayed
                         .original_size()
@@ -188,9 +189,9 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
                     *original_size,
                     viewer.zoom,
                     viewer.pan,
-                    shared.config.nearest_neighbor_zoom,
-                    shared.config.downscale_kernel,
-                    shared.config.zoom_mode,
+                    shared.config.standard.display.nearest_neighbor_zoom,
+                    shared.config.advanced.scaling.downscale_kernel,
+                    shared.config.standard.display.zoom_mode,
                     viewer.manual_zoom,
                 ),
                 None => match path.and_then(|p| {
@@ -223,9 +224,9 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
                     *original_size,
                     viewer.zoom,
                     viewer.pan,
-                    shared.config.nearest_neighbor_zoom,
-                    shared.config.downscale_kernel,
-                    shared.config.zoom_mode,
+                    shared.config.standard.display.nearest_neighbor_zoom,
+                    shared.config.advanced.scaling.downscale_kernel,
+                    shared.config.standard.display.zoom_mode,
                     viewer.manual_zoom,
                 ),
                 None => match viewer.displayed_path.as_deref().and_then(|p| {
@@ -264,9 +265,9 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
                 frame,
                 viewer.zoom,
                 viewer.pan,
-                shared.config.nearest_neighbor_zoom,
-                shared.config.video_high_quality_scaling,
-                shared.config.zoom_mode,
+                shared.config.standard.display.nearest_neighbor_zoom,
+                shared.config.advanced.scaling.video_high_quality_scaling,
+                shared.config.standard.display.zoom_mode,
                 viewer.manual_zoom,
                 viewer.video.session.as_ref().is_some_and(|s| s.playing),
             ),
@@ -317,7 +318,7 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
     };
 
     // Optional checkerboard behind the image reveals transparency.
-    let image_view: Element<'_, Message> = if shared.config.show_checkerboard
+    let image_view: Element<'_, Message> = if shared.config.standard.display.checkerboard
         && !matches!(
             viewer.displayed,
             DisplayedImage::None | DisplayedImage::Error { .. }
@@ -343,7 +344,7 @@ const VIDEO_CONTROLS_RESERVE: f32 = 44.0;
 
 // Yield to any open overlay: a strip would steal its hover and dismiss it.
 fn edge_nav_active(win: &Window, shared: &Shared, viewer: &Viewer, hide_cursor: bool) -> bool {
-    shared.config.mouse_nav
+    shared.config.standard.files.mouse_nav
         && viewer.nav.len() > 1
         && !hide_cursor
         && win.open_menu.is_none()
@@ -406,7 +407,7 @@ fn edge_overlay<'a>(hovered: Option<Direction>, bottom_reserve: f32) -> Element<
 }
 
 pub(crate) fn spinner<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
-    let footer_visible = shared.config.show_footer && !win.fullscreen;
+    let footer_visible = shared.config.standard.chrome.footer && !win.fullscreen;
     let opening = win
         .opening_since
         .filter(|since| since.elapsed() >= SPINNER_DELAY);
@@ -481,7 +482,7 @@ mod tests {
     #[test]
     fn edge_nav_is_off_when_the_setting_is_disabled() {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
-        app.shared.config.mouse_nav = false;
+        app.shared.config.standard.files.mouse_nav = false;
         assert!(!edge_nav_active(
             &app.window,
             &app.shared,

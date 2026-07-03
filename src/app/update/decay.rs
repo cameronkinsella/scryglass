@@ -10,9 +10,7 @@ use super::window::Message;
 use super::{fire_load, fire_prefetch, fire_rotate, run_jobs_at, try_start_shared_anim};
 use crate::app::state::{DisplayedImage, Viewer};
 use crate::app::{Message as AppMessage, Shared, Window};
-use crate::config::{
-    EvictConfig, PrefetchDecay, PrefetchDropAnchor, PrefetchVram, StateDecayRef, VideoDecay,
-};
+use crate::config::{EvictConfig, PrefetchDecay, PrefetchDropAnchor, PrefetchVram, StateDecayRef};
 use crate::media::pipeline::{Lane, Pipeline};
 use crate::media::store::{ImageKey, Tier};
 
@@ -55,6 +53,7 @@ pub(super) fn run_decay_stage(
     if stage == DecayStage::ShedPrefetch {
         let interval = shared
             .config
+            .advanced
             .resource
             .for_state(win.minimized)
             .prefetch
@@ -216,8 +215,8 @@ fn retarget_displayed(
 pub(super) fn restart_decay(win: &mut Window, shared: &mut Shared) -> Task<AppMessage> {
     win.decay_generation = win.decay_generation.wrapping_add(1);
     let generation = win.decay_generation;
-    let depth = shared.config.prefetch_depth;
-    let prefetch_vram = shared.config.resource.prefetch_vram;
+    let depth = shared.config.standard.browsing.prefetch_depth;
+    let prefetch_vram = shared.config.advanced.resource.prefetch_vram;
     let view = win.viewport_size;
 
     let mut tasks = restore_display(win, shared, depth, view, prefetch_vram);
@@ -243,7 +242,7 @@ pub(super) fn restart_decay(win: &mut Window, shared: &mut Shared) -> Task<AppMe
         }
     });
 
-    let state = shared.config.resource.for_state(win.minimized);
+    let state = shared.config.advanced.resource.for_state(win.minimized);
     let stages = schedule_for(media, state, decode);
     // The shedding's start is resolved against the stages that actually run
     // (a skipped anchor falls through), so it is armed here as one absolute
@@ -288,7 +287,7 @@ fn schedule_for(
     decode: Option<Duration>,
 ) -> Vec<(DecayStage, Duration)> {
     match media {
-        DecayMedia::Video => video_decay_schedule(state.video),
+        DecayMedia::Video => video_decay_schedule(state.video_evict_after),
         DecayMedia::Animated => anim_decay_schedule(state.animated, decode),
         DecayMedia::Still => decay_schedule(state.still, decode),
     }
@@ -304,11 +303,11 @@ fn anim_decay_schedule(cfg: &EvictConfig, decode: Option<Duration>) -> Vec<(Deca
         .collect()
 }
 
-/// The session-release stage and its delay for a video, given its `.video` config.
-/// A video has no VRAM or RAM tier the store governs, so releasing the whole decode
-/// session is the only stage it can ever run.
-fn video_decay_schedule(cfg: &VideoDecay) -> Vec<(DecayStage, Duration)> {
-    cfg.evict_session_after
+/// The session-release stage and its delay for a video. A video has no VRAM or RAM
+/// tier the store governs, so releasing the whole decode session is the only stage
+/// it can ever run.
+fn video_decay_schedule(evict_after: Option<Duration>) -> Vec<(DecayStage, Duration)> {
+    evict_after
         .map(|d| (DecayStage::EvictVideo, d))
         .into_iter()
         .collect()
@@ -894,22 +893,14 @@ mod tests {
 
     #[test]
     fn video_decay_schedule_arms_only_the_session_release() {
-        use crate::config::VideoDecay;
         let s = Duration::from_secs;
         // A video has no tier, so its schedule is at most one session-release stage.
         assert_eq!(
-            video_decay_schedule(&VideoDecay {
-                evict_session_after: Some(s(5)),
-            }),
+            video_decay_schedule(Some(s(5))),
             vec![(DecayStage::EvictVideo, s(5))]
         );
         // "never" arms nothing, so a backgrounded video keeps its decode session.
-        assert!(
-            video_decay_schedule(&VideoDecay {
-                evict_session_after: None,
-            })
-            .is_empty()
-        );
+        assert!(video_decay_schedule(None).is_empty());
     }
 
     // The video session lifecycle is exercised on the stub (the real `open` spawns

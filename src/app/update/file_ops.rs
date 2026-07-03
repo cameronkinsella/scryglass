@@ -29,7 +29,7 @@ pub(crate) fn file_op_target(
             "Archive entries can't be modified".into(),
         ));
     }
-    if shared.config.read_only {
+    if shared.config.standard.files.read_only {
         return Err(push_toast(
             win,
             shared,

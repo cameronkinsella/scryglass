@@ -59,7 +59,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 Ok(target) => target,
                 Err(refusal) => return refusal,
             };
-            if shared.config.confirm_delete {
+            if shared.config.standard.files.confirm_delete {
                 win.modal = Some(Modal::ConfirmDelete(target));
                 Task::none()
             } else {
@@ -277,7 +277,7 @@ async fn rename_with_retry(old: PathBuf, new: PathBuf) -> Result<(), String> {
 /// If `path` is the open video, drop its session (releasing the file handle)
 /// and return how to resume it once the file operation finishes.
 fn take_open_video(win: &mut Window, shared: &mut Shared, path: &Path) -> Option<VideoResume> {
-    let hardware = shared.config.hardware_decode;
+    let hardware = shared.config.standard.video.hardware_decode;
     let viewer = win.viewer_mut()?;
     let session = viewer.video.session.as_ref()?;
     if session.path != *path {
@@ -404,7 +404,7 @@ mod tests {
     #[test]
     fn request_rename_opens_the_dialog_with_the_current_name() {
         let mut app = viewing_app(&["photo.png", "b.png"], 0);
-        app.shared.config.read_only = false;
+        app.shared.config.standard.files.read_only = false;
         let _ = update(&mut app.window, &mut app.shared, Message::RequestRename);
         assert!(
             matches!(&app.window.modal, Some(Modal::Rename { input, .. }) if input.as_str() == "photo.png")
@@ -427,8 +427,8 @@ mod tests {
     #[test]
     fn request_delete_opens_confirmation_when_enabled() {
         let mut app = viewing_app(&["photo.png"], 0);
-        app.shared.config.read_only = false;
-        app.shared.config.confirm_delete = true;
+        app.shared.config.standard.files.read_only = false;
+        app.shared.config.standard.files.confirm_delete = true;
         let _ = update(&mut app.window, &mut app.shared, Message::RequestDelete);
         assert!(
             matches!(&app.window.modal, Some(Modal::ConfirmDelete(p)) if p.ends_with("photo.png"))
@@ -473,8 +473,8 @@ mod tests {
     #[test]
     fn request_delete_without_confirmation_skips_the_modal() {
         let mut app = viewing_app(&["a.png"], 0);
-        app.shared.config.read_only = false;
-        app.shared.config.confirm_delete = false;
+        app.shared.config.standard.files.read_only = false;
+        app.shared.config.standard.files.confirm_delete = false;
         let _ = update(&mut app.window, &mut app.shared, Message::RequestDelete);
         assert!(app.window.modal.is_none());
     }

@@ -27,8 +27,8 @@ pub(crate) fn fire_resort(win: &Window, shared: &Shared) -> Task<Message> {
     let Some(viewer) = win.viewer() else {
         return Task::none();
     };
-    let key = shared.config.sort_key;
-    let desc = shared.config.sort_desc;
+    let key = shared.config.standard.display.sort_key;
+    let desc = shared.config.standard.display.sort_desc;
     let files = viewer.nav.files().to_vec();
     let source = viewer.source.clone();
 
@@ -80,11 +80,11 @@ pub(crate) fn open_viewer(
     opened_container: bool,
 ) -> Task<Message> {
     let window_id = win.id;
-    let depth = shared.config.prefetch_depth;
-    let prefetch_vram = shared.config.resource.prefetch_vram;
+    let depth = shared.config.standard.browsing.prefetch_depth;
+    let prefetch_vram = shared.config.advanced.resource.prefetch_vram;
     let window_w = win.window_size.width;
     let view = win.viewport_size;
-    let show_filmstrip = shared.config.show_filmstrip;
+    let show_filmstrip = shared.config.standard.chrome.filmstrip;
     let pipeline = shared.pipeline.clone();
 
     // Privacy hygiene: purge persisted thumbnails of files that were
@@ -123,10 +123,10 @@ pub(crate) fn open_viewer(
         tasks.push(start_video(
             &mut viewer,
             current,
-            shared.config.video_volume,
-            shared.config.video_muted,
-            shared.config.video_loop,
-            shared.config.hardware_decode,
+            shared.config.standard.video.volume,
+            shared.config.standard.video.muted,
+            shared.config.standard.video.looping,
+            shared.config.standard.video.hardware_decode,
         ));
     } else {
         tasks.push(fire_thumb(
@@ -154,13 +154,13 @@ pub(crate) fn open_viewer(
             .and_then(|lease| lease.texture())
             .is_some();
         if resident && let Some(ram) = shared.store.ram(&key) {
-            let zoom_mode = shared.config.zoom_mode;
+            let zoom_mode = shared.config.standard.display.zoom_mode;
             show_loaded(&mut viewer, &current, ram.original_size, zoom_mode, view);
         }
     }
     // Set the scroll offset before the thumbnailer fires, so it reads the
     // cursor as on screen and fans from there, not from index 0.
-    if shared.config.show_filmstrip {
+    if shared.config.standard.chrome.filmstrip {
         let offset = crate::components::filmstrip::open_offset(
             viewer.nav.cursor(),
             window_w,
@@ -196,10 +196,12 @@ pub(crate) fn open_viewer(
 
     // Folders open in name order instantly. A configured custom sort
     // applies as soon as its metadata is gathered.
-    if shared.config.sort_key != crate::config::SortKey::Name || shared.config.sort_desc {
+    if shared.config.standard.display.sort_key != crate::config::SortKey::Name
+        || shared.config.standard.display.sort_desc
+    {
         tasks.push(fire_resort(win, shared));
     }
-    if shared.config.show_info {
+    if shared.config.standard.chrome.info {
         tasks.push(fire_exif(win, shared));
     }
 
@@ -351,10 +353,10 @@ pub(crate) fn scrub_to(
     center: bool,
 ) -> Task<Message> {
     let window_id = win.id;
-    let zoom_mode = shared.config.zoom_mode;
+    let zoom_mode = shared.config.standard.display.zoom_mode;
     let viewport = win.viewport_size;
     let window_w = win.window_size.width;
-    let show_filmstrip = shared.config.show_filmstrip;
+    let show_filmstrip = shared.config.standard.chrome.filmstrip;
     let pipeline = shared.pipeline.clone();
     let Some(viewer) = win.viewer_mut() else {
         return Task::none();
@@ -460,16 +462,16 @@ pub(crate) fn complete_navigation(
     bump_generation: bool,
 ) -> Task<Message> {
     let window_id = win.id;
-    let depth = shared.config.prefetch_depth;
-    let prefetch_vram = shared.config.resource.prefetch_vram;
-    let zoom_mode = shared.config.zoom_mode;
+    let depth = shared.config.standard.browsing.prefetch_depth;
+    let prefetch_vram = shared.config.advanced.resource.prefetch_vram;
+    let zoom_mode = shared.config.standard.display.zoom_mode;
     let viewport = win.viewport_size;
     let window_w = win.window_size.width;
-    let show_filmstrip = shared.config.show_filmstrip;
-    let video_volume = shared.config.video_volume;
-    let video_muted = shared.config.video_muted;
-    let video_loop = shared.config.video_loop;
-    let hardware = shared.config.hardware_decode;
+    let show_filmstrip = shared.config.standard.chrome.filmstrip;
+    let video_volume = shared.config.standard.video.volume;
+    let video_muted = shared.config.standard.video.muted;
+    let video_loop = shared.config.standard.video.looping;
+    let hardware = shared.config.standard.video.hardware_decode;
     let pipeline = shared.pipeline.clone();
     let Some(viewer) = win.viewer_mut() else {
         return Task::none();
@@ -640,7 +642,7 @@ pub(crate) fn complete_navigation(
         prefetch_vram,
     ));
 
-    if shared.config.show_info {
+    if shared.config.standard.chrome.info {
         tasks.push(fire_exif(win, shared));
     }
 
@@ -711,7 +713,7 @@ mod tests {
         let start = files[100].clone();
         let nav = crate::nav::Nav::new(files, &start).unwrap();
         let mut app = crate::app::test_support::empty_app();
-        app.shared.config.show_filmstrip = true;
+        app.shared.config.standard.chrome.filmstrip = true;
         let _ = open_viewer(
             &mut app.window,
             &mut app.shared,
@@ -810,7 +812,7 @@ mod tests {
         let names: Vec<String> = (0..100).map(|i| format!("{i:03}.png")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut app = viewing_app(&refs, 0);
-        app.shared.config.show_filmstrip = true;
+        app.shared.config.standard.chrome.filmstrip = true;
         assert_eq!(app.viewer().unwrap().filmstrip_scroll_x, 0.0);
         // Scrubbing the slider (center = true) centers the cursor.
         let _ = scrub_to(&mut app.window, &mut app.shared, 50, true);

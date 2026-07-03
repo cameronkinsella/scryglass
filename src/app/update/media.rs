@@ -125,7 +125,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             ram,
             thumb,
         } => {
-            let zoom_mode = shared.config.zoom_mode;
+            let zoom_mode = shared.config.standard.display.zoom_mode;
             let viewport = win.viewport_size;
             let pipeline = shared.pipeline.clone();
             let original_size = ram.original_size;
@@ -152,7 +152,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
 
         Message::TextureReady { key, tier, texture } => {
             let viewport = win.viewport_size;
-            let zoom_mode = shared.config.zoom_mode;
+            let zoom_mode = shared.config.standard.display.zoom_mode;
             let pipeline = shared.pipeline.clone();
             let tiled = texture.tiles().is_some();
             // Swap the shared cell. Every window leasing this image now draws it.
@@ -380,10 +380,10 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             urgency,
             result,
         } => {
-            let zoom_mode = shared.config.zoom_mode;
+            let zoom_mode = shared.config.standard.display.zoom_mode;
             let viewport = win.viewport_size;
             let window_w = win.window_size.width;
-            let show_filmstrip = shared.config.show_filmstrip;
+            let show_filmstrip = shared.config.standard.chrome.filmstrip;
             let pipeline = shared.pipeline.clone();
             let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
@@ -440,7 +440,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
         Message::Resorted(files) => {
             let window_id = win.id;
             let window_w = win.window_size.width;
-            let show_filmstrip = shared.config.show_filmstrip;
+            let show_filmstrip = shared.config.standard.chrome.filmstrip;
             let pipeline = shared.pipeline.clone();
             let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
@@ -483,7 +483,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             original_size,
             texture,
         } => {
-            let zoom_mode = shared.config.zoom_mode;
+            let zoom_mode = shared.config.standard.display.zoom_mode;
             let viewport = win.viewport_size;
             let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
@@ -543,7 +543,7 @@ pub(crate) fn update_anim(
     shared: &mut Shared,
     anim_msg: AnimMessage,
 ) -> Task<AppMessage> {
-    let zoom_mode = shared.config.zoom_mode;
+    let zoom_mode = shared.config.standard.display.zoom_mode;
     let viewport = win.viewport_size;
     let Some(viewer) = win.viewer_mut() else {
         return Task::none();

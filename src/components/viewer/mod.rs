@@ -173,7 +173,7 @@ fn update_view(win: &mut Window, shared: &mut Shared, message: Message) -> Task<
         Message::ScrollZoom(delta_y) => {
             let viewport = win.viewport_size;
             let cursor = win.last_cursor_pos;
-            let toolbar_offset = if shared.config.show_toolbar {
+            let toolbar_offset = if shared.config.standard.chrome.toolbar {
                 crate::app::TOOLBAR_HEIGHT
             } else {
                 0.0
@@ -256,7 +256,7 @@ fn update_view(win: &mut Window, shared: &mut Shared, message: Message) -> Task<
             Task::none()
         }
         Message::ResetZoom => {
-            let zoom_mode = shared.config.zoom_mode;
+            let zoom_mode = shared.config.standard.display.zoom_mode;
             let viewport = win.viewport_size;
             let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
@@ -421,7 +421,8 @@ fn update_view(win: &mut Window, shared: &mut Shared, message: Message) -> Task<
             fire_rotate(viewer, &shared.store)
         }
         Message::ToggleCheckerboard => {
-            shared.config.show_checkerboard = !shared.config.show_checkerboard;
+            shared.config.standard.display.checkerboard =
+                !shared.config.standard.display.checkerboard;
             save_config(win, shared)
         }
         Message::ToggleHelp => {
@@ -429,9 +430,9 @@ fn update_view(win: &mut Window, shared: &mut Shared, message: Message) -> Task<
             Task::none()
         }
         Message::ToggleInfo => {
-            shared.config.show_info = !shared.config.show_info;
+            shared.config.standard.chrome.info = !shared.config.standard.chrome.info;
             recalc_viewport(win, shared);
-            let probe = if shared.config.show_info {
+            let probe = if shared.config.standard.chrome.info {
                 fire_exif(win, shared)
             } else {
                 Task::none()
@@ -693,13 +694,13 @@ mod tests {
     #[test]
     fn toggle_checkerboard_flips_config() {
         let mut app = empty_app();
-        let before = app.shared.config.show_checkerboard;
+        let before = app.shared.config.standard.display.checkerboard;
         let _ = update(
             &mut app.window,
             &mut app.shared,
             Message::ToggleCheckerboard,
         );
-        assert_eq!(app.shared.config.show_checkerboard, !before);
+        assert_eq!(app.shared.config.standard.display.checkerboard, !before);
     }
 
     #[test]
@@ -713,9 +714,9 @@ mod tests {
     #[test]
     fn toggle_info_flips_config() {
         let mut app = viewing_app(&["a.png"], 0);
-        let before = app.shared.config.show_info;
+        let before = app.shared.config.standard.chrome.info;
         let _ = update(&mut app.window, &mut app.shared, Message::ToggleInfo);
-        assert_eq!(app.shared.config.show_info, !before);
+        assert_eq!(app.shared.config.standard.chrome.info, !before);
     }
 
     #[test]

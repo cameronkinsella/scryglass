@@ -20,7 +20,7 @@ use super::{App, Envelope, Shared, Window, recalc_viewport, update};
 /// "Open with…" in a file manager), opening it starts immediately.
 pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Envelope>) {
     let (config, config_load) = AppConfig::load_reporting();
-    let disk_thumbs = DiskThumbs::create(config.disk_thumbs);
+    let disk_thumbs = DiskThumbs::create(config.standard.browsing.disk_thumbs);
 
     // Startup housekeeping for the persistent thumbnail store: expire
     // long-unused entries and trim to the size cap. Local cache metadata
@@ -41,12 +41,13 @@ pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Envelope>) {
     let pipeline = Pipeline::new(disk_thumbs);
     pipeline.set_ram_budget(
         config
+            .advanced
             .resource
             .large_image_ram_budget
             .resolve(crate::config::total_system_ram()),
     );
-    crate::app::update::set_prefetch_scaler(config.resource.prefetch_scaler);
-    pipeline.set_prefetch_parallelism(config.resource.prefetch_parallelism);
+    crate::app::update::set_prefetch_scaler(config.advanced.resource.prefetch_scaler);
+    pipeline.set_prefetch_parallelism(config.advanced.resource.prefetch_parallelism);
 
     let mut shared = Shared {
         config,
@@ -133,8 +134,8 @@ pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Envelope>) {
 
 /// A fresh empty window state for window `id`, seeded from the saved geometry.
 pub(crate) fn new_window(id: window::Id, config: &AppConfig) -> Window {
-    let size = Size::new(config.window_width, config.window_height);
-    let window_pos = match (config.window_x, config.window_y) {
+    let size = Size::new(config.managed.window.width, config.managed.window.height);
+    let window_pos = match (config.managed.window.x, config.managed.window.y) {
         (Some(x), Some(y)) => Point::new(x, y),
         _ => Point::ORIGIN,
     };
@@ -148,12 +149,12 @@ pub(crate) fn new_window(id: window::Id, config: &AppConfig) -> Window {
         tile_epoch: 0,
         window_size: size,
         window_pos,
-        maximized: config.window_maximized,
+        maximized: config.managed.window.maximized,
         restored_size: size,
         restored_pos: window_pos,
         context_menu_pos: None,
         zoom_slider_open: false,
-        fullscreen: config.window_fullscreen,
+        fullscreen: config.managed.window.fullscreen,
         // Born focused: opening a window is user-initiated, and even when the
         // OS leaves it in the background (launched from a terminal that keeps
         // focus), decaying while the user first looks at it is worse than
@@ -174,18 +175,18 @@ pub(crate) fn new_window(id: window::Id, config: &AppConfig) -> Window {
 /// Settings for a newly opened viewer window: the saved size and position (the
 /// OS places it when there is no saved position yet).
 pub(crate) fn window_settings(config: &AppConfig) -> window::Settings {
-    let position = match (config.window_x, config.window_y) {
+    let position = match (config.managed.window.x, config.managed.window.y) {
         (Some(x), Some(y)) => window::Position::Specific(Point::new(x, y)),
         _ => window::Position::Default,
     };
     window::Settings {
-        size: Size::new(config.window_width, config.window_height),
+        size: Size::new(config.managed.window.width, config.managed.window.height),
         position,
         min_size: Some(Size::new(480.0, 420.0)),
         icon: window_icon(),
         // A pending maximize/fullscreen replay opens hidden, so the windowed
         // frame never flashes. The replay's mode change reveals it in place.
-        visible: !(config.window_maximized || config.window_fullscreen),
+        visible: !(config.managed.window.maximized || config.managed.window.fullscreen),
         // Close requests route through update() so config saves first.
         exit_on_close_request: false,
         ..Default::default()
@@ -246,11 +247,11 @@ mod tests {
         let mut config = AppConfig::default();
         assert!(window_settings(&config).visible);
 
-        config.window_fullscreen = true;
+        config.managed.window.fullscreen = true;
         assert!(!window_settings(&config).visible);
 
-        config.window_fullscreen = false;
-        config.window_maximized = true;
+        config.managed.window.fullscreen = false;
+        config.managed.window.maximized = true;
         assert!(!window_settings(&config).visible);
     }
 

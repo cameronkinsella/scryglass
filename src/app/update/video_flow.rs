@@ -79,7 +79,7 @@ pub(crate) fn fire_video_extract(index: Arc<ArchiveIndex>, entry: PathBuf) -> Ta
 }
 
 pub(crate) fn tick(win: &mut Window, shared: &mut Shared) -> Task<Message> {
-    let zoom_mode = shared.config.zoom_mode;
+    let zoom_mode = shared.config.standard.display.zoom_mode;
     let viewport = win.viewport_size;
     let Some(viewer) = win.viewer_mut() else {
         return Task::none();
@@ -147,10 +147,10 @@ pub(crate) fn extracted(
     entry: PathBuf,
     result: Result<PathBuf, String>,
 ) -> Task<Message> {
-    let video_volume = shared.config.video_volume;
-    let video_muted = shared.config.video_muted;
-    let video_loop = shared.config.video_loop;
-    let hardware = shared.config.hardware_decode;
+    let video_volume = shared.config.standard.video.volume;
+    let video_muted = shared.config.standard.video.muted;
+    let video_loop = shared.config.standard.video.looping;
+    let hardware = shared.config.standard.video.hardware_decode;
     let Some(viewer) = win.viewer_mut() else {
         return Task::none();
     };
@@ -269,8 +269,8 @@ pub(crate) fn seek_by(win: &mut Window, _shared: &mut Shared, delta: f64) -> Tas
 }
 
 pub(crate) fn set_volume(win: &mut Window, shared: &mut Shared, volume: f32) -> Task<Message> {
-    shared.config.video_volume = volume.clamp(0.0, 1.0);
-    shared.config.video_muted = false;
+    shared.config.standard.video.volume = volume.clamp(0.0, 1.0);
+    shared.config.standard.video.muted = false;
     if let Some(viewer) = win.viewer_mut()
         && let Some(session) = viewer.video.session.as_mut()
     {
@@ -280,7 +280,7 @@ pub(crate) fn set_volume(win: &mut Window, shared: &mut Shared, volume: f32) -> 
 }
 
 pub(crate) fn nudge_volume(win: &mut Window, shared: &mut Shared, delta: f32) -> Task<Message> {
-    let volume = (shared.config.video_volume + delta).clamp(0.0, 1.0);
+    let volume = (shared.config.standard.video.volume + delta).clamp(0.0, 1.0);
     if let Some(viewer) = win.viewer_mut()
         && viewer.video.session.is_some()
     {
@@ -297,7 +297,7 @@ pub(crate) fn toggle_mute(win: &mut Window, shared: &mut Shared) -> Task<Message
         return Task::none();
     };
     session.toggle_mute();
-    shared.config.video_muted = win
+    shared.config.standard.video.muted = win
         .viewer()
         .and_then(|v| v.video.session.as_ref())
         .is_some_and(|s| s.muted);
@@ -312,7 +312,7 @@ pub(crate) fn toggle_loop(win: &mut Window, shared: &mut Shared) -> Task<Message
         return Task::none();
     };
     session.set_looping(!session.looping());
-    shared.config.video_loop = win
+    shared.config.standard.video.looping = win
         .viewer()
         .and_then(|v| v.video.session.as_ref())
         .is_some_and(|s| s.looping());

@@ -31,7 +31,7 @@ fn window_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> 
 
     let mut page = column![].width(Length::Fill).height(Length::Fill);
 
-    if !win.fullscreen && shared.config.show_toolbar {
+    if !win.fullscreen && shared.config.standard.chrome.toolbar {
         page = page.push(toolbar::view(win, shared));
     }
     page = page.push(stacked);

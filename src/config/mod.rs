@@ -19,8 +19,7 @@ mod ui;
 pub use resource::WorkingSetTrim;
 pub use resource::{
     DecayPipeline, EvictConfig, PrefetchDecay, PrefetchDropAnchor, PrefetchParallelism,
-    PrefetchScaler, PrefetchVram, RamBudget, ResourceConfig, StateDecayRef, VideoDecay,
-    total_system_ram,
+    PrefetchScaler, PrefetchVram, RamBudget, ResourceConfig, StateDecayRef, total_system_ram,
 };
 // Reached as `crate::config::EvictPolicy` only from another module's tests, so a
 // plain (test-less) build sees this re-export as unused though it is not.
@@ -39,11 +38,74 @@ static SUPPORTED_EXTENSIONS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
         .collect()
 });
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// The persisted settings: three top-level tiers, each a TOML table tree.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct AppConfig {
+    /// Settings with an in-app control. Editing the file reaches the same values.
+    pub standard: StandardConfig,
+    /// Settings only changeable by editing the file.
+    pub advanced: AdvancedConfig,
+    /// State the app writes for itself, rarely edited by hand.
+    pub managed: ManagedConfig,
+}
+
+/// The in-app configurable settings, one topical table each.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct StandardConfig {
+    pub browsing: BrowsingConfig,
+    pub display: DisplayConfig,
+    pub files: FilesConfig,
+    pub video: VideoConfig,
+    pub chrome: ChromeConfig,
+}
+
+/// The file-only settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct AdvancedConfig {
+    /// Scaling quality for images and video.
+    pub scaling: ScalingConfig,
+    /// Memory/VRAM resource model (see `docs/advanced-settings.md`).
+    pub resource: ResourceConfig,
+    /// Settings applied once at launch. Changing them needs a full restart.
+    pub startup: StartupConfig,
+}
+
+/// State the app manages automatically.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ManagedConfig {
+    /// Last window geometry, replayed on open.
+    pub window: WindowConfig,
+}
+
+/// Browsing and cache. In-app configurable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowsingConfig {
     /// Number of images to pre-fetch in each direction.
     pub prefetch_depth: usize,
+    /// Persist thumbnails on disk between sessions (warm folders open
+    /// instantly). Reconciled against deleted files, expired after 90
+    /// unused days, size-capped. Requires the `disk-thumbs` build feature.
+    pub disk_thumbs: bool,
+}
+
+impl Default for BrowsingConfig {
+    fn default() -> Self {
+        Self {
+            prefetch_depth: 5,
+            disk_thumbs: true,
+        }
+    }
+}
+
+/// Display and sorting. In-app configurable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct DisplayConfig {
     /// Active color theme.
     pub theme: ThemeChoice,
     /// Zoom mode applied when opening/navigating images.
@@ -54,91 +116,133 @@ pub struct AppConfig {
     pub sort_desc: bool,
     /// Nearest-neighbor sampling past 100% zoom: crisp pixels for pixel art.
     pub nearest_neighbor_zoom: bool,
-    /// Kernel used to shrink stills and animations to fit.
-    pub downscale_kernel: DownscaleKernel,
-    /// Persist thumbnails on disk between sessions (warm folders open
-    /// instantly). Reconciled against deleted files, expired after 90
-    /// unused days, size-capped. Requires the `disk-thumbs` build feature.
-    pub disk_thumbs: bool,
+    /// Draw a checkerboard behind images to reveal transparency.
+    pub checkerboard: bool,
+}
+
+/// File operations. In-app configurable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FilesConfig {
     /// Pure-viewer mode: all file modification (delete, rename) is
     /// hidden and blocked.
     pub read_only: bool,
     /// Ask before moving a file to the recycle bin.
     pub confirm_delete: bool,
-    /// Show click-to-navigate arrows on the left and right image edges.
+    /// Use the mouse back/forward buttons to navigate.
     pub mouse_nav: bool,
-    /// Last window size, restored at startup.
-    pub window_width: f32,
-    pub window_height: f32,
-    /// Last window position. None lets the OS place it (first run).
-    pub window_x: Option<f32>,
-    pub window_y: Option<f32>,
-    /// Whether the last window was maximized or fullscreen, replayed on open.
-    pub window_maximized: bool,
-    pub window_fullscreen: bool,
-    /// Video playback volume (0-1) and mute, persisted across sessions.
-    pub video_volume: f32,
-    pub video_muted: bool,
-    /// Whether video playback loops, persisted across sessions.
-    pub video_loop: bool,
-    /// Decode video on the GPU when the platform and codec support it,
-    /// falling back to software automatically. Disable to force software.
-    pub hardware_decode: bool,
-    /// Downscale a minified video with the factor-aware kernel (matching the
-    /// still-image quality) instead of one bilinear tap. Disable to cut the
-    /// per-frame GPU cost on a shrunk-to-fit video.
-    pub video_high_quality_scaling: bool,
-    /// Whether the toolbar is visible.
-    pub show_toolbar: bool,
-    /// Whether the filmstrip is visible.
-    pub show_filmstrip: bool,
-    /// Whether the navigation slider is visible.
-    pub show_slider: bool,
-    /// Whether the footer is visible.
-    pub show_footer: bool,
-    /// Whether the info panel (file details + EXIF) is visible.
-    pub show_info: bool,
-    /// Draw a checkerboard behind images (reveals transparency).
-    pub show_checkerboard: bool,
-    /// Advanced memory/VRAM resource model (see `docs/advanced-settings.md`).
-    pub resource: ResourceConfig,
-    /// Settings applied once at launch. Changing them needs a full restart.
-    pub startup: StartupConfig,
 }
 
-impl Default for AppConfig {
+impl Default for FilesConfig {
     fn default() -> Self {
         Self {
-            prefetch_depth: 5,
-            theme: ThemeChoice::default(),
-            zoom_mode: ZoomMode::default(),
-            sort_key: SortKey::default(),
-            sort_desc: false,
-            nearest_neighbor_zoom: false,
-            downscale_kernel: DownscaleKernel::default(),
-            disk_thumbs: true,
             read_only: false,
             confirm_delete: true,
             mouse_nav: true,
-            window_width: 1024.0,
-            window_height: 768.0,
-            window_x: None,
-            window_y: None,
-            window_maximized: false,
-            window_fullscreen: false,
-            video_volume: 1.0,
-            video_muted: false,
-            video_loop: false,
+        }
+    }
+}
+
+/// Video playback. In-app configurable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VideoConfig {
+    /// Playback volume (0-1), persisted across sessions.
+    pub volume: f32,
+    /// Start muted.
+    pub muted: bool,
+    /// Loop playback. Named `looping` because `loop` is a keyword.
+    #[serde(rename = "loop")]
+    pub looping: bool,
+    /// Decode video on the GPU when the platform and codec support it,
+    /// falling back to software automatically. Disable to force software.
+    pub hardware_decode: bool,
+}
+
+impl Default for VideoConfig {
+    fn default() -> Self {
+        Self {
+            volume: 1.0,
+            muted: false,
+            looping: false,
             hardware_decode: true,
+        }
+    }
+}
+
+/// Chrome visibility. In-app configurable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChromeConfig {
+    /// Show the top toolbar.
+    pub toolbar: bool,
+    /// Show the thumbnail filmstrip.
+    pub filmstrip: bool,
+    /// Show the navigation slider.
+    pub slider: bool,
+    /// Show the footer status bar.
+    pub footer: bool,
+    /// Show the info panel (file details + EXIF).
+    pub info: bool,
+}
+
+impl Default for ChromeConfig {
+    fn default() -> Self {
+        Self {
+            toolbar: true,
+            filmstrip: true,
+            slider: true,
+            footer: true,
+            info: false,
+        }
+    }
+}
+
+/// Scaling quality. File only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScalingConfig {
+    /// Kernel used to shrink stills and animations to fit.
+    pub downscale_kernel: DownscaleKernel,
+    /// Downscale a minified video with the factor-aware kernel, matching the
+    /// still-image quality. Disable to cut the per-frame GPU cost on a
+    /// shrunk-to-fit video.
+    pub video_high_quality_scaling: bool,
+}
+
+impl Default for ScalingConfig {
+    fn default() -> Self {
+        Self {
+            downscale_kernel: DownscaleKernel::default(),
             video_high_quality_scaling: true,
-            show_toolbar: true,
-            show_filmstrip: true,
-            show_slider: true,
-            show_footer: true,
-            show_info: false,
-            show_checkerboard: false,
-            resource: ResourceConfig::default(),
-            startup: StartupConfig::default(),
+        }
+    }
+}
+
+/// Last window geometry. Managed automatically, rarely edited by hand.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WindowConfig {
+    /// Last window size, restored at startup.
+    pub width: f32,
+    pub height: f32,
+    /// Last window position. None lets the OS place it (first run).
+    pub x: Option<f32>,
+    pub y: Option<f32>,
+    /// Whether the last window was maximized or fullscreen, replayed on open.
+    pub maximized: bool,
+    pub fullscreen: bool,
+}
+
+impl Default for WindowConfig {
+    fn default() -> Self {
+        Self {
+            width: 1024.0,
+            height: 768.0,
+            x: None,
+            y: None,
+            maximized: false,
+            fullscreen: false,
         }
     }
 }
@@ -313,139 +417,163 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     use super::resource::WorkingSetConfig;
-    use super::resource::{MinimizedConfig, StateDecay};
+    use super::resource::{MinimizedConfig, MinimizedVideoDecay, StateDecay, VideoDecay};
     use super::*;
 
     #[test]
     fn default_prefetch_depth_is_5() {
         let cfg = AppConfig::default();
-        assert_eq!(cfg.prefetch_depth, 5);
+        assert_eq!(cfg.standard.browsing.prefetch_depth, 5);
     }
 
     #[test]
     fn default_shows_all_chrome() {
         let cfg = AppConfig::default();
-        assert!(cfg.show_toolbar);
-        assert!(cfg.show_filmstrip);
-        assert!(cfg.show_slider);
-        assert!(cfg.show_footer);
+        assert!(cfg.standard.chrome.toolbar);
+        assert!(cfg.standard.chrome.filmstrip);
+        assert!(cfg.standard.chrome.slider);
+        assert!(cfg.standard.chrome.footer);
     }
 
     #[test]
     fn parse_reporting_flags_malformed_but_keeps_valid() {
-        let (cfg, status) = AppConfig::parse_reporting("prefetch_depth = 9");
+        let (cfg, status) = AppConfig::parse_reporting("[standard.browsing]\nprefetch_depth = 9");
         assert_eq!(status, ConfigLoad::Ok);
-        assert_eq!(cfg.prefetch_depth, 9);
+        assert_eq!(cfg.standard.browsing.prefetch_depth, 9);
 
-        let (cfg, status) = AppConfig::parse_reporting("prefetch_depth = = bad");
+        let (cfg, status) =
+            AppConfig::parse_reporting("[standard.browsing]\nprefetch_depth = = bad");
         assert_eq!(status, ConfigLoad::Malformed);
-        assert_eq!(cfg.prefetch_depth, 5); // untouched defaults
+        assert_eq!(cfg.standard.browsing.prefetch_depth, 5); // untouched defaults
     }
 
     #[test]
     fn try_from_toml_surfaces_errors_where_from_toml_defaults() {
-        let bad = "prefetch_depth = = nonsense";
+        let bad = "[standard.browsing]\nprefetch_depth = = nonsense";
         // The strict parse surfaces the error. The lenient one falls back.
         assert!(AppConfig::try_from_toml(bad).is_err());
-        assert_eq!(AppConfig::from_toml(bad).prefetch_depth, 5);
+        assert_eq!(
+            AppConfig::from_toml(bad).standard.browsing.prefetch_depth,
+            5
+        );
         // A valid partial document parses, with missing keys defaulted.
-        let cfg = AppConfig::try_from_toml("prefetch_depth = 9").unwrap();
-        assert_eq!(cfg.prefetch_depth, 9);
+        let cfg = AppConfig::try_from_toml("[standard.browsing]\nprefetch_depth = 9").unwrap();
+        assert_eq!(cfg.standard.browsing.prefetch_depth, 9);
     }
 
     #[test]
     fn toml_roundtrip_preserves_all_fields() {
         let cfg = AppConfig {
-            prefetch_depth: 3,
-            theme: ThemeChoice::Light,
-            zoom_mode: ZoomMode::ScaleToFit,
-            sort_key: SortKey::DateModified,
-            sort_desc: true,
-            nearest_neighbor_zoom: true,
-            downscale_kernel: DownscaleKernel::Lanczos3,
-            disk_thumbs: false,
-            read_only: true,
-            confirm_delete: false,
-            mouse_nav: false,
-            window_width: 640.0,
-            window_height: 480.0,
-            window_x: Some(100.0),
-            window_y: Some(50.0),
-            window_maximized: true,
-            window_fullscreen: true,
-            video_volume: 0.5,
-            video_muted: true,
-            video_loop: true,
-            hardware_decode: false,
-            video_high_quality_scaling: false,
-            show_toolbar: false,
-            show_filmstrip: true,
-            show_slider: false,
-            show_footer: true,
-            show_info: true,
-            show_checkerboard: true,
-            resource: ResourceConfig {
-                prefetch_vram: PrefetchVram::FullRes,
-                prefetch_scaler: PrefetchScaler::Cpu,
-                prefetch_parallelism: PrefetchParallelism::Fixed(3),
-                large_image_ram_budget: RamBudget::Bytes(2_000_000_000),
-                unfocused: StateDecay {
-                    still: DecayPipeline {
-                        demote_vram_after: Some(Duration::from_secs(20)),
-                        drop_vram_after: None,
-                        evict: EvictConfig {
-                            evict_ram: EvictPolicy::Fixed(Duration::from_secs(90)),
-                            evict_ram_min: Duration::from_secs(25),
-                            evict_ram_max: Duration::from_secs(500),
-                            max_decode_latency: Duration::from_millis(150),
-                        },
-                    },
-                    animated: EvictConfig {
-                        evict_ram: EvictPolicy::Fixed(Duration::from_secs(45)),
-                        ..EvictConfig::default()
-                    },
-                    video: VideoDecay {
-                        evict_session_after: None,
-                    },
-                    prefetch: PrefetchDecay {
-                        drop_on: PrefetchDropAnchor::Evict,
-                        drop_after: Duration::from_secs(7),
-                        drop_interval: Duration::from_secs(3),
-                    },
+            standard: StandardConfig {
+                browsing: BrowsingConfig {
+                    prefetch_depth: 3,
+                    disk_thumbs: false,
                 },
-                minimized: MinimizedConfig {
-                    pause_video: false,
-                    still: DecayPipeline {
-                        demote_vram_after: Some(Duration::from_secs(5)),
-                        drop_vram_after: Some(Duration::from_secs(10)),
-                        evict: EvictConfig {
-                            evict_ram: EvictPolicy::Never,
-                            evict_ram_min: Duration::from_secs(10),
-                            evict_ram_max: Duration::from_secs(120),
-                            max_decode_latency: Duration::from_millis(250),
-                        },
-                    },
-                    animated: EvictConfig {
-                        evict_ram: EvictPolicy::Dynamic,
-                        ..EvictConfig::default()
-                    },
-                    video: VideoDecay {
-                        evict_session_after: Some(Duration::from_secs(8)),
-                    },
-                    prefetch: PrefetchDecay {
-                        drop_on: PrefetchDropAnchor::Drop,
-                        drop_after: Duration::from_secs(2),
-                        drop_interval: Duration::from_secs(1),
-                    },
+                display: DisplayConfig {
+                    theme: ThemeChoice::Light,
+                    zoom_mode: ZoomMode::ScaleToFit,
+                    sort_key: SortKey::DateModified,
+                    sort_desc: true,
+                    nearest_neighbor_zoom: true,
+                    checkerboard: true,
                 },
-                #[cfg(target_os = "windows")]
-                working_set: WorkingSetConfig {
-                    trim_when: WorkingSetTrim::AllMinimized,
-                    trim_after: Duration::from_secs(12),
+                files: FilesConfig {
+                    read_only: true,
+                    confirm_delete: false,
+                    mouse_nav: false,
+                },
+                video: VideoConfig {
+                    volume: 0.5,
+                    muted: true,
+                    looping: true,
+                    hardware_decode: false,
+                },
+                chrome: ChromeConfig {
+                    toolbar: false,
+                    filmstrip: true,
+                    slider: false,
+                    footer: true,
+                    info: true,
                 },
             },
-            startup: StartupConfig {
-                present_mode: PresentMode::NoVsync,
+            advanced: AdvancedConfig {
+                scaling: ScalingConfig {
+                    downscale_kernel: DownscaleKernel::Lanczos3,
+                    video_high_quality_scaling: false,
+                },
+                resource: ResourceConfig {
+                    prefetch_vram: PrefetchVram::FullRes,
+                    prefetch_scaler: PrefetchScaler::Cpu,
+                    prefetch_parallelism: PrefetchParallelism::Fixed(3),
+                    large_image_ram_budget: RamBudget::Bytes(2_000_000_000),
+                    unfocused: StateDecay {
+                        still: DecayPipeline {
+                            demote_vram_after: Some(Duration::from_secs(20)),
+                            drop_vram_after: None,
+                            evict: EvictConfig {
+                                evict_ram: EvictPolicy::Fixed(Duration::from_secs(90)),
+                                evict_ram_min: Duration::from_secs(25),
+                                evict_ram_max: Duration::from_secs(500),
+                                max_decode_latency: Duration::from_millis(150),
+                            },
+                        },
+                        animated: EvictConfig {
+                            evict_ram: EvictPolicy::Fixed(Duration::from_secs(45)),
+                            ..EvictConfig::default()
+                        },
+                        video: VideoDecay {
+                            evict_session_after: None,
+                        },
+                        prefetch: PrefetchDecay {
+                            drop_on: PrefetchDropAnchor::Evict,
+                            drop_after: Duration::from_secs(7),
+                            drop_interval: Duration::from_secs(3),
+                        },
+                    },
+                    minimized: MinimizedConfig {
+                        still: DecayPipeline {
+                            demote_vram_after: Some(Duration::from_secs(5)),
+                            drop_vram_after: Some(Duration::from_secs(10)),
+                            evict: EvictConfig {
+                                evict_ram: EvictPolicy::Never,
+                                evict_ram_min: Duration::from_secs(10),
+                                evict_ram_max: Duration::from_secs(120),
+                                max_decode_latency: Duration::from_millis(250),
+                            },
+                        },
+                        animated: EvictConfig {
+                            evict_ram: EvictPolicy::Dynamic,
+                            ..EvictConfig::default()
+                        },
+                        video: MinimizedVideoDecay {
+                            evict_session_after: Some(Duration::from_secs(8)),
+                            pause: false,
+                        },
+                        prefetch: PrefetchDecay {
+                            drop_on: PrefetchDropAnchor::Drop,
+                            drop_after: Duration::from_secs(2),
+                            drop_interval: Duration::from_secs(1),
+                        },
+                    },
+                    #[cfg(target_os = "windows")]
+                    working_set: WorkingSetConfig {
+                        trim_when: WorkingSetTrim::AllMinimized,
+                        trim_after: Duration::from_secs(12),
+                    },
+                },
+                startup: StartupConfig {
+                    present_mode: PresentMode::NoVsync,
+                },
+            },
+            managed: ManagedConfig {
+                window: WindowConfig {
+                    width: 640.0,
+                    height: 480.0,
+                    x: Some(100.0),
+                    y: Some(50.0),
+                    maximized: true,
+                    fullscreen: true,
+                },
             },
         };
         assert_eq!(AppConfig::from_toml(&cfg.to_toml()), cfg);
@@ -453,13 +581,15 @@ mod tests {
 
     #[test]
     fn mouse_nav_is_on_by_default() {
-        assert!(AppConfig::default().mouse_nav);
+        assert!(AppConfig::default().standard.files.mouse_nav);
     }
 
     #[test]
     fn from_toml_ignores_unknown_keys() {
-        let cfg = AppConfig::from_toml("some_future_setting = 42\nprefetch_depth = 7\n");
-        assert_eq!(cfg.prefetch_depth, 7);
+        let cfg = AppConfig::from_toml(
+            "some_future_setting = 42\n[standard.browsing]\nprefetch_depth = 7\n",
+        );
+        assert_eq!(cfg.standard.browsing.prefetch_depth, 7);
     }
 
     #[test]
@@ -488,11 +618,11 @@ mod tests {
 
     #[test]
     fn from_toml_defaults_missing_keys() {
-        let cfg = AppConfig::from_toml("show_footer = false\n");
-        assert!(!cfg.show_footer);
-        assert_eq!(cfg.prefetch_depth, 5);
-        assert_eq!(cfg.zoom_mode, ZoomMode::Auto);
-        assert!(cfg.show_toolbar);
+        let cfg = AppConfig::from_toml("[standard.chrome]\nfooter = false\n");
+        assert!(!cfg.standard.chrome.footer);
+        assert_eq!(cfg.standard.browsing.prefetch_depth, 5);
+        assert_eq!(cfg.standard.display.zoom_mode, ZoomMode::Auto);
+        assert!(cfg.standard.chrome.toolbar);
     }
 
     #[test]

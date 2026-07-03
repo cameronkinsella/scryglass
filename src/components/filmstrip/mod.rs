@@ -46,7 +46,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
 
         Message::Scrolled(x) => {
             let window_w = win.window_size.width;
-            let show = shared.config.show_filmstrip;
+            let show = shared.config.standard.chrome.filmstrip;
             let pipeline = shared.pipeline.clone();
             let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
@@ -81,7 +81,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
 
         Message::SettleCheck => {
             let window_w = win.window_size.width;
-            let show = shared.config.show_filmstrip;
+            let show = shared.config.standard.chrome.filmstrip;
             let pipeline = shared.pipeline.clone();
             let Some(viewer) = win.viewer_mut() else {
                 return Task::none();

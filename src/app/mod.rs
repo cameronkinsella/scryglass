@@ -248,7 +248,7 @@ pub enum Modal {
 
 /// The active theme, from config. Shared across all windows.
 pub fn theme(app: &App, _id: window::Id) -> iced::Theme {
-    match app.shared.config.theme {
+    match app.shared.config.standard.display.theme {
         crate::config::ThemeChoice::Dark => ui::theme::dark(),
         crate::config::ThemeChoice::Light => ui::theme::light(),
     }
@@ -268,7 +268,7 @@ pub fn title(app: &App, id: window::Id) -> String {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    if app.shared.config.show_footer {
+    if app.shared.config.standard.chrome.footer {
         return filename;
     }
 
@@ -294,23 +294,23 @@ pub(crate) fn recalc_viewport(win: &mut Window, shared: &Shared) {
         win.viewport_size = win.window_size;
         return;
     }
-    let chrome_width = if shared.config.show_info {
+    let chrome_width = if shared.config.standard.chrome.info {
         info_panel::WIDTH
     } else {
         0.0
     };
-    let mut chrome_height: f32 = if shared.config.show_toolbar {
+    let mut chrome_height: f32 = if shared.config.standard.chrome.toolbar {
         TOOLBAR_HEIGHT
     } else {
         0.0
     };
-    if shared.config.show_filmstrip {
+    if shared.config.standard.chrome.filmstrip {
         chrome_height += 72.0; // filmstrip + padding
     }
-    if shared.config.show_slider {
+    if shared.config.standard.chrome.slider {
         chrome_height += 28.0; // slider + padding
     }
-    if shared.config.show_footer {
+    if shared.config.standard.chrome.footer {
         chrome_height += 25.0; // footer
     }
     // Subtract the learned pad so the estimate matches iced's real layout, which the
@@ -347,11 +347,11 @@ mod tests {
     fn viewport_equals_window_when_all_chrome_is_hidden() {
         let mut app = empty_app();
         app.window.window_size = Size::new(1280.0, 720.0);
-        app.shared.config.show_toolbar = false;
-        app.shared.config.show_info = false;
-        app.shared.config.show_filmstrip = false;
-        app.shared.config.show_slider = false;
-        app.shared.config.show_footer = false;
+        app.shared.config.standard.chrome.toolbar = false;
+        app.shared.config.standard.chrome.info = false;
+        app.shared.config.standard.chrome.filmstrip = false;
+        app.shared.config.standard.chrome.slider = false;
+        app.shared.config.standard.chrome.footer = false;
         recalc_viewport(&mut app.window, &app.shared);
         assert_eq!(app.window.viewport_size, Size::new(1280.0, 720.0));
     }
@@ -360,11 +360,11 @@ mod tests {
     fn toolbar_takes_its_height_from_the_viewport() {
         let mut app = empty_app();
         app.window.window_size = Size::new(1280.0, 720.0);
-        app.shared.config.show_toolbar = true;
-        app.shared.config.show_info = false;
-        app.shared.config.show_filmstrip = false;
-        app.shared.config.show_slider = false;
-        app.shared.config.show_footer = false;
+        app.shared.config.standard.chrome.toolbar = true;
+        app.shared.config.standard.chrome.info = false;
+        app.shared.config.standard.chrome.filmstrip = false;
+        app.shared.config.standard.chrome.slider = false;
+        app.shared.config.standard.chrome.footer = false;
         recalc_viewport(&mut app.window, &app.shared);
         assert_eq!(app.window.viewport_size.width, 1280.0);
         assert_eq!(app.window.viewport_size.height, 720.0 - TOOLBAR_HEIGHT);
@@ -373,7 +373,7 @@ mod tests {
     #[test]
     fn title_is_the_filename_when_the_footer_is_shown() {
         let mut t = viewing_app(&["photo.png", "b.png"], 0);
-        t.shared.config.show_footer = true;
+        t.shared.config.standard.chrome.footer = true;
         let (app, id) = into_app(t);
         assert_eq!(title(&app, id), "photo.png");
     }
@@ -381,7 +381,7 @@ mod tests {
     #[test]
     fn title_without_footer_shows_placeholders_for_unknown_dimensions() {
         let mut t = viewing_app(&["photo.png"], 0);
-        t.shared.config.show_footer = false;
+        t.shared.config.standard.chrome.footer = false;
         let (app, id) = into_app(t);
         let title = title(&app, id);
         assert!(title.contains("photo.png"));

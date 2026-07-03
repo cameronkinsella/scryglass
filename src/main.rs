@@ -74,7 +74,11 @@ fn apply_present_mode() {
     if std::env::var_os("ICED_PRESENT_MODE").is_some() {
         return;
     }
-    let mode = config::AppConfig::load_reporting().0.startup.present_mode;
+    let mode = config::AppConfig::load_reporting()
+        .0
+        .advanced
+        .startup
+        .present_mode;
     // iced treats configuring a mode the driver lacks as fatal, so a mode
     // that can be missing is checked against the driver first. Only Windows
     // has probe glue. Other platforms pass the configured mode through.

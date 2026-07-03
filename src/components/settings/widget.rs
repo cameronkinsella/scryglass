@@ -42,7 +42,7 @@ pub fn settings<'a>(
             .align_y(iced::Alignment::Center)
         };
 
-    let depth = config.prefetch_depth;
+    let depth = config.standard.browsing.prefetch_depth;
 
     let mut rows = column![
         row![
@@ -58,20 +58,23 @@ pub fn settings<'a>(
         .align_y(iced::Alignment::Center),
         switch(
             "Read-only mode (no delete or rename)",
-            config.read_only,
+            config.standard.files.read_only,
             true,
             |_| SettingsMessage::ToggleReadOnly
         ),
         // Useless while read-only blocks deletion outright, so grey it out then.
         switch(
             "Confirm before deleting",
-            config.confirm_delete,
-            !config.read_only,
+            config.standard.files.confirm_delete,
+            !config.standard.files.read_only,
             |_| SettingsMessage::ToggleConfirmDelete,
         ),
-        switch("Mouse edge navigation", config.mouse_nav, true, |_| {
-            SettingsMessage::ToggleMouseNav
-        }),
+        switch(
+            "Mouse edge navigation",
+            config.standard.files.mouse_nav,
+            true,
+            |_| { SettingsMessage::ToggleMouseNav }
+        ),
         rule::horizontal(1),
         stepper(
             "Prefetch depth",
@@ -89,7 +92,7 @@ pub fn settings<'a>(
         rows = rows.push(rule::horizontal(1));
         rows = rows.push(switch(
             "Persistent thumbnails",
-            config.disk_thumbs,
+            config.standard.browsing.disk_thumbs,
             true,
             |_| SettingsMessage::ToggleDiskThumbs,
         ));
@@ -115,7 +118,7 @@ pub fn settings<'a>(
         rows = rows.push(rule::horizontal(1));
         rows = rows.push(switch(
             "Hardware video decode",
-            config.hardware_decode,
+            config.standard.video.hardware_decode,
             true,
             |_| SettingsMessage::ToggleHardwareDecode,
         ));

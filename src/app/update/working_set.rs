@@ -15,7 +15,7 @@ use crate::config::WorkingSetTrim;
 /// timer on a transition. A no-op while the condition is unchanged, so the
 /// periodic minimize poll never resets a running timer.
 pub(crate) fn reconcile(app: &mut App) -> Task<Envelope> {
-    let cfg = app.shared.config.resource.working_set;
+    let cfg = app.shared.config.advanced.resource.working_set;
     let met = condition_met(app, cfg.trim_when);
     if met == app.shared.working_set.armed {
         return Task::none();
@@ -38,7 +38,7 @@ pub(crate) fn reconcile(app: &mut App) -> Task<Envelope> {
 /// Fire the trim if its timer is still the current one and the condition still
 /// holds. A superseded generation, or a window that came back, no-ops.
 pub(crate) fn on_timer(app: &mut App, generation: u64) -> Task<Envelope> {
-    let trim_when = app.shared.config.resource.working_set.trim_when;
+    let trim_when = app.shared.config.advanced.resource.working_set.trim_when;
     if generation == app.shared.working_set.generation && condition_met(app, trim_when) {
         crate::platform::trim_working_set();
     }
@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn reconcile_arms_on_transition_then_stays_put_on_a_poll() {
         let (mut app, id) = into_app(empty_app());
-        app.shared.config.resource.working_set.trim_when = WorkingSetTrim::AllUnfocused;
+        app.shared.config.advanced.resource.working_set.trim_when = WorkingSetTrim::AllUnfocused;
 
         // Focused: nothing armed.
         let _ = reconcile(&mut app);

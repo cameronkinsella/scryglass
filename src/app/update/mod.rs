@@ -95,8 +95,8 @@ fn route(app: &mut App, envelope: Envelope) -> Task<Envelope> {
         // placement query that runs first.
         Envelope::Opened(id) => super::boot::replay_window_state(
             id,
-            app.shared.config.window_maximized,
-            app.shared.config.window_fullscreen,
+            app.shared.config.managed.window.maximized,
+            app.shared.config.managed.window.fullscreen,
         ),
         Envelope::Closed(id) => {
             app.windows.remove(&id);
@@ -131,14 +131,15 @@ fn route(app: &mut App, envelope: Envelope) -> Task<Envelope> {
 fn apply_config(app: &mut App, config: AppConfig) -> Task<Envelope> {
     app.shared.pipeline.set_ram_budget(
         config
+            .advanced
             .resource
             .large_image_ram_budget
             .resolve(crate::config::total_system_ram()),
     );
-    set_prefetch_scaler(config.resource.prefetch_scaler);
+    set_prefetch_scaler(config.advanced.resource.prefetch_scaler);
     app.shared
         .pipeline
-        .set_prefetch_parallelism(config.resource.prefetch_parallelism);
+        .set_prefetch_parallelism(config.advanced.resource.prefetch_parallelism);
     app.shared.config = config;
     let mut tasks = Vec::new();
     for (id, win) in app.windows.iter_mut() {
@@ -447,13 +448,13 @@ mod tests {
         use crate::config::ThemeChoice;
         let (mut app, _id) = into_app(viewing_app(&["a.png"], 0));
         let mut edited = app.shared.config.clone();
-        edited.theme = ThemeChoice::Light;
-        edited.prefetch_depth = 7;
+        edited.standard.display.theme = ThemeChoice::Light;
+        edited.standard.browsing.prefetch_depth = 7;
 
         let _ = update(&mut app, Envelope::ConfigReloaded(Box::new(edited)));
 
-        assert_eq!(app.shared.config.theme, ThemeChoice::Light);
-        assert_eq!(app.shared.config.prefetch_depth, 7);
+        assert_eq!(app.shared.config.standard.display.theme, ThemeChoice::Light);
+        assert_eq!(app.shared.config.standard.browsing.prefetch_depth, 7);
     }
 
     #[test]
@@ -474,8 +475,8 @@ mod tests {
         // The open window is large (e.g. it was maximized) but the saved size
         // is smaller. A new window uses the saved size, never copies the big one.
         app.windows.get_mut(&id).unwrap().window_size = iced::Size::new(3000.0, 2000.0);
-        app.shared.config.window_width = 800.0;
-        app.shared.config.window_height = 600.0;
+        app.shared.config.managed.window.width = 800.0;
+        app.shared.config.managed.window.height = 600.0;
         let _ = update(&mut app, Envelope::Forwarded(None));
         let new_id = app.windows.keys().find(|k| **k != id).copied().unwrap();
         assert_eq!(

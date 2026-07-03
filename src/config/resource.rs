@@ -236,7 +236,7 @@ pub struct DecayPipeline {
     #[serde(with = "humantime_opt")]
     pub drop_vram_after: Option<Duration>,
     /// The RAM-eviction stage, flattened so its keys sit alongside the demote and
-    /// drop timers in `[resource.*.still]`.
+    /// drop timers in `[advanced.resource.*.still]`.
     #[serde(flatten)]
     pub evict: EvictConfig,
 }
@@ -246,13 +246,35 @@ pub struct DecayPipeline {
 /// hardware decoder, the audio sink, and the GPU plane textures). After this delay a
 /// backgrounded window releases that session, freezing the last frame on screen, and
 /// re-opens it at the saved position when the window returns. A `None` timer keeps the
-/// session alive (a minimized window still pauses it via [`MinimizedConfig::pause_video`]).
+/// session alive (a minimized window still pauses it via [`MinimizedVideoDecay::pause`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct VideoDecay {
     /// Release the decode session this long after the window is backgrounded.
     #[serde(with = "humantime_opt")]
     pub evict_session_after: Option<Duration>,
+}
+
+/// Decay timing for a minimized window's video: the session release plus a pause
+/// toggle. An unfocused window is still visible, so its video has no pause and uses
+/// [`VideoDecay`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MinimizedVideoDecay {
+    /// Release the decode session this long after the window is minimized.
+    #[serde(with = "humantime_opt")]
+    pub evict_session_after: Option<Duration>,
+    /// Pause an open video while the window is minimized.
+    pub pause: bool,
+}
+
+impl Default for MinimizedVideoDecay {
+    fn default() -> Self {
+        Self {
+            evict_session_after: Some(Duration::from_secs(5)),
+            pause: true,
+        }
+    }
 }
 
 /// The event that starts a backgrounded window's prefetch shedding.
@@ -324,33 +346,19 @@ pub struct StateDecay {
     pub prefetch: PrefetchDecay,
 }
 
-/// The minimized state's decay timers plus its video-pause toggle.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// The minimized state's decay timers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct MinimizedConfig {
-    /// Pause an open video while the window is minimized.
-    pub pause_video: bool,
     /// Decay timers for a still image.
     pub still: DecayPipeline,
     /// Eviction timing for an animation.
     pub animated: EvictConfig,
-    /// When to release an open video's decode session.
-    pub video: VideoDecay,
+    /// When to release an open video's decode session, and whether to pause it.
+    pub video: MinimizedVideoDecay,
     /// When the prefetched neighbors are shed, independent of the media kind
     /// on screen.
     pub prefetch: PrefetchDecay,
-}
-
-impl Default for MinimizedConfig {
-    fn default() -> Self {
-        Self {
-            pause_video: true,
-            still: DecayPipeline::default(),
-            animated: EvictConfig::default(),
-            video: VideoDecay::default(),
-            prefetch: PrefetchDecay::default(),
-        }
-    }
 }
 
 /// When the process empties its working set back to the OS (Windows only).
@@ -541,14 +549,15 @@ pub struct ResourceConfig {
 }
 
 /// One backgrounded state's decay tree, viewed uniformly whether the window is
-/// unfocused or minimized. The decay engine reads the four subtrees through this
-/// view, so the two states are interchangeable values of one shape. Only the
-/// minimized-specific extras (`pause_video`) sit outside it.
+/// unfocused or minimized. The decay engine reads the subtrees through this view,
+/// so the two states are interchangeable values of one shape. The two states'
+/// video types differ (minimized adds `pause`), so only the shared session-release
+/// timer is exposed here; the pause is read directly off the minimized config.
 #[derive(Clone, Copy)]
 pub struct StateDecayRef<'a> {
     pub still: &'a DecayPipeline,
     pub animated: &'a EvictConfig,
-    pub video: &'a VideoDecay,
+    pub video_evict_after: Option<Duration>,
     pub prefetch: &'a PrefetchDecay,
 }
 
@@ -559,14 +568,14 @@ impl ResourceConfig {
             StateDecayRef {
                 still: &self.minimized.still,
                 animated: &self.minimized.animated,
-                video: &self.minimized.video,
+                video_evict_after: self.minimized.video.evict_session_after,
                 prefetch: &self.minimized.prefetch,
             }
         } else {
             StateDecayRef {
                 still: &self.unfocused.still,
                 animated: &self.unfocused.animated,
-                video: &self.unfocused.video,
+                video_evict_after: self.unfocused.video.evict_session_after,
                 prefetch: &self.unfocused.prefetch,
             }
         }
@@ -584,8 +593,10 @@ impl Default for ResourceConfig {
                 still: DecayPipeline {
                     demote_vram_after: Some(Duration::from_secs(15)),
                     drop_vram_after: None,
+                    // An unfocused window is still visible, so keep the decode in
+                    // RAM: a refocus is instant and the VRAM is already reclaimed.
                     evict: EvictConfig {
-                        evict_ram: EvictPolicy::Dynamic,
+                        evict_ram: EvictPolicy::Never,
                         evict_ram_min: Duration::from_secs(30),
                         evict_ram_max: Duration::from_secs(600),
                         max_decode_latency: Duration::from_millis(200),
@@ -599,23 +610,22 @@ impl Default for ResourceConfig {
                 video: VideoDecay {
                     evict_session_after: None,
                 },
-                // Unfocused prefetch sheds with the demote stage, all rings at
-                // once: the window is still visible, so its look-ahead keeps
-                // the same 15 s grace the on-screen image gets.
+                // Unfocused prefetch sheds from the demote stage, one ring every
+                // 5 s: the window is still visible, so its look-ahead keeps the
+                // same 15 s grace the on-screen image gets before shedding starts.
                 prefetch: PrefetchDecay {
                     drop_on: PrefetchDropAnchor::Demote,
                     drop_after: Duration::ZERO,
-                    drop_interval: Duration::ZERO,
+                    drop_interval: Duration::from_secs(5),
                 },
             },
             minimized: MinimizedConfig {
-                pause_video: true,
                 still: DecayPipeline {
                     demote_vram_after: None,
                     drop_vram_after: Some(Duration::ZERO),
                     evict: EvictConfig {
                         evict_ram: EvictPolicy::Dynamic,
-                        evict_ram_min: Duration::from_secs(15),
+                        evict_ram_min: Duration::from_secs(60),
                         evict_ram_max: Duration::from_secs(300),
                         max_decode_latency: Duration::from_millis(200),
                     },
@@ -626,10 +636,12 @@ impl Default for ResourceConfig {
                     evict_ram: EvictPolicy::Fixed(Duration::from_secs(30)),
                     ..EvictConfig::default()
                 },
-                // A minimized window is hidden, so release the whole decode session
-                // after a short grace. A restore re-opens it at the saved position.
-                video: VideoDecay {
+                // A minimized window is hidden, so pause the video and release the
+                // whole decode session after a short grace. A restore re-opens it at
+                // the saved position.
+                video: MinimizedVideoDecay {
                     evict_session_after: Some(Duration::from_secs(5)),
+                    pause: true,
                 },
                 // A minimized window sheds its look-ahead on a timer of its own
                 // (its still pipeline has no demote stage to anchor to): a
@@ -660,18 +672,25 @@ mod tests {
         let min = res.for_state(true);
         assert!(std::ptr::eq(min.still, &res.minimized.still));
         assert!(std::ptr::eq(min.prefetch, &res.minimized.prefetch));
+        assert_eq!(
+            min.video_evict_after,
+            res.minimized.video.evict_session_after
+        );
         let unf = res.for_state(false);
         assert!(std::ptr::eq(unf.animated, &res.unfocused.animated));
-        assert!(std::ptr::eq(unf.video, &res.unfocused.video));
+        assert_eq!(
+            unf.video_evict_after,
+            res.unfocused.video.evict_session_after
+        );
     }
 
     #[test]
     fn prefetch_decay_defaults_differ_by_state() {
-        let res = AppConfig::default().resource;
-        // Unfocused: the look-ahead sheds with the demote stage, all at once.
+        let res = AppConfig::default().advanced.resource;
+        // Unfocused: the look-ahead sheds from the demote stage, one ring per interval.
         assert_eq!(res.unfocused.prefetch.drop_on, PrefetchDropAnchor::Demote);
         assert_eq!(res.unfocused.prefetch.drop_after, Duration::ZERO);
-        assert_eq!(res.unfocused.prefetch.drop_interval, Duration::ZERO);
+        assert_eq!(res.unfocused.prefetch.drop_interval, Duration::from_secs(5));
         // Minimized: its still pipeline has no demote stage, so the shedding
         // runs on its own timer, ring by ring.
         assert_eq!(
@@ -685,26 +704,26 @@ mod tests {
     #[test]
     fn prefetch_decay_parses_from_toml() {
         let cfg = AppConfig::from_toml(
-            "[resource.minimized.prefetch]\n\
+            "[advanced.resource.minimized.prefetch]\n\
              drop_on = \"evict\"\n\
              drop_after = \"30s\"\n\
              drop_interval = \"2s\"\n",
         );
         assert_eq!(
-            cfg.resource.minimized.prefetch.drop_on,
+            cfg.advanced.resource.minimized.prefetch.drop_on,
             PrefetchDropAnchor::Evict
         );
         assert_eq!(
-            cfg.resource.minimized.prefetch.drop_after,
+            cfg.advanced.resource.minimized.prefetch.drop_after,
             Duration::from_secs(30)
         );
         assert_eq!(
-            cfg.resource.minimized.prefetch.drop_interval,
+            cfg.advanced.resource.minimized.prefetch.drop_interval,
             Duration::from_secs(2)
         );
         // The other state keeps its own default.
         assert_eq!(
-            cfg.resource.unfocused.prefetch.drop_on,
+            cfg.advanced.resource.unfocused.prefetch.drop_on,
             PrefetchDropAnchor::Demote
         );
     }
@@ -794,13 +813,13 @@ mod tests {
     #[test]
     fn timers_parse_human_durations_and_never() {
         let cfg = AppConfig::from_toml(
-            "[resource.unfocused.still]\ndemote_vram_after = \"500ms\"\ndrop_vram_after = \"never\"\n",
+            "[advanced.resource.unfocused.still]\ndemote_vram_after = \"500ms\"\ndrop_vram_after = \"never\"\n",
         );
         assert_eq!(
-            cfg.resource.unfocused.still.demote_vram_after,
+            cfg.advanced.resource.unfocused.still.demote_vram_after,
             Some(Duration::from_millis(500))
         );
-        assert_eq!(cfg.resource.unfocused.still.drop_vram_after, None);
+        assert_eq!(cfg.advanced.resource.unfocused.still.drop_vram_after, None);
     }
 
     #[test]
@@ -815,22 +834,26 @@ mod tests {
         );
         // Parses a duration and "never".
         let cfg = AppConfig::from_toml(
-            "[resource.unfocused.video]\nevict_session_after = \"10s\"\n\
-             [resource.minimized.video]\nevict_session_after = \"never\"\n",
+            "[advanced.resource.unfocused.video]\nevict_session_after = \"10s\"\n\
+             [advanced.resource.minimized.video]\nevict_session_after = \"never\"\n",
         );
         assert_eq!(
-            cfg.resource.unfocused.video.evict_session_after,
+            cfg.advanced.resource.unfocused.video.evict_session_after,
             Some(Duration::from_secs(10))
         );
-        assert_eq!(cfg.resource.minimized.video.evict_session_after, None);
+        assert_eq!(
+            cfg.advanced.resource.minimized.video.evict_session_after,
+            None
+        );
     }
 
     #[test]
     fn evict_policy_parses_never_dynamic_and_a_duration() {
         let parse = |s: &str| {
             AppConfig::from_toml(&format!(
-                "[resource.unfocused.still]\nevict_ram = \"{s}\"\n"
+                "[advanced.resource.unfocused.still]\nevict_ram = \"{s}\"\n"
             ))
+            .advanced
             .resource
             .unfocused
             .still

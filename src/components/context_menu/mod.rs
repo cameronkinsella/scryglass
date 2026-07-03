@@ -23,7 +23,7 @@ pub(crate) fn view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, AppMe
     let Some(pos) = win.context_menu_pos else {
         return empty();
     };
-    let toolbar_offset = if shared.config.show_toolbar && !win.fullscreen {
+    let toolbar_offset = if shared.config.standard.chrome.toolbar && !win.fullscreen {
         TOOLBAR_HEIGHT
     } else {
         0.0
@@ -33,10 +33,10 @@ pub(crate) fn view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, AppMe
         win.window_size.width,
         win.window_size.height - toolbar_offset,
     );
-    let can_modify =
-        !shared.config.read_only && win.viewer().is_some_and(|v| matches!(v.source, Source::Fs));
+    let can_modify = !shared.config.standard.files.read_only
+        && win.viewer().is_some_and(|v| matches!(v.source, Source::Fs));
     let placed = widget::flip_menu_pos(adjusted_pos, widget::menu_size(can_modify), bounds);
-    widget::context_menu(placed, shared.config.show_toolbar, can_modify)
+    widget::context_menu(placed, shared.config.standard.chrome.toolbar, can_modify)
 }
 
 pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) -> Task<AppMessage> {

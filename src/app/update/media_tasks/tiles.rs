@@ -48,7 +48,12 @@ pub(crate) fn fire_tiles(win: &Window, shared: &Shared) -> Task<Message> {
     let zoom = if viewer.manual_zoom {
         viewer.zoom
     } else {
-        compute_zoom(shared.config.zoom_mode, true_size.0, true_size.1, viewport)
+        compute_zoom(
+            shared.config.standard.display.zoom_mode,
+            true_size.0,
+            true_size.1,
+            viewport,
+        )
     };
     // The draw stamps the level and scale it actually sampled. Before the
     // first tiled draw, derive them the same way in substrate texels.

@@ -34,21 +34,21 @@ pub(crate) fn view<'a>(win: &'a Window, _shared: &'a Shared) -> Element<'a, AppM
 
 pub(crate) fn dropdown<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, AppMessage> {
     let layout_vis = LayoutVisibility {
-        show_filmstrip: shared.config.show_filmstrip,
-        show_slider: shared.config.show_slider,
-        show_footer: shared.config.show_footer,
-        show_info: shared.config.show_info,
-        show_checkerboard: shared.config.show_checkerboard,
+        show_filmstrip: shared.config.standard.chrome.filmstrip,
+        show_slider: shared.config.standard.chrome.slider,
+        show_footer: shared.config.standard.chrome.footer,
+        show_info: shared.config.standard.chrome.info,
+        show_checkerboard: shared.config.standard.display.checkerboard,
     };
 
     if let Some(dropdown) = widget::dropdown(
         win.open_menu,
-        shared.config.zoom_mode,
+        shared.config.standard.display.zoom_mode,
         layout_vis,
-        shared.config.theme == ThemeChoice::Light,
-        shared.config.nearest_neighbor_zoom,
-        shared.config.sort_key,
-        shared.config.sort_desc,
+        shared.config.standard.display.theme == ThemeChoice::Light,
+        shared.config.standard.display.nearest_neighbor_zoom,
+        shared.config.standard.display.sort_key,
+        shared.config.standard.display.sort_desc,
     ) {
         column![dropdown]
             .width(Length::Fill)
@@ -94,11 +94,11 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             Task::none()
         }
         Message::SetSortKey(key) => {
-            shared.config.sort_key = key;
+            shared.config.standard.display.sort_key = key;
             Task::batch([save_config(win, shared), fire_resort(win, shared)])
         }
         Message::ToggleSortDirection => {
-            shared.config.sort_desc = !shared.config.sort_desc;
+            shared.config.standard.display.sort_desc = !shared.config.standard.display.sort_desc;
             Task::batch([save_config(win, shared), fire_resort(win, shared)])
         }
         Message::DismissOverlay => {
@@ -106,8 +106,8 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             Task::none()
         }
         Message::SetZoomMode(mode) => {
-            shared.config.zoom_mode = mode;
-            let zoom_mode = shared.config.zoom_mode;
+            shared.config.standard.display.zoom_mode = mode;
+            let zoom_mode = shared.config.standard.display.zoom_mode;
             let viewport = win.viewport_size;
             if let Some(viewer) = win.viewer_mut() {
                 viewer.manual_zoom = false;
@@ -119,10 +119,10 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             save_config(win, shared)
         }
         Message::ToggleFilmstrip => {
-            shared.config.show_filmstrip = !shared.config.show_filmstrip;
+            shared.config.standard.chrome.filmstrip = !shared.config.standard.chrome.filmstrip;
             recalc_viewport(win, shared);
             let saved = save_config(win, shared);
-            if !shared.config.show_filmstrip {
+            if !shared.config.standard.chrome.filmstrip {
                 return saved;
             }
             // Showing the strip mid-session: position it on the cursor, as
@@ -144,30 +144,31 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             Task::batch([saved, scroll])
         }
         Message::ToggleSlider => {
-            shared.config.show_slider = !shared.config.show_slider;
+            shared.config.standard.chrome.slider = !shared.config.standard.chrome.slider;
             recalc_viewport(win, shared);
             save_config(win, shared)
         }
         Message::ToggleFooter => {
-            shared.config.show_footer = !shared.config.show_footer;
+            shared.config.standard.chrome.footer = !shared.config.standard.chrome.footer;
             recalc_viewport(win, shared);
             save_config(win, shared)
         }
         Message::ToggleToolbar => {
-            shared.config.show_toolbar = !shared.config.show_toolbar;
+            shared.config.standard.chrome.toolbar = !shared.config.standard.chrome.toolbar;
             win.context_menu_pos = None;
             recalc_viewport(win, shared);
             save_config(win, shared)
         }
         Message::ToggleTheme => {
-            shared.config.theme = match shared.config.theme {
+            shared.config.standard.display.theme = match shared.config.standard.display.theme {
                 ThemeChoice::Dark => ThemeChoice::Light,
                 ThemeChoice::Light => ThemeChoice::Dark,
             };
             save_config(win, shared)
         }
         Message::ToggleNearestNeighbor => {
-            shared.config.nearest_neighbor_zoom = !shared.config.nearest_neighbor_zoom;
+            shared.config.standard.display.nearest_neighbor_zoom =
+                !shared.config.standard.display.nearest_neighbor_zoom;
             save_config(win, shared)
         }
         Message::KeepMenuOpen => Task::none(),
@@ -212,7 +213,7 @@ mod tests {
         let names: Vec<String> = (0..1000).map(|i| format!("{i:04}.png")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut app = viewing_app(&refs, 600);
-        app.shared.config.show_filmstrip = false;
+        app.shared.config.standard.chrome.filmstrip = false;
         app.viewer_mut().unwrap().filmstrip_scroll_x = 0.0;
         let window_w = app.window.window_size.width;
         let _ = update(&mut app.window, &mut app.shared, Message::ToggleFilmstrip);
@@ -226,48 +227,51 @@ mod tests {
     fn layout_toggles_flip_their_config_flags() {
         let mut app = empty_app();
         let (filmstrip, slider, footer) = (
-            app.shared.config.show_filmstrip,
-            app.shared.config.show_slider,
-            app.shared.config.show_footer,
+            app.shared.config.standard.chrome.filmstrip,
+            app.shared.config.standard.chrome.slider,
+            app.shared.config.standard.chrome.footer,
         );
         let _ = update(&mut app.window, &mut app.shared, Message::ToggleFilmstrip);
         let _ = update(&mut app.window, &mut app.shared, Message::ToggleSlider);
         let _ = update(&mut app.window, &mut app.shared, Message::ToggleFooter);
-        assert_eq!(app.shared.config.show_filmstrip, !filmstrip);
-        assert_eq!(app.shared.config.show_slider, !slider);
-        assert_eq!(app.shared.config.show_footer, !footer);
+        assert_eq!(app.shared.config.standard.chrome.filmstrip, !filmstrip);
+        assert_eq!(app.shared.config.standard.chrome.slider, !slider);
+        assert_eq!(app.shared.config.standard.chrome.footer, !footer);
     }
 
     #[test]
     fn toggle_toolbar_flips_and_dismisses_the_context_menu() {
         let mut app = empty_app();
         app.window.context_menu_pos = Some(iced::Point::ORIGIN);
-        let before = app.shared.config.show_toolbar;
+        let before = app.shared.config.standard.chrome.toolbar;
         let _ = update(&mut app.window, &mut app.shared, Message::ToggleToolbar);
-        assert_eq!(app.shared.config.show_toolbar, !before);
+        assert_eq!(app.shared.config.standard.chrome.toolbar, !before);
         assert!(app.window.context_menu_pos.is_none());
     }
 
     #[test]
     fn toggle_theme_swaps_dark_and_light() {
         let mut app = empty_app();
-        app.shared.config.theme = ThemeChoice::Dark;
+        app.shared.config.standard.display.theme = ThemeChoice::Dark;
         let _ = update(&mut app.window, &mut app.shared, Message::ToggleTheme);
-        assert_eq!(app.shared.config.theme, ThemeChoice::Light);
+        assert_eq!(app.shared.config.standard.display.theme, ThemeChoice::Light);
         let _ = update(&mut app.window, &mut app.shared, Message::ToggleTheme);
-        assert_eq!(app.shared.config.theme, ThemeChoice::Dark);
+        assert_eq!(app.shared.config.standard.display.theme, ThemeChoice::Dark);
     }
 
     #[test]
     fn toggle_nearest_neighbor_flips_config() {
         let mut app = empty_app();
-        let before = app.shared.config.nearest_neighbor_zoom;
+        let before = app.shared.config.standard.display.nearest_neighbor_zoom;
         let _ = update(
             &mut app.window,
             &mut app.shared,
             Message::ToggleNearestNeighbor,
         );
-        assert_eq!(app.shared.config.nearest_neighbor_zoom, !before);
+        assert_eq!(
+            app.shared.config.standard.display.nearest_neighbor_zoom,
+            !before
+        );
     }
 
     #[test]
@@ -281,7 +285,10 @@ mod tests {
             Message::SetZoomMode(ZoomMode::default()),
         );
         assert_eq!(app.window.open_menu, Some(OpenMenu::Zoom));
-        assert_eq!(app.shared.config.zoom_mode, ZoomMode::default());
+        assert_eq!(
+            app.shared.config.standard.display.zoom_mode,
+            ZoomMode::default()
+        );
         assert!(!app.viewer().unwrap().manual_zoom);
     }
 
@@ -295,7 +302,10 @@ mod tests {
             Message::SetSortKey(SortKey::default()),
         );
         assert_eq!(app.window.open_menu, Some(OpenMenu::Sort));
-        assert_eq!(app.shared.config.sort_key, SortKey::default());
+        assert_eq!(
+            app.shared.config.standard.display.sort_key,
+            SortKey::default()
+        );
     }
 
     #[test]
@@ -309,12 +319,12 @@ mod tests {
     #[test]
     fn toggle_sort_direction_flips_config() {
         let mut app = viewing_app(&["a.png"], 0);
-        let before = app.shared.config.sort_desc;
+        let before = app.shared.config.standard.display.sort_desc;
         let _ = update(
             &mut app.window,
             &mut app.shared,
             Message::ToggleSortDirection,
         );
-        assert_eq!(app.shared.config.sort_desc, !before);
+        assert_eq!(app.shared.config.standard.display.sort_desc, !before);
     }
 }

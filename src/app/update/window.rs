@@ -67,7 +67,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             }
             win.window_size = size;
             recalc_viewport(win, shared);
-            let zoom_mode = shared.config.zoom_mode;
+            let zoom_mode = shared.config.standard.display.zoom_mode;
             let viewport = win.viewport_size;
 
             if let Some(viewer) = win.viewer_mut()
@@ -193,7 +193,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             // once, not after the frame queue stalls), and resume on restore only
             // if it was playing. The pause is opt-out via config. An unfocused but
             // un-minimized video keeps playing regardless.
-            let pause = shared.config.resource.minimized.pause_video;
+            let pause = shared.config.advanced.resource.minimized.video.pause;
             let mut resume = win.video_resumes_on_restore;
             if let Some(session) = win.viewer_mut().and_then(|v| v.video.session.as_mut()) {
                 if minimized && pause {
@@ -233,7 +233,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 win.chrome_pad.height += win.viewport_size.height - size.height;
             }
             win.viewport_size = size;
-            let zoom_mode = shared.config.zoom_mode;
+            let zoom_mode = shared.config.standard.display.zoom_mode;
             if let Some(viewer) = win.viewer_mut()
                 && let Some((w, h)) = viewer.displayed.original_size()
             {
@@ -252,12 +252,12 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             // Persist this window's full restore stack as the next window's
             // geometry: the restored windowed bounds, plus the maximized and
             // fullscreen flags to replay on top.
-            shared.config.window_width = win.restored_size.width;
-            shared.config.window_height = win.restored_size.height;
-            shared.config.window_x = Some(win.restored_pos.x);
-            shared.config.window_y = Some(win.restored_pos.y);
-            shared.config.window_maximized = win.maximized;
-            shared.config.window_fullscreen = win.fullscreen;
+            shared.config.managed.window.width = win.restored_size.width;
+            shared.config.managed.window.height = win.restored_size.height;
+            shared.config.managed.window.x = Some(win.restored_pos.x);
+            shared.config.managed.window.y = Some(win.restored_pos.y);
+            shared.config.managed.window.maximized = win.maximized;
+            shared.config.managed.window.fullscreen = win.fullscreen;
             let config = shared.config.clone();
             Task::future(config.save()).then(move |_| iced::window::close(id))
         }
@@ -603,18 +603,18 @@ mod tests {
             &mut app.shared,
             Message::CloseRequested(id),
         );
-        assert_eq!(app.shared.config.window_width, 1024.0);
-        assert_eq!(app.shared.config.window_height, 768.0);
-        assert_eq!(app.shared.config.window_x, Some(120.0));
-        assert_eq!(app.shared.config.window_y, Some(80.0));
-        assert!(app.shared.config.window_maximized);
-        assert!(app.shared.config.window_fullscreen);
+        assert_eq!(app.shared.config.managed.window.width, 1024.0);
+        assert_eq!(app.shared.config.managed.window.height, 768.0);
+        assert_eq!(app.shared.config.managed.window.x, Some(120.0));
+        assert_eq!(app.shared.config.managed.window.y, Some(80.0));
+        assert!(app.shared.config.managed.window.maximized);
+        assert!(app.shared.config.managed.window.fullscreen);
     }
 
     #[test]
     fn an_open_windows_move_does_not_change_the_saved_geometry() {
         let mut app = empty_app();
-        app.shared.config.window_x = Some(10.0);
+        app.shared.config.managed.window.x = Some(10.0);
         // An open window moving while another window's geometry is saved must
         // not overwrite it. Only a close persists.
         app.window.window_size = Size::new(1024.0, 768.0);
@@ -629,7 +629,7 @@ mod tests {
                 snapped: false,
             },
         );
-        assert_eq!(app.shared.config.window_x, Some(10.0));
+        assert_eq!(app.shared.config.managed.window.x, Some(10.0));
     }
 
     #[test]

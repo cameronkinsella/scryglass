@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 /// How rendered frames are handed to the display. Fixed for the life of the
-/// process when the first window's surface is created, hence `[startup]`.
+/// process when the first window's surface is created, hence `[advanced.startup]`.
 /// Applied by handing iced the matching `ICED_PRESENT_MODE` value in `main`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -107,7 +107,7 @@ mod tests {
         } else {
             PresentMode::Auto
         };
-        assert_eq!(AppConfig::default().startup.present_mode, expected);
+        assert_eq!(AppConfig::default().advanced.startup.present_mode, expected);
     }
 
     #[test]
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn present_mode_parses_kebab_case() {
-        let cfg = AppConfig::from_toml("[startup]\npresent_mode = \"fifo-relaxed\"\n");
-        assert_eq!(cfg.startup.present_mode, PresentMode::FifoRelaxed);
+        let cfg = AppConfig::from_toml("[advanced.startup]\npresent_mode = \"fifo-relaxed\"\n");
+        assert_eq!(cfg.advanced.startup.present_mode, PresentMode::FifoRelaxed);
     }
 }

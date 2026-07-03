@@ -136,24 +136,32 @@ impl DownscaleKernel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AppConfig;
+    use crate::config::{AppConfig, DisplayConfig, StandardConfig};
 
     #[test]
     fn default_theme_is_dark() {
-        assert_eq!(AppConfig::default().theme, ThemeChoice::Dark);
+        assert_eq!(
+            AppConfig::default().standard.display.theme,
+            ThemeChoice::Dark
+        );
     }
 
     #[test]
     fn old_natural_name_sort_value_still_parses() {
-        let cfg = AppConfig::from_toml("sort_key = \"NaturalName\"\nshow_footer = false\n");
-        assert_eq!(cfg.sort_key, SortKey::Name);
-        assert!(!cfg.show_footer);
+        let cfg = AppConfig::from_toml("[standard.display]\nsort_key = \"NaturalName\"\n");
+        assert_eq!(cfg.standard.display.sort_key, SortKey::Name);
     }
 
     #[test]
     fn zoom_mode_serializes_as_readable_name() {
         let cfg = AppConfig {
-            zoom_mode: ZoomMode::LockZoomRatio,
+            standard: StandardConfig {
+                display: DisplayConfig {
+                    zoom_mode: ZoomMode::LockZoomRatio,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
             ..Default::default()
         };
         assert!(cfg.to_toml().contains("LockZoomRatio"));

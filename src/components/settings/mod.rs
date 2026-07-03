@@ -145,32 +145,34 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
         }
 
         Message::SetPrefetchDepth(depth) => {
-            shared.config.prefetch_depth = depth.min(10);
+            shared.config.standard.browsing.prefetch_depth = depth.min(10);
             save_config(win, shared)
         }
 
         Message::ToggleReadOnly => {
-            shared.config.read_only = !shared.config.read_only;
+            shared.config.standard.files.read_only = !shared.config.standard.files.read_only;
             save_config(win, shared)
         }
 
         Message::ToggleConfirmDelete => {
-            shared.config.confirm_delete = !shared.config.confirm_delete;
+            shared.config.standard.files.confirm_delete =
+                !shared.config.standard.files.confirm_delete;
             save_config(win, shared)
         }
 
         Message::ToggleMouseNav => {
-            shared.config.mouse_nav = !shared.config.mouse_nav;
+            shared.config.standard.files.mouse_nav = !shared.config.standard.files.mouse_nav;
             save_config(win, shared)
         }
 
         #[cfg(feature = "disk-thumbs")]
         Message::ToggleDiskThumbs => {
-            shared.config.disk_thumbs = !shared.config.disk_thumbs;
+            shared.config.standard.browsing.disk_thumbs =
+                !shared.config.standard.browsing.disk_thumbs;
             shared
                 .pipeline
                 .set_disk(crate::media::disk_thumbs::DiskThumbs::create(
-                    shared.config.disk_thumbs,
+                    shared.config.standard.browsing.disk_thumbs,
                 ));
             shared.disk_cache_size = None;
             Task::batch([
@@ -182,7 +184,8 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
         // Applies to the next video opened.
         #[cfg(feature = "video")]
         Message::ToggleHardwareDecode => {
-            shared.config.hardware_decode = !shared.config.hardware_decode;
+            shared.config.standard.video.hardware_decode =
+                !shared.config.standard.video.hardware_decode;
             save_config(win, shared)
         }
 
@@ -217,42 +220,42 @@ mod tests {
     #[test]
     fn toggle_read_only_flips_the_flag() {
         let mut app = empty_app();
-        let before = app.shared.config.read_only;
+        let before = app.shared.config.standard.files.read_only;
         let _ = update(&mut app.window, &mut app.shared, Message::ToggleReadOnly);
-        assert_eq!(app.shared.config.read_only, !before);
+        assert_eq!(app.shared.config.standard.files.read_only, !before);
     }
 
     #[test]
     fn toggle_confirm_delete_flips_the_flag() {
         let mut app = empty_app();
-        let before = app.shared.config.confirm_delete;
+        let before = app.shared.config.standard.files.confirm_delete;
         let _ = update(
             &mut app.window,
             &mut app.shared,
             Message::ToggleConfirmDelete,
         );
-        assert_eq!(app.shared.config.confirm_delete, !before);
+        assert_eq!(app.shared.config.standard.files.confirm_delete, !before);
     }
 
     #[test]
     fn toggle_mouse_nav_flips_the_flag() {
         let mut app = empty_app();
-        let before = app.shared.config.mouse_nav;
+        let before = app.shared.config.standard.files.mouse_nav;
         let _ = update(&mut app.window, &mut app.shared, Message::ToggleMouseNav);
-        assert_eq!(app.shared.config.mouse_nav, !before);
+        assert_eq!(app.shared.config.standard.files.mouse_nav, !before);
     }
 
     #[cfg(feature = "video")]
     #[test]
     fn toggle_hardware_decode_flips_the_flag() {
         let mut app = empty_app();
-        let before = app.shared.config.hardware_decode;
+        let before = app.shared.config.standard.video.hardware_decode;
         let _ = update(
             &mut app.window,
             &mut app.shared,
             Message::ToggleHardwareDecode,
         );
-        assert_eq!(app.shared.config.hardware_decode, !before);
+        assert_eq!(app.shared.config.standard.video.hardware_decode, !before);
     }
 
     #[test]
@@ -264,19 +267,19 @@ mod tests {
             Message::SetPrefetchDepth(0),
         );
         // Zero is a real choice: it turns prefetch off entirely.
-        assert_eq!(app.shared.config.prefetch_depth, 0);
+        assert_eq!(app.shared.config.standard.browsing.prefetch_depth, 0);
         let _ = update(
             &mut app.window,
             &mut app.shared,
             Message::SetPrefetchDepth(99),
         );
-        assert_eq!(app.shared.config.prefetch_depth, 10);
+        assert_eq!(app.shared.config.standard.browsing.prefetch_depth, 10);
         let _ = update(
             &mut app.window,
             &mut app.shared,
             Message::SetPrefetchDepth(4),
         );
-        assert_eq!(app.shared.config.prefetch_depth, 4);
+        assert_eq!(app.shared.config.standard.browsing.prefetch_depth, 4);
     }
 
     #[test]
