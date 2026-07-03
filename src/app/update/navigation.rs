@@ -598,13 +598,6 @@ pub(crate) fn complete_navigation(
     // Everything else drops its lease, so the store demotes or evicts it.
     let pinned = viewer.pinned_paths(depth);
     viewer.cache.retain(|p, _| pinned.contains(p));
-    // The shared thumbnail budget is bounded by this window's pinned set (others
-    // re-thumbnail on demand). Pin by the shared key, not the per-window path.
-    let pinned_thumbs: std::collections::HashSet<PathBuf> = pinned
-        .iter()
-        .map(|p| thumb_key(&viewer.source, p))
-        .collect();
-    shared.thumbs.evict_over_budget(&pinned_thumbs);
 
     if show_filmstrip {
         // Scroll only enough to keep the cursor on screen. Warm visible thumbs.
@@ -622,6 +615,28 @@ pub(crate) fn complete_navigation(
             ));
         }
     }
+
+    // The shared thumbnail cache enforces its byte budget on insert, sparing
+    // pins. Re-pin this window's prefetch window plus the visible strip, so
+    // the background walk never evicts thumbs still on screen (other windows
+    // re-thumbnail on demand). Pin by the shared key, not the per-window path.
+    let mut pinned_thumbs: std::collections::HashSet<PathBuf> = pinned
+        .iter()
+        .map(|p| thumb_key(&viewer.source, p))
+        .collect();
+    if show_filmstrip {
+        let visible = crate::components::filmstrip::visible_range(
+            viewer.filmstrip_scroll_x,
+            window_w,
+            viewer.nav.len(),
+        );
+        pinned_thumbs.extend(
+            viewer.nav.files()[visible]
+                .iter()
+                .map(|p| thumb_key(&viewer.source, p)),
+        );
+    }
+    shared.thumbs.set_pinned(pinned_thumbs);
 
     // Re-aim the cursor fan. Thumbnail before prefetch: the thumbnailer skips
     // files already being full-loaded, so prefetch-first leaves no blur.

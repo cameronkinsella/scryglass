@@ -2,10 +2,12 @@
 //!
 //! The app uses it for the thumbnail cache shared across windows. The cache is
 //! generic over the stored value so the eviction logic stays pure and testable.
-//! Entries inside the prefetch window are pinned by the caller and never
-//! evicted. Eviction only reclaims images the user has scrolled away from.
+//! The budget is enforced on every insert, so a background thumbnailer walking
+//! a whole directory can never grow the cache unbounded. Paths in the pinned
+//! set (the caller's working set, refreshed on navigation) are never evicted.
+//! Eviction only reclaims images the user has scrolled away from.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 struct Entry<T> {
@@ -16,6 +18,12 @@ struct Entry<T> {
 
 pub struct ImageCache<T> {
     entries: HashMap<PathBuf, Entry<T>>,
+    /// Eviction order: insertion clock to path, oldest first. Clocks are
+    /// unique, so this doubles as the LRU queue and keeps eviction at
+    /// O(victims log n) instead of a full map scan per victim.
+    order: BTreeMap<u64, PathBuf>,
+    /// Paths that never evict, replaced wholesale via [`Self::set_pinned`].
+    pinned: HashSet<PathBuf>,
     clock: u64,
     used_bytes: usize,
     budget: usize,
@@ -25,6 +33,8 @@ impl<T> ImageCache<T> {
     pub fn new(budget_bytes: usize) -> Self {
         Self {
             entries: HashMap::new(),
+            order: BTreeMap::new(),
+            pinned: HashSet::new(),
             clock: 0,
             used_bytes: 0,
             budget: budget_bytes,
@@ -54,13 +64,16 @@ impl<T> ImageCache<T> {
     /// Remove an entry (file deleted or renamed), returning its value.
     pub fn remove(&mut self, path: &Path) -> Option<T> {
         let entry = self.entries.remove(path)?;
+        self.order.remove(&entry.last_used);
         self.used_bytes = self.used_bytes.saturating_sub(entry.bytes);
         Some(entry.value)
     }
 
-    /// Insert (or replace) a value costing `bytes`.
+    /// Insert (or replace) a value costing `bytes`, then evict
+    /// least-recently-used unpinned entries until the budget is met.
     pub fn insert(&mut self, path: PathBuf, value: T, bytes: usize) {
         self.clock += 1;
+        self.order.insert(self.clock, path.clone());
         if let Some(old) = self.entries.insert(
             path,
             Entry {
@@ -69,27 +82,44 @@ impl<T> ImageCache<T> {
                 last_used: self.clock,
             },
         ) {
+            self.order.remove(&old.last_used);
             self.used_bytes -= old.bytes;
         }
         self.used_bytes += bytes;
+        self.enforce_budget();
     }
 
-    /// Evict least-recently-used entries until the budget is met, skipping
-    /// pinned paths. If everything over budget is pinned, nothing happens and
-    /// the working set always stays resident.
-    pub fn evict_over_budget(&mut self, pinned: &HashSet<PathBuf>) {
-        while self.used_bytes > self.budget {
-            let victim = self
-                .entries
-                .iter()
-                .filter(|(path, _)| !pinned.contains(*path))
-                .min_by_key(|(_, entry)| entry.last_used)
-                .map(|(path, _)| path.clone());
+    /// Replace the pinned set (the paths that must survive eviction: the
+    /// on-screen working set) and reclaim over-budget entries right away.
+    pub fn set_pinned(&mut self, pinned: HashSet<PathBuf>) {
+        self.pinned = pinned;
+        self.enforce_budget();
+    }
 
-            let Some(victim) = victim else {
-                return;
+    /// Evict least-recently-used unpinned entries until the budget is met.
+    /// If everything over budget is pinned, nothing happens and the working
+    /// set always stays resident.
+    fn enforce_budget(&mut self) {
+        if self.used_bytes <= self.budget {
+            return;
+        }
+        let mut victims = Vec::new();
+        let mut projected = self.used_bytes;
+        for (clock, path) in &self.order {
+            if projected <= self.budget {
+                break;
+            }
+            if self.pinned.contains(path) {
+                continue;
+            }
+            projected -= self.entries[path].bytes;
+            victims.push(*clock);
+        }
+        for clock in victims {
+            let Some(path) = self.order.remove(&clock) else {
+                continue;
             };
-            if let Some(entry) = self.entries.remove(&victim) {
+            if let Some(entry) = self.entries.remove(&path) {
                 self.used_bytes -= entry.bytes;
             }
         }
@@ -132,15 +162,41 @@ mod tests {
     }
 
     #[test]
-    fn evicts_the_oldest_first() {
+    fn insert_past_budget_evicts_the_oldest_first() {
         let mut cache: ImageCache<u8> = ImageCache::new(100);
         cache.insert("a.png".into(), 1, 40);
         cache.insert("b.png".into(), 2, 40);
         cache.insert("c.png".into(), 3, 40); // 120 > 100
 
-        cache.evict_over_budget(&pins(&[]));
+        // The budget is enforced by the insert itself, no separate sweep.
         // Recency is by insertion, so the oldest entry is dropped first.
         assert!(!cache.contains(Path::new("a.png")));
+        assert!(cache.contains(Path::new("b.png")));
+        assert!(cache.contains(Path::new("c.png")));
+        assert_eq!(cache.used_bytes(), 80);
+    }
+
+    #[test]
+    fn replacing_an_entry_refreshes_its_recency() {
+        let mut cache: ImageCache<u8> = ImageCache::new(100);
+        cache.insert("a.png".into(), 1, 40);
+        cache.insert("b.png".into(), 2, 40);
+        cache.insert("a.png".into(), 3, 40);
+        // "b.png" is now the oldest, so it goes first.
+        cache.insert("c.png".into(), 4, 40);
+        assert!(cache.contains(Path::new("a.png")));
+        assert!(!cache.contains(Path::new("b.png")));
+        assert!(cache.contains(Path::new("c.png")));
+    }
+
+    #[test]
+    fn removed_entries_leave_no_stale_eviction_order() {
+        let mut cache: ImageCache<u8> = ImageCache::new(80);
+        cache.insert("a.png".into(), 1, 40);
+        cache.insert("b.png".into(), 2, 40);
+        cache.remove(Path::new("a.png"));
+        // Room for one more without touching "b.png".
+        cache.insert("c.png".into(), 3, 40);
         assert!(cache.contains(Path::new("b.png")));
         assert!(cache.contains(Path::new("c.png")));
         assert_eq!(cache.used_bytes(), 80);
@@ -150,21 +206,48 @@ mod tests {
     fn pinned_entries_survive_eviction() {
         let mut cache: ImageCache<u8> = ImageCache::new(50);
         cache.insert("old.png".into(), 1, 40);
+        cache.set_pinned(pins(&["old.png", "new.png"]));
         cache.insert("new.png".into(), 2, 40);
-
-        cache.evict_over_budget(&pins(&["old.png", "new.png"]));
         assert_eq!(cache.len(), 2, "working set must stay resident");
 
-        cache.evict_over_budget(&pins(&["new.png"]));
+        // Unpinning evicts over-budget entries right away, oldest first.
+        cache.set_pinned(pins(&["new.png"]));
         assert!(!cache.contains(Path::new("old.png")));
         assert!(cache.contains(Path::new("new.png")));
+    }
+
+    #[test]
+    fn an_unpinned_insert_evicts_itself_when_pins_fill_the_budget() {
+        let mut cache: ImageCache<u8> = ImageCache::new(50);
+        cache.insert("pinned.png".into(), 1, 40);
+        cache.set_pinned(pins(&["pinned.png"]));
+        cache.insert("extra.png".into(), 2, 40);
+        // Nothing older is evictable, so the newcomer itself goes.
+        assert!(cache.contains(Path::new("pinned.png")));
+        assert!(!cache.contains(Path::new("extra.png")));
+        assert_eq!(cache.used_bytes(), 40);
+    }
+
+    #[test]
+    fn eviction_skips_pinned_and_takes_the_next_oldest() {
+        let mut cache: ImageCache<u8> = ImageCache::new(120);
+        cache.insert("a.png".into(), 1, 40);
+        cache.insert("b.png".into(), 2, 40);
+        cache.insert("c.png".into(), 3, 40);
+        cache.set_pinned(pins(&["a.png"]));
+        cache.insert("d.png".into(), 4, 40); // 160 > 120
+        // "a.png" is oldest but pinned; "b.png" is the next oldest.
+        assert!(cache.contains(Path::new("a.png")));
+        assert!(!cache.contains(Path::new("b.png")));
+        assert!(cache.contains(Path::new("c.png")));
+        assert!(cache.contains(Path::new("d.png")));
     }
 
     #[test]
     fn under_budget_evicts_nothing() {
         let mut cache: ImageCache<u8> = ImageCache::new(100);
         cache.insert("a.png".into(), 1, 40);
-        cache.evict_over_budget(&pins(&[]));
+        cache.set_pinned(pins(&[]));
         assert_eq!(cache.len(), 1);
     }
 }
