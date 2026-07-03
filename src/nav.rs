@@ -174,48 +174,70 @@ pub struct FileMeta {
     pub size: u64,
 }
 
-/// Compare file names the way the platform's file manager does:
+/// Precomputed sort key for a file name (decorate-sort-undecorate), built
+/// once per entry so comparisons allocate nothing: a NUL-terminated UTF-16
+/// buffer for `StrCmpLogicalW` on Windows, lossy UTF-8 elsewhere.
+#[cfg(windows)]
+type NameKey = Vec<u16>;
+#[cfg(not(windows))]
+type NameKey = String;
+
+#[cfg(windows)]
+fn name_key(name: &std::ffi::OsStr) -> NameKey {
+    use std::os::windows::ffi::OsStrExt;
+    name.encode_wide().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(not(windows))]
+fn name_key(name: &std::ffi::OsStr) -> NameKey {
+    name.to_string_lossy().into_owned()
+}
+
+/// Compare precomputed name keys the way the platform's file manager does:
 /// StrCmpLogicalW on Windows (Explorer's ordering), a natural
 /// case-insensitive compare elsewhere.
 #[cfg(windows)]
-pub fn name_cmp(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> std::cmp::Ordering {
-    use std::os::windows::ffi::OsStrExt;
-    let a_wide: Vec<u16> = a.encode_wide().chain(std::iter::once(0)).collect();
-    let b_wide: Vec<u16> = b.encode_wide().chain(std::iter::once(0)).collect();
-    let order =
-        unsafe { windows_sys::Win32::UI::Shell::StrCmpLogicalW(a_wide.as_ptr(), b_wide.as_ptr()) };
+fn name_key_cmp(a: &NameKey, b: &NameKey) -> std::cmp::Ordering {
+    let order = unsafe { windows_sys::Win32::UI::Shell::StrCmpLogicalW(a.as_ptr(), b.as_ptr()) };
     order.cmp(&0)
 }
 
 #[cfg(not(windows))]
+fn name_key_cmp(a: &NameKey, b: &NameKey) -> std::cmp::Ordering {
+    natord::compare_ignore_case(a, b)
+}
+
+/// One-off platform-native file name comparison. Sorts should decorate with
+/// [`name_key`] instead of paying the key encoding per comparison.
 pub fn name_cmp(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> std::cmp::Ordering {
-    natord::compare_ignore_case(&a.to_string_lossy(), &b.to_string_lossy())
+    name_key_cmp(&name_key(a), &name_key(b))
 }
 
 /// Order files by the configured key. Ties (and missing metadata) fall
 /// back to name order, so results are always deterministic.
-pub fn sort_paths(mut entries: Vec<FileMeta>, key: SortKey, descending: bool) -> Vec<PathBuf> {
-    let by_name = |a: &FileMeta, b: &FileMeta| {
-        name_cmp(
-            a.path.file_name().unwrap_or_default(),
-            b.path.file_name().unwrap_or_default(),
-        )
-    };
+pub fn sort_paths(entries: Vec<FileMeta>, key: SortKey, descending: bool) -> Vec<PathBuf> {
+    let mut decorated: Vec<(NameKey, FileMeta)> = entries
+        .into_iter()
+        .map(|e| (name_key(e.path.file_name().unwrap_or_default()), e))
+        .collect();
 
-    entries.sort_by(|a, b| match key {
-        SortKey::Name => by_name(a, b),
-        SortKey::DateModified => a.modified.cmp(&b.modified).then_with(|| by_name(a, b)),
-        SortKey::Size => a.size.cmp(&b.size).then_with(|| by_name(a, b)),
+    decorated.sort_by(|(na, a), (nb, b)| match key {
+        SortKey::Name => name_key_cmp(na, nb),
+        SortKey::DateModified => a
+            .modified
+            .cmp(&b.modified)
+            .then_with(|| name_key_cmp(na, nb)),
+        SortKey::Size => a.size.cmp(&b.size).then_with(|| name_key_cmp(na, nb)),
     });
     if descending {
-        entries.reverse();
+        decorated.reverse();
     }
-    entries.into_iter().map(|e| e.path).collect()
+    decorated.into_iter().map(|(_, e)| e.path).collect()
 }
 
 /// Scan `dir` for files with supported image extensions, returning a sorted list.
 pub fn scan_directory(dir: &Path) -> Result<Vec<PathBuf>, NavError> {
-    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)?
+    let mut files: Vec<(NameKey, PathBuf)> = std::fs::read_dir(dir)?
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
         .filter(|path| {
@@ -223,17 +245,13 @@ pub fn scan_directory(dir: &Path) -> Result<Vec<PathBuf>, NavError> {
                 .and_then(|ext| ext.to_str())
                 .is_some_and(AppConfig::is_supported_extension)
         })
+        .map(|path| (name_key(path.file_name().unwrap_or_default()), path))
         .collect();
 
     // Same ordering as the platform's file manager.
-    files.sort_by(|a, b| {
-        name_cmp(
-            a.file_name().unwrap_or_default(),
-            b.file_name().unwrap_or_default(),
-        )
-    });
+    files.sort_by(|(a, _), (b, _)| name_key_cmp(a, b));
 
-    Ok(files)
+    Ok(files.into_iter().map(|(_, path)| path).collect())
 }
 
 #[cfg(test)]
