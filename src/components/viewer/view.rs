@@ -270,7 +270,24 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
                 viewer.manual_zoom,
                 viewer.video.session.as_ref().is_some_and(|s| s.playing),
             ),
-            _ => ui::image_display::empty_viewport(),
+            // No frame yet, or one dropped on release: the thumbnail blur
+            // stands in, exactly like a still or animation without a texture.
+            _ => match viewer.displayed_path.as_deref().and_then(|p| {
+                shared
+                    .thumbs
+                    .peek(&crate::media::pipeline::thumb_key(&viewer.source, p))
+            }) {
+                Some(thumb) => ui::image_display::image_display(
+                    &thumb.handle,
+                    thumb.size,
+                    thumb.original_size,
+                    viewer.zoom,
+                    viewer.pan,
+                    (win.viewport_size.width, win.viewport_size.height),
+                    false,
+                ),
+                None => ui::image_display::empty_viewport(),
+            },
         },
         DisplayedImage::Error { message } => ui::image_display::error_viewport(message),
     };
