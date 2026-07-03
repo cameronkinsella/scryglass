@@ -15,6 +15,23 @@ use std::time::Duration;
 
 use super::{MediaError, THUMB_DIM, ThumbData};
 
+/// Hard ceiling on a declared animation canvas: 512 MB of RGBA. Stills are
+/// capped by the decode RAM budget, but animations bypass it, so an absurd
+/// header size must be rejected before the canvas allocates.
+const MAX_CANVAS_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Reject declared canvas dimensions whose RGBA size exceeds
+/// [`MAX_CANVAS_BYTES`]. Math in u64: 65535x65535x4 wraps u32.
+fn validate_canvas(width: u32, height: u32) -> Result<(), MediaError> {
+    let bytes = u64::from(width) * u64::from(height) * 4;
+    if bytes > MAX_CANVAS_BYTES {
+        return Err(MediaError::Decode(format!(
+            "animation canvas {width}x{height} is implausibly large"
+        )));
+    }
+    Ok(())
+}
+
 /// A fully decoded animation: all frames with their raw sub-rect data. Deliberately
 /// not `Clone`: the decoded frames are heavy and always shared by `Arc`, never deep
 /// copied, so dropping `Clone` makes an accidental duplicate a compile error and
@@ -57,6 +74,7 @@ pub fn decode_gif_bytes(bytes: &[u8]) -> Result<AnimatedImage, MediaError> {
         .map_err(|e| MediaError::Decode(e.to_string()))?;
     let width = decoder.width() as u32;
     let height = decoder.height() as u32;
+    validate_canvas(width, height)?;
 
     let mut frames = Vec::new();
     while let Some(frame) = decoder
@@ -110,6 +128,7 @@ pub fn from_image_frames<'a>(
     if frames.is_empty() {
         return Err(MediaError::Decode("animation contains no frames".into()));
     }
+    validate_canvas(width, height)?;
     Ok(finish_animation(width, height, frames))
 }
 
@@ -173,7 +192,10 @@ pub struct FrameCanvas {
 
 impl FrameCanvas {
     pub fn new(width: u32, height: u32) -> Self {
-        let size = (width * height * 4) as usize;
+        // u64 math with a checked narrowing: an absurd size fails loudly
+        // instead of wrapping into a small allocation.
+        let size = usize::try_from(u64::from(width) * u64::from(height) * 4)
+            .expect("canvas size exceeds usize");
         Self {
             width,
             height,
@@ -339,5 +361,23 @@ mod tests {
     #[test]
     fn garbage_gif_is_an_error() {
         assert!(decode_gif_bytes(b"GIF8 not really").is_err());
+    }
+
+    #[test]
+    fn oversized_gif_canvas_is_rejected() {
+        // Logical screen claims 65535x65535 (17 GB of RGBA, wraps u32
+        // math) while the only frame is 1x1.
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = gif::Encoder::new(&mut bytes, u16::MAX, u16::MAX, &[]).unwrap();
+            let mut pixels = vec![0, 0, 0, 255];
+            encoder
+                .write_frame(&gif::Frame::from_rgba(1, 1, &mut pixels))
+                .unwrap();
+        }
+        assert!(matches!(
+            decode_gif_bytes(&bytes),
+            Err(MediaError::Decode(_))
+        ));
     }
 }
