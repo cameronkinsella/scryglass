@@ -15,7 +15,7 @@ pub enum Message {
     ToggleFooter,
     ToggleToolbar,
     ToggleTheme,
-    ToggleCrispPixels,
+    ToggleNearestNeighbor,
     /// No-op: swallows a click on a dropdown's surface so it doesn't dismiss.
     KeepMenuOpen,
 }
@@ -46,7 +46,7 @@ pub(crate) fn dropdown<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, A
         shared.config.zoom_mode,
         layout_vis,
         shared.config.theme == ThemeChoice::Light,
-        shared.config.crisp_pixels,
+        shared.config.nearest_neighbor_zoom,
         shared.config.sort_key,
         shared.config.sort_desc,
     ) {
@@ -166,8 +166,8 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             };
             save_config(win, shared)
         }
-        Message::ToggleCrispPixels => {
-            shared.config.crisp_pixels = !shared.config.crisp_pixels;
+        Message::ToggleNearestNeighbor => {
+            shared.config.nearest_neighbor_zoom = !shared.config.nearest_neighbor_zoom;
             save_config(win, shared)
         }
         Message::KeepMenuOpen => Task::none(),
@@ -259,11 +259,15 @@ mod tests {
     }
 
     #[test]
-    fn toggle_crisp_pixels_flips_config() {
+    fn toggle_nearest_neighbor_flips_config() {
         let mut app = empty_app();
-        let before = app.shared.config.crisp_pixels;
-        let _ = update(&mut app.window, &mut app.shared, Message::ToggleCrispPixels);
-        assert_eq!(app.shared.config.crisp_pixels, !before);
+        let before = app.shared.config.nearest_neighbor_zoom;
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::ToggleNearestNeighbor,
+        );
+        assert_eq!(app.shared.config.nearest_neighbor_zoom, !before);
     }
 
     #[test]

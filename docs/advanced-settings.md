@@ -28,7 +28,7 @@ Durations are written as readable strings: `"15s"`, `"200ms"`, `"1m30s"`, or
 | `zoom_mode` | enum | `"Auto"` | How zoom is chosen on open/navigate (`Auto`, `LockZoomRatio`, `ScaleToWidth`, `ScaleToHeight`, `ScaleToFit`, `ScaleToFill`). |
 | `sort_key` | `"Name"` \| `"DateModified"` \| `"Size"` | `"Name"` | File ordering. |
 | `sort_desc` | bool | `false` | Reverse the sort order. |
-| `crisp_pixels` | bool | `false` | Nearest-neighbor sampling above 100% zoom (crisp pixel art). |
+| `nearest_neighbor_zoom` | bool | `false` | Nearest-neighbor sampling above 100% zoom, so pixel art stays crisp. |
 | `downscale_kernel` | enum | `"mitchell"` | Kernel used to shrink stills and animations to fit (`bilinear`, `mitchell`, `catmull-rom`, `lanczos3`). All fix the aliasing a plain bilinear tap leaves when shrinking past ~2x. Sharper kernels (`catmull-rom`, `lanczos3`) resolve more detail but can ring on text and hard edges. |
 | `show_checkerboard` | bool | `false` | Draw a checkerboard behind images to reveal transparency. |
 

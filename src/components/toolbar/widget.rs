@@ -79,7 +79,7 @@ pub fn dropdown<'a>(
     current_zoom_mode: ZoomMode,
     layout_vis: LayoutVisibility,
     light_theme: bool,
-    crisp_pixels: bool,
+    nearest_neighbor: bool,
     sort_key: SortKey,
     sort_desc: bool,
 ) -> Option<Element<'a, Message>> {
@@ -157,9 +157,9 @@ pub fn dropdown<'a>(
             items.push(rule::horizontal(1).into());
             items.push(
                 checkable(
-                    "Crisp pixels when zoomed",
-                    crisp_pixels,
-                    Message::Toolbar(ToolbarMessage::ToggleCrispPixels),
+                    "Nearest-neighbor zoom",
+                    nearest_neighbor,
+                    Message::Toolbar(ToolbarMessage::ToggleNearestNeighbor),
                 )
                 .into(),
             );
@@ -323,9 +323,9 @@ mod tests {
     }
 
     #[test]
-    fn zoom_dropdown_offers_crisp_pixels() {
+    fn zoom_dropdown_offers_nearest_neighbor() {
         let mut ui = simulator(open(OpenMenu::Zoom));
-        assert!(ui.find("Crisp pixels when zoomed").is_ok());
+        assert!(ui.find("Nearest-neighbor zoom").is_ok());
     }
 
     #[test]

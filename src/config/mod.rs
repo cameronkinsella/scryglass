@@ -53,7 +53,7 @@ pub struct AppConfig {
     /// Reverse the sort order.
     pub sort_desc: bool,
     /// Nearest-neighbor sampling past 100% zoom: crisp pixels for pixel art.
-    pub crisp_pixels: bool,
+    pub nearest_neighbor_zoom: bool,
     /// Kernel used to shrink stills and animations to fit.
     pub downscale_kernel: DownscaleKernel,
     /// Persist thumbnails on disk between sessions (warm folders open
@@ -114,7 +114,7 @@ impl Default for AppConfig {
             zoom_mode: ZoomMode::default(),
             sort_key: SortKey::default(),
             sort_desc: false,
-            crisp_pixels: false,
+            nearest_neighbor_zoom: false,
             downscale_kernel: DownscaleKernel::default(),
             disk_thumbs: true,
             read_only: false,
@@ -361,7 +361,7 @@ mod tests {
             zoom_mode: ZoomMode::ScaleToFit,
             sort_key: SortKey::DateModified,
             sort_desc: true,
-            crisp_pixels: true,
+            nearest_neighbor_zoom: true,
             downscale_kernel: DownscaleKernel::Lanczos3,
             disk_thumbs: false,
             read_only: true,
