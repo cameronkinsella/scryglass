@@ -58,6 +58,13 @@ use crate::app::{Message as AppMessage, Shared, Window, recalc_viewport};
 pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) -> Task<AppMessage> {
     match message {
         Message::Resized(size) => {
+            // A Windows minimize reports a zero-size resize. Acting on it would
+            // clamp the pan and shift the filmstrip against a viewport that
+            // does not exist, and the restore never undoes either. The window
+            // keeps its real size and the restore's resize carries on from it.
+            if size.width <= 0.0 || size.height <= 0.0 {
+                return Task::none();
+            }
             win.window_size = size;
             recalc_viewport(win, shared);
             let zoom_mode = shared.config.zoom_mode;
@@ -329,6 +336,29 @@ mod tests {
             Message::Resized(Size::new(1024.0, 768.0)),
         );
         assert_eq!(app.window.window_size, Size::new(1024.0, 768.0));
+    }
+
+    #[test]
+    fn the_zero_size_resize_of_a_minimize_is_ignored() {
+        let mut app = crate::app::test_support::viewing_app(&["a.png", "b.png"], 0);
+        {
+            let v = app.viewer_mut().unwrap();
+            v.filmstrip_scroll_x = 120.0;
+            v.filmstrip_width = 800.0;
+            v.pan = (40.0, 10.0);
+            v.manual_zoom = true;
+        }
+        let before = app.window.window_size;
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::Resized(Size::ZERO),
+        );
+        assert_eq!(app.window.window_size, before);
+        let v = app.viewer().unwrap();
+        assert_eq!(v.filmstrip_scroll_x, 120.0);
+        assert_eq!(v.filmstrip_width, 800.0);
+        assert_eq!(v.pan, (40.0, 10.0));
     }
 
     #[test]
