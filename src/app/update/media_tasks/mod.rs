@@ -18,7 +18,7 @@ use iced::Size;
 use iced::widget::image::Handle;
 
 use crate::app::state::{DisplayedImage, Thumb, Viewer};
-use crate::app::viewer_math::compute_zoom;
+use crate::app::viewer_math::{auto_zoom, compute_zoom};
 use crate::config::{PrefetchVram, ZoomMode};
 use crate::media::cache::ImageCache;
 use crate::media::pipeline::{Lane, thumb_key};
@@ -44,12 +44,11 @@ pub(crate) fn view_target(original: (u32, u32), zoom: f32, scale_factor: f32) ->
     )
 }
 
-/// The fit zoom for an image of `original` size in `view`: the uniform scale that
-/// makes it fit on both axes, never upscaled. This is what an image shows at when
-/// navigated to fresh, so prefetch and restored textures target it.
+/// The fit zoom for an image of `original` size in `view`. Delegates to
+/// [`auto_zoom`], the zoom an image shows at when navigated to fresh, so
+/// prefetch and restored textures bake to exactly what the display computes.
 fn fit_zoom(original: (u32, u32), view: Size) -> f32 {
-    let (w, h) = (original.0.max(1) as f32, original.1.max(1) as f32);
-    (view.width / w).min(view.height / h).min(1.0)
+    auto_zoom(original.0, original.1, view)
 }
 
 /// Put a loaded still on screen, computing zoom from its true dimensions. The
