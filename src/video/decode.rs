@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, OnceLock, mpsc};
 use std::time::Duration;
 
 use ffmpeg_next as ffmpeg;
@@ -39,6 +39,7 @@ pub(crate) fn spawn_decode_thread(
     duration_us: Arc<AtomicU64>,
     frame_us: Arc<AtomicU64>,
     video_done: Arc<AtomicBool>,
+    error: Arc<OnceLock<String>>,
     pcm_tx: mpsc::SyncSender<f32>,
     hardware: bool,
     looping: Arc<AtomicBool>,
@@ -48,7 +49,10 @@ pub(crate) fn spawn_decode_thread(
     std::thread::spawn(move || {
         // The video decode thread marks `video_done` after its flush. A
         // setup error here must mark it too or the UI waits forever.
-        if run_pipeline(
+        // `run_pipeline` only errors during setup (open, stream lookup,
+        // codec init), so an error means no frame will ever arrive: record
+        // it (before `video_done`) for the session to surface as a failure.
+        if let Err(err) = run_pipeline(
             &path,
             start,
             &stop,
@@ -59,9 +63,8 @@ pub(crate) fn spawn_decode_thread(
             pcm_tx,
             hardware,
             &looping,
-        )
-        .is_err()
-        {
+        ) {
+            let _ = error.set(err.to_string());
             video_done.store(true, Ordering::Relaxed);
         }
     });

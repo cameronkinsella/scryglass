@@ -110,11 +110,34 @@ pub(crate) fn tick(win: &mut Window, shared: &mut Shared) -> Task<Message> {
         return Task::none();
     };
 
+    // A decode setup failure (unopenable file, no video stream, codec init)
+    // never delivers a frame. Surface it the way a failed still is surfaced
+    // and tear the session down. Leaving it would spin the loading spinner
+    // forever, and reopening it under looping would respawn the decode
+    // threads and audio sink every tick.
+    if let Some(err) = session.failed() {
+        let path = viewer.nav.current().to_path_buf();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let message = format!("{name}\n\n{err}");
+        viewer.failed_loads.insert(path.clone(), message.clone());
+        viewer.displayed = DisplayedImage::Error { message };
+        viewer.displayed_path = Some(path);
+        viewer.pending_since = None;
+        viewer.video.reset();
+        return Task::none();
+    }
+
     let Some(frame) = session.poll() else {
         // Only a session with nothing left to show is finished, since
         // queued frames still drain through poll() above.
         if session.finished() {
-            if session.looping() {
+            // Only a session that showed a frame may reopen. A zero-frame
+            // session (a failure the error slot missed) would respawn its
+            // decode pipeline every tick.
+            if session.looping() && session.showed_frame() {
                 viewer.video.session = Some(session.reopen_at(std::time::Duration::ZERO));
             } else if session.playing {
                 session.pause();
@@ -151,6 +174,9 @@ pub(crate) fn extracted(
     let video_muted = shared.config.standard.video.muted;
     let video_loop = shared.config.standard.video.looping;
     let hardware = shared.config.standard.video.hardware_decode;
+    let minimized = win.minimized;
+    let focused = win.focused;
+    let pause_minimized = shared.config.advanced.resource.minimized.video.pause;
     let Some(viewer) = win.viewer_mut() else {
         return Task::none();
     };
@@ -185,10 +211,34 @@ pub(crate) fn extracted(
                 hardware,
             );
             session.temp = Some(guard.clone());
+            // Extraction can outlast a minimize. The minimize pause ran while
+            // no session existed, so apply it to the fresh session here, the
+            // way the `Minimized` handler would have.
+            let pause_now = minimized && pause_minimized;
+            if pause_now {
+                session.pause();
+            }
             viewer.video.session = Some(session);
             // The entry has no real path of its own, so grab its thumbnail from
             // the file extracted for playback (none otherwise).
-            fire_archive_video_thumb(&shared.pipeline, &shared.thumbs, viewer, entry, temp, guard)
+            let thumb = fire_archive_video_thumb(
+                &shared.pipeline,
+                &shared.thumbs,
+                viewer,
+                entry,
+                temp,
+                guard,
+            );
+            if pause_now {
+                win.video_resumes_on_restore = true;
+            }
+            // A backgrounded window's decay armed while no session existed, so
+            // it classified the window as a still and never armed the video
+            // stage. Re-arm so the session release schedule governs it.
+            if minimized || !focused {
+                return Task::batch([thumb, super::decay::restart_decay(win, shared)]);
+            }
+            thumb
         }
     }
 }
@@ -268,6 +318,29 @@ pub(crate) fn seek_by(win: &mut Window, _shared: &mut Shared, delta: f64) -> Tas
     Task::none()
 }
 
+/// How long the volume must rest before its config save fires. A slider drag
+/// or a held nudge key emits a step per event. Each step reaches the session
+/// at once, so only the settled value needs the fsync'd write.
+const VOLUME_SAVE_SETTLE: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// The latest volume change. A save armed under an older value no-ops, so a
+/// burst of steps coalesces into one write, like the window-state probe.
+static VOLUME_SAVE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Save the config once the volume rests, superseding any pending save.
+fn debounce_volume_save(shared: &Shared) -> Task<Message> {
+    use std::sync::atomic::Ordering;
+    let seq = VOLUME_SAVE_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+    let config = shared.config.clone();
+    Task::future(async move {
+        tokio::time::sleep(VOLUME_SAVE_SETTLE).await;
+        if VOLUME_SAVE_SEQ.load(Ordering::Relaxed) == seq {
+            config.save().await;
+        }
+    })
+    .discard()
+}
+
 pub(crate) fn set_volume(win: &mut Window, shared: &mut Shared, volume: f32) -> Task<Message> {
     shared.config.standard.video.volume = volume.clamp(0.0, 1.0);
     shared.config.standard.video.muted = false;
@@ -276,7 +349,7 @@ pub(crate) fn set_volume(win: &mut Window, shared: &mut Shared, volume: f32) -> 
     {
         session.set_volume(volume);
     }
-    save_config(win, shared)
+    debounce_volume_save(shared)
 }
 
 pub(crate) fn nudge_volume(win: &mut Window, shared: &mut Shared, delta: f32) -> Task<Message> {
@@ -317,4 +390,139 @@ pub(crate) fn toggle_loop(win: &mut Window, shared: &mut Shared) -> Task<Message
         .and_then(|v| v.video.session.as_ref())
         .is_some_and(|s| s.looping());
     save_config(win, shared)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::test_support::viewing_app;
+
+    #[test]
+    fn set_volume_applies_at_once_and_only_defers_the_save() {
+        let mut app = viewing_app(&["a.mp4"], 0);
+        let _ = set_volume(&mut app.window, &mut app.shared, 0.3);
+        // The session and the in-memory config take the value immediately.
+        // Only the disk write is debounced.
+        assert_eq!(app.shared.config.standard.video.volume, 0.3);
+        assert!(!app.shared.config.standard.video.muted);
+    }
+
+    #[test]
+    fn set_volume_clamps_into_range() {
+        let mut app = viewing_app(&["a.mp4"], 0);
+        let _ = set_volume(&mut app.window, &mut app.shared, 1.7);
+        assert_eq!(app.shared.config.standard.video.volume, 1.0);
+        let _ = set_volume(&mut app.window, &mut app.shared, -0.5);
+        assert_eq!(app.shared.config.standard.video.volume, 0.0);
+    }
+
+    // Stub sessions report finished with zero frames shown, standing in for
+    // a session whose decode setup failed without recording an error.
+    #[cfg(not(feature = "video"))]
+    #[test]
+    fn a_zero_frame_looping_session_never_reopens() {
+        let mut app = viewing_app(&["a.mp4"], 0);
+        let mut session = crate::video::VideoSession::open(
+            PathBuf::from("a.mp4"),
+            std::time::Duration::ZERO,
+            1.0,
+            false,
+            true,
+            false,
+        );
+        session.playing = true;
+        session.temp = Some(crate::video::TempFileGuard::new(
+            std::env::temp_dir().join("scry-video-flow-test.mp4"),
+        ));
+        app.viewer_mut().unwrap().video.session = Some(session);
+        let _ = tick(&mut app.window, &mut app.shared);
+        // A reopen would have replaced the session, dropping its temp guard
+        // (the stub reopen carries none). The zero-frame guard keeps it.
+        let v = app.viewer().unwrap();
+        assert!(v.video.session.as_ref().unwrap().temp.is_some());
+        assert!(!matches!(v.displayed, DisplayedImage::Error { .. }));
+    }
+
+    // Real decode threads: opening a file that does not exist must record a
+    // setup failure that tick surfaces as an error and never reopens.
+    #[cfg(feature = "video")]
+    #[test]
+    fn a_failed_open_shows_the_error_and_tears_the_session_down() {
+        let missing = std::env::temp_dir().join("scryglass-missing-video-test.mp4");
+        let _ = std::fs::remove_file(&missing);
+        let mut app = viewing_app(&[missing.to_str().unwrap()], 0);
+        app.shared.config.standard.video.looping = true;
+        let session = crate::video::VideoSession::open(
+            missing.clone(),
+            std::time::Duration::ZERO,
+            1.0,
+            true,
+            true,
+            false,
+        );
+        app.viewer_mut().unwrap().video.session = Some(session);
+        app.viewer_mut().unwrap().pending_since = Some(Instant::now());
+        // Wait for the decode thread to record the setup failure.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app
+            .viewer()
+            .unwrap()
+            .video
+            .session
+            .as_ref()
+            .unwrap()
+            .failed()
+            .is_none()
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "setup failure never reported"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let _ = tick(&mut app.window, &mut app.shared);
+        let v = app.viewer().unwrap();
+        // The session is gone (not reopened despite looping), the spinner is
+        // cleared, and the file shows an error like a broken still would.
+        assert!(v.video.session.is_none());
+        assert!(v.pending_since.is_none());
+        assert!(matches!(v.displayed, DisplayedImage::Error { .. }));
+        assert!(v.failed_loads.contains_key(missing.as_path()));
+    }
+
+    #[test]
+    fn extraction_landing_while_minimized_pauses_and_rearms_decay() {
+        let mut app = viewing_app(&["clip.mp4"], 0);
+        app.window.minimized = true;
+        app.window.focused = false;
+        app.shared.config.advanced.resource.minimized.video.pause = true;
+        let before = app.window.decay_generation;
+        let _ = extracted(
+            &mut app.window,
+            &mut app.shared,
+            PathBuf::from("clip.mp4"),
+            Ok(std::env::temp_dir().join("scry-extract-min-test.mp4")),
+        );
+        let v = app.viewer().unwrap();
+        assert!(v.video.session.as_ref().is_some_and(|s| !s.playing));
+        // The resume flag and a fresh decay generation mirror what the
+        // Minimized handler does for a session that predates the minimize.
+        assert!(app.window.video_resumes_on_restore);
+        assert_ne!(app.window.decay_generation, before);
+    }
+
+    #[test]
+    fn extraction_landing_focused_does_not_rearm_decay() {
+        let mut app = viewing_app(&["clip.mp4"], 0);
+        let before = app.window.decay_generation;
+        let _ = extracted(
+            &mut app.window,
+            &mut app.shared,
+            PathBuf::from("clip.mp4"),
+            Ok(std::env::temp_dir().join("scry-extract-fg-test.mp4")),
+        );
+        assert!(app.viewer().unwrap().video.session.is_some());
+        assert!(!app.window.video_resumes_on_restore);
+        assert_eq!(app.window.decay_generation, before);
+    }
 }

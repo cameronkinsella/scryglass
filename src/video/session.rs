@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use super::audio::{AudioCmd, spawn_audio_output};
@@ -79,6 +79,9 @@ pub struct VideoSession {
     /// stream is opened.
     frame_us: Arc<AtomicU64>,
     video_done: Arc<AtomicBool>,
+    /// The decode thread's setup failure, if one was recorded. A failed
+    /// session never delivers a frame.
+    error: Arc<OnceLock<String>>,
     stop: Arc<AtomicBool>,
     /// Seek offset this session started from.
     base: Duration,
@@ -146,6 +149,7 @@ impl VideoSession {
         let duration_us = Arc::new(AtomicU64::new(0));
         let frame_us = Arc::new(AtomicU64::new(0));
         let video_done = Arc::new(AtomicBool::new(false));
+        let error = Arc::new(OnceLock::new());
         let audio_clock_us = Arc::new(AtomicU64::new(0));
         let has_audio = Arc::new(AtomicBool::new(false));
         let video_ready = Arc::new(AtomicBool::new(false));
@@ -166,6 +170,7 @@ impl VideoSession {
             duration_us.clone(),
             frame_us.clone(),
             video_done.clone(),
+            error.clone(),
             pcm_tx,
             hardware,
             looping.clone(),
@@ -190,6 +195,7 @@ impl VideoSession {
             duration_us,
             frame_us,
             video_done,
+            error,
             stop,
             base: start,
             started: None,
@@ -382,6 +388,21 @@ impl VideoSession {
             }
         }
         due
+    }
+
+    /// The decode thread's setup error (unopenable file, no video stream,
+    /// codec init), if one was recorded. Such a session never delivers a
+    /// frame, so the caller should tear it down and show the error instead
+    /// of waiting on (or reopening) it.
+    pub fn failed(&self) -> Option<String> {
+        self.error.get().cloned()
+    }
+
+    /// Whether this session has put at least one frame on screen. Gates the
+    /// end-of-stream loop reopen: a session that produced zero frames would
+    /// respawn its decode threads and audio sink on every tick.
+    pub fn showed_frame(&self) -> bool {
+        self.first_frame_shown
     }
 
     /// Whether decoding finished and every frame has been shown.

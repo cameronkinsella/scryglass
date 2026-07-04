@@ -170,6 +170,14 @@ impl VideoSession {
         None
     }
 
+    pub fn failed(&self) -> Option<String> {
+        None
+    }
+
+    pub fn showed_frame(&self) -> bool {
+        false
+    }
+
     pub fn finished(&self) -> bool {
         true
     }
