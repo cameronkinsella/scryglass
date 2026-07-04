@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::pin::Pin;
 
 use iced::Task;
-use iced::widget::image::Handle;
 
 use crate::app::state::{Thumb, Viewer};
 use crate::app::{MediaMessage, Message};
@@ -82,11 +81,7 @@ pub(crate) fn fire_thumb(
         Message::Media(MediaMessage::ThumbLoaded {
             path: path.clone(),
             urgency,
-            result: result.map(|data| Thumb {
-                handle: Handle::from_rgba(data.width, data.height, data.pixels),
-                size: (data.width, data.height),
-                original_size: data.original_size,
-            }),
+            result: result.map(Thumb::from),
         })
     })
 }
@@ -124,11 +119,7 @@ pub(crate) fn fire_archive_video_thumb(
             Message::Media(MediaMessage::ThumbLoaded {
                 path: entry.clone(),
                 urgency: ThumbUrgency::Background,
-                result: result.map(|data| Thumb {
-                    handle: Handle::from_rgba(data.width, data.height, data.pixels),
-                    size: (data.width, data.height),
-                    original_size: data.original_size,
-                }),
+                result: result.map(Thumb::from),
             })
         },
     )

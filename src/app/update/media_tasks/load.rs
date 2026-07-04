@@ -178,11 +178,7 @@ fn run_job(
             };
             Task::perform(timed, |x| x).map(move |(result, decode_time)| match result {
                 Ok(DecodedMedia::Static(img)) => {
-                    let thumb = img.thumbnail.map(|t| Thumb {
-                        handle: Handle::from_rgba(t.width, t.height, t.pixels),
-                        size: (t.width, t.height),
-                        original_size: t.original_size,
-                    });
+                    let thumb = img.thumbnail.map(Thumb::from);
                     let handle = Handle::from_rgba(img.width, img.height, img.pixels);
                     Message::Media(MediaMessage::Decoded {
                         key: key.clone(),
@@ -198,11 +194,7 @@ fn run_job(
                 Ok(DecodedMedia::Animated(anim)) => {
                     // Frames allocate at display time. Only the thumb needs a
                     // handle here. The store forgets this key (it is not a still).
-                    let thumb = anim.thumbnail.as_ref().map(|t| Thumb {
-                        handle: Handle::from_rgba(t.width, t.height, t.pixels.clone()),
-                        size: (t.width, t.height),
-                        original_size: t.original_size,
-                    });
+                    let thumb = anim.thumbnail.clone().map(Thumb::from);
                     Message::Media(MediaMessage::AnimDecoded {
                         key: key.clone(),
                         path: path.clone(),

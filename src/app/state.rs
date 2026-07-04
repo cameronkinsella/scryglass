@@ -41,6 +41,17 @@ impl Thumb {
     }
 }
 
+impl From<crate::media::ThumbData> for Thumb {
+    /// Wrap decoded thumbnail bytes in a drawable handle.
+    fn from(data: crate::media::ThumbData) -> Self {
+        Self {
+            handle: Handle::from_rgba(data.width, data.height, data.pixels),
+            size: (data.width, data.height),
+            original_size: data.original_size,
+        }
+    }
+}
+
 /// What the image area is currently showing.
 #[derive(Default)]
 pub enum DisplayedImage {
@@ -537,6 +548,19 @@ mod tests {
             size: (1, 1),
             original_size: (1, 1),
         }
+    }
+
+    #[test]
+    fn a_thumb_carries_its_data_dimensions() {
+        let thumb = Thumb::from(crate::media::ThumbData {
+            width: 2,
+            height: 1,
+            pixels: vec![0u8; 8],
+            original_size: (200, 100),
+        });
+        assert_eq!(thumb.size, (2, 1));
+        assert_eq!(thumb.original_size, (200, 100));
+        assert_eq!(thumb.byte_cost(), 8);
     }
 
     #[test]
