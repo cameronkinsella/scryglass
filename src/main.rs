@@ -52,10 +52,10 @@ fn main() -> anyhow::Result<()> {
         .theme(app::theme)
         .subscription(app::subscription)
         // .settings() replaces the whole struct, so it must precede .font()
-        // (fonts accumulate inside settings). vsync picks the synced auto
-        // mode when `[startup]` present_mode is "auto". Any other value has
-        // already been handed to iced by apply_present_mode, which overrides
-        // this flag.
+        // (fonts accumulate inside settings). vsync picks the synced auto mode
+        // when `[advanced.startup]` present_mode is "auto". Any other value
+        // has already been handed to iced by apply_present_mode, which
+        // overrides this flag.
         .settings(iced::Settings {
             vsync: true,
             ..Default::default()
@@ -65,7 +65,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Hand iced the configured `[startup]` present mode through
+/// Hand iced the configured `[advanced.startup]` present mode through
 /// `ICED_PRESENT_MODE`, the only channel iced exposes for the explicit wgpu
 /// modes. A value already set in the environment wins, unvalidated, exactly
 /// as iced would read it. The config is re-read with error reporting in

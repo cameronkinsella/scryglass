@@ -3,9 +3,9 @@
 /// The explicit wgpu present modes the GPU driver offers, queried against an
 /// invisible throwaway window before iced boots. iced treats configuring a
 /// mode the driver lacks as fatal, and drivers differ (AMD's Windows Vulkan
-/// driver has no mailbox), so a `[startup]` mode that can be missing is
-/// verified here first. `None` means the probe failed and nothing can be
-/// assumed. The answer is cached against the graphics identity, so every
+/// driver has no mailbox), so an `[advanced.startup]` mode that can be
+/// missing is verified here first. `None` means the probe failed and nothing
+/// can be assumed. The answer is cached against the graphics identity, so every
 /// launch after the first is a file read.
 #[cfg(target_os = "windows")]
 pub fn supported_present_modes() -> Option<Vec<crate::config::PresentMode>> {
