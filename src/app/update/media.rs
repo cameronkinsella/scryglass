@@ -478,11 +478,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 // like a fresh open.
                 let offset =
                     filmstrip::open_offset(viewer.nav.cursor(), window_w, viewer.nav.len());
-                viewer.filmstrip_scroll_x = offset;
-                tasks.push(iced::widget::operation::scroll_to(
-                    filmstrip::filmstrip_id(window_id),
-                    iced::widget::scrollable::AbsoluteOffset { x: offset, y: 0.0 },
-                ));
+                tasks.push(filmstrip::scroll_strip(viewer, window_id, offset));
                 tasks.extend(fire_thumbnailer(
                     &pipeline,
                     &shared.thumbs,

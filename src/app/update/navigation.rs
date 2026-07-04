@@ -166,10 +166,10 @@ pub(crate) fn open_viewer(
             window_w,
             viewer.nav.len(),
         );
-        viewer.filmstrip_scroll_x = offset;
-        tasks.push(iced::widget::operation::scroll_to(
-            crate::components::filmstrip::filmstrip_id(window_id),
-            iced::widget::scrollable::AbsoluteOffset { x: offset, y: 0.0 },
+        tasks.push(crate::components::filmstrip::scroll_strip(
+            &mut viewer,
+            window_id,
+            offset,
         ));
     }
 
@@ -277,6 +277,26 @@ pub(crate) fn open_path(path: PathBuf) -> Task<Message> {
     )
 }
 
+/// The per-move viewer reset shared by `scrub_to` and `complete_navigation`:
+/// clear the pending move, stop any animation and video, drop the drag, and
+/// reset pan, zoom (unless locked), file size, and rotation. The cursor set,
+/// generation bump, cache prune, and exif clear differ between callers and stay
+/// inline.
+fn reset_for_move(viewer: &mut Viewer, zoom_mode: ZoomMode) {
+    viewer.pending_nav = None;
+    viewer.anim_player.stop();
+    viewer.video.reset();
+    viewer.drag = None;
+    // Reset pan on navigation. Zoom is preserved only in LockZoomRatio mode.
+    viewer.pan = (0.0, 0.0);
+    if zoom_mode != ZoomMode::LockZoomRatio {
+        viewer.manual_zoom = false;
+    }
+    viewer.current_file_size = None;
+    viewer.rotation = 0;
+    viewer.displayed_rotation = 0;
+}
+
 /// Move the cursor (one step or to an absolute index), then update the
 /// display from cache and fire loads. Never waits on anything.
 pub(crate) fn navigate(win: &mut Window, shared: &mut Shared, target: NavTarget) -> Task<Message> {
@@ -363,18 +383,10 @@ pub(crate) fn scrub_to(
     };
 
     viewer.nav.set_cursor(index);
-    viewer.pending_nav = None;
-    viewer.anim_player.stop();
-    viewer.drag = None;
-    viewer.pan = (0.0, 0.0);
-    if zoom_mode != ZoomMode::LockZoomRatio {
-        viewer.manual_zoom = false;
-    }
-    viewer.current_file_size = None;
+    reset_for_move(viewer, zoom_mode);
+    // Scrub clears exif eagerly; complete_navigation leaves it, relying on the
+    // view's path filter to hide the stale panel. Behavior preserved as-is.
     viewer.exif = None;
-    viewer.rotation = 0;
-    viewer.displayed_rotation = 0;
-    viewer.video.reset();
 
     let current = viewer.nav.current().to_path_buf();
     let key = ImageKey::new(&viewer.source, &current);
@@ -406,10 +418,8 @@ pub(crate) fn scrub_to(
             )
         };
         if offset != viewer.filmstrip_scroll_x {
-            viewer.filmstrip_scroll_x = offset;
-            tasks.push(iced::widget::operation::scroll_to(
-                crate::components::filmstrip::filmstrip_id(window_id),
-                iced::widget::scrollable::AbsoluteOffset { x: offset, y: 0.0 },
+            tasks.push(crate::components::filmstrip::scroll_strip(
+                viewer, window_id, offset,
             ));
         }
     }
@@ -478,7 +488,6 @@ pub(crate) fn complete_navigation(
     };
 
     viewer.nav.set_cursor(target_index);
-    viewer.pending_nav = None;
 
     if bump_generation {
         // Everything in flight for the old position is now stale, including
@@ -490,19 +499,7 @@ pub(crate) fn complete_navigation(
         viewer.in_flight_thumbs.clear();
     }
 
-    viewer.anim_player.stop();
-    viewer.video.reset();
-    viewer.drag = None;
-
-    // Reset pan on navigation. Zoom is preserved only in LockZoomRatio mode.
-    viewer.pan = (0.0, 0.0);
-    if zoom_mode != ZoomMode::LockZoomRatio {
-        viewer.manual_zoom = false;
-    }
-
-    viewer.current_file_size = None;
-    viewer.rotation = 0;
-    viewer.displayed_rotation = 0;
+    reset_for_move(viewer, zoom_mode);
 
     // The animation decode cache prunes by window, the image cache by
     // byte budget.
@@ -608,10 +605,8 @@ pub(crate) fn complete_navigation(
             viewer.nav.len(),
         );
         if offset != viewer.filmstrip_scroll_x {
-            viewer.filmstrip_scroll_x = offset;
-            tasks.push(iced::widget::operation::scroll_to(
-                crate::components::filmstrip::filmstrip_id(window_id),
-                iced::widget::scrollable::AbsoluteOffset { x: offset, y: 0.0 },
+            tasks.push(crate::components::filmstrip::scroll_strip(
+                viewer, window_id, offset,
             ));
         }
     }

@@ -96,11 +96,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                             size.width,
                             viewer.nav.len(),
                         );
-                        viewer.filmstrip_scroll_x = offset;
-                        strip = iced::widget::operation::scroll_to(
-                            crate::components::filmstrip::filmstrip_id(id),
-                            iced::widget::scrollable::AbsoluteOffset { x: offset, y: 0.0 },
-                        );
+                        strip = crate::components::filmstrip::scroll_strip(viewer, id, offset);
                     }
                     viewer.filmstrip_width = size.width;
                 }

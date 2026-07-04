@@ -10,6 +10,7 @@ use std::time::Duration;
 use iced::Element;
 use iced::Task;
 
+use crate::app::state::Viewer;
 use crate::app::update::{complete_navigation, fire_thumbnailer};
 use crate::app::{Message as AppMessage, Shared, Window};
 
@@ -111,6 +112,21 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
     }
 }
 
+/// Move the filmstrip to `offset`: the model half (`filmstrip_scroll_x`,
+/// which drives thumbnail virtualization) and the widget half (the iced
+/// scroll operation) together, so they never desync.
+pub(crate) fn scroll_strip(
+    viewer: &mut Viewer,
+    window_id: iced::window::Id,
+    offset: f32,
+) -> Task<AppMessage> {
+    viewer.filmstrip_scroll_x = offset;
+    iced::widget::operation::scroll_to(
+        filmstrip_id(window_id),
+        iced::widget::scrollable::AbsoluteOffset { x: offset, y: 0.0 },
+    )
+}
+
 /// A one-shot task that fires a settle check after `delay`. Lazy so it never
 /// builds a timer until iced runs it.
 fn settle_after(delay: Duration) -> Task<AppMessage> {
@@ -138,6 +154,14 @@ mod tests {
         let mut app = viewing_app(&["a.png", "b.png"], 0);
         let _ = update(&mut app.window, &mut app.shared, Message::Scrolled(120.0));
         assert_eq!(app.viewer().unwrap().filmstrip_scroll_x, 120.0);
+    }
+
+    #[test]
+    fn scroll_strip_moves_the_model_with_the_widget() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        let id = app.window.id;
+        let _ = scroll_strip(app.viewer_mut().unwrap(), id, 240.0);
+        assert_eq!(app.viewer().unwrap().filmstrip_scroll_x, 240.0);
     }
 
     #[test]

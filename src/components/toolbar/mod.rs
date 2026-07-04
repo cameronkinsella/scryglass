@@ -128,6 +128,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             // Showing the strip mid-session: position it on the cursor, as
             // opening the directory with the strip already on would.
             let window_w = win.window_size.width;
+            let id = win.id;
             let Some(viewer) = win.viewer_mut() else {
                 return saved;
             };
@@ -136,11 +137,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 window_w,
                 viewer.nav.len(),
             );
-            viewer.filmstrip_scroll_x = offset;
-            let scroll = iced::widget::operation::scroll_to(
-                crate::components::filmstrip::filmstrip_id(win.id),
-                iced::widget::scrollable::AbsoluteOffset { x: offset, y: 0.0 },
-            );
+            let scroll = crate::components::filmstrip::scroll_strip(viewer, id, offset);
             Task::batch([saved, scroll])
         }
         Message::ToggleSlider => {
