@@ -15,7 +15,7 @@ use crate::media::pipeline::Source;
 
 use super::shortcuts;
 use super::{
-    App, Envelope, MediaMessage, Message, OpenMessage, VideoControlsMessage, ViewerMessage, Window,
+    App, Envelope, MediaMessage, Message, OpenMessage, VideoMessage, ViewerMessage, Window,
     WindowMessage,
 };
 
@@ -117,17 +117,23 @@ fn window_subscriptions(id: window::Id, win: &Window) -> Vec<Subscription<Messag
         // each one for the frame then due paces playback to the panel itself (display
         // sync) rather than a wall-clock timer that beats against vsync and juddered.
         // A paused session drives no redraws, so a slow timer keeps the control fade
-        // moving and drains any late frame.
+        // moving and drains any late frame, but only while such work remains, so a
+        // paused background window does not redraw at 30Hz forever.
         if !win.minimized
             && let Some(session) = viewer.video.session.as_ref()
         {
-            let tick = if session.playing {
-                window::frames().map(|_| Message::VideoControls(VideoControlsMessage::Tick))
-            } else {
-                iced::time::every(Duration::from_millis(33))
-                    .map(|_| Message::VideoControls(VideoControlsMessage::Tick))
-            };
-            subs.push(tick);
+            if session.playing {
+                subs.push(window::frames().map(|_| Message::VideoControls(VideoMessage::Tick)));
+            } else if paused_video_needs_tick(
+                viewer.video.controls_opacity,
+                viewer.video.seek_drag.is_some(),
+                session.showed_frame(),
+            ) {
+                subs.push(
+                    iced::time::every(Duration::from_millis(33))
+                        .map(|_| Message::VideoControls(VideoMessage::Tick)),
+                );
+            }
         }
 
         // A held edge press has no OS key-repeat, so drive it here. Leaving
@@ -148,6 +154,17 @@ fn window_subscriptions(id: window::Id, win: &Window) -> Vec<Subscription<Messag
     }
 
     subs
+}
+
+/// Whether a paused video session still has per-tick work, so the slow tick
+/// timer stays armed. Paused controls rest fully visible (opacity 1), so a
+/// lower opacity means the fade is still easing. A mid-flight seek drag needs
+/// ticks for its release, and a session that has yet to show a frame still
+/// needs polling: a paused seek or frame step delivers exactly one frame, and
+/// a setup failure surfaces through tick. Any event that recreates this work
+/// (pause, seek, a fresh session) re-arms the subscription on its update.
+fn paused_video_needs_tick(controls_opacity: f32, seeking: bool, showed_frame: bool) -> bool {
+    controls_opacity < 1.0 || seeking || !showed_frame
 }
 
 /// Watch config.toml for hand-edits and reparse it live, so settings changes
@@ -454,6 +471,20 @@ mod tests {
             mouse::Button::Middle,
         )));
         assert!(msg.is_none());
+    }
+
+    #[test]
+    fn paused_video_ticks_only_while_work_remains() {
+        // A settled paused video (controls fully up, no drag, frame shown)
+        // needs no timer: this is what stops the perpetual 30Hz redraw.
+        assert!(!paused_video_needs_tick(1.0, false, true));
+        // The control fade is still easing up.
+        assert!(paused_video_needs_tick(0.4, false, true));
+        // A seek drag is mid-flight.
+        assert!(paused_video_needs_tick(1.0, true, true));
+        // The session has not shown its frame yet (a paused seek/step lands
+        // one frame, and a setup failure surfaces through tick).
+        assert!(paused_video_needs_tick(1.0, false, false));
     }
 
     #[test]
