@@ -8,7 +8,7 @@ use crate::media::pipeline::{ThumbUrgency, thumb_key};
 use crate::media::store::{AnimRam, ImageKey, RamImage, Tier};
 use crate::ui::image_surface::Keepalive;
 
-use crate::app::state::{Session, Thumb};
+use crate::app::state::{Session, Thumb, Viewer};
 
 /// How one tile production ended.
 #[derive(Debug, Clone)]
@@ -134,6 +134,9 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             let outcome = shared.store.on_decoded(key, *ram);
             if let Some(viewer) = win.viewer_mut() {
                 viewer.in_flight.remove(&path);
+                // Release the thumb slot too: a cheap-only probe parked it for
+                // this decode to fill (fire_thumb), and nothing else clears it.
+                viewer.in_flight_thumbs.remove(&path);
                 if let Some(thumb) = thumb {
                     let cost = thumb.byte_cost();
                     shared
@@ -261,6 +264,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 return Task::none();
             };
             viewer.in_flight.remove(&path);
+            viewer.in_flight_thumbs.remove(&path);
             viewer.cache.remove(&path);
             if let Some(thumb) = thumb {
                 let cost = thumb.byte_cost();
@@ -316,6 +320,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 return retry_jobs;
             };
             viewer.in_flight.remove(&path);
+            viewer.in_flight_thumbs.remove(&path);
             if retry {
                 return retry_jobs;
             }
@@ -338,8 +343,11 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 viewer.pending_nav = None;
             }
             // The file vanished (deleted outside the app): drop it and move on
-            // instead of erroring. The watcher usually removes it first.
-            if !path.exists() {
+            // instead of erroring. The watcher usually removes it first. Only
+            // filesystem sources qualify: an archive entry's nav path is a name
+            // inside the archive, never a file on disk, so a failing entry must
+            // become an error stop below instead of silently leaving the list.
+            if viewer.is_fs() && !path.exists() {
                 viewer.cache.remove(&path);
                 shared.thumbs.remove(&thumb_key(&viewer.source, &path));
                 viewer.anim_player.remove(&path);
@@ -403,9 +411,19 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                         show_placeholder(viewer, &path, thumb, zoom_mode, viewport);
                     }
                 }
-                // A jump cleared this slot. A re-fire may own it now, so leave
-                // in_flight alone. The pump re-picks the path if nothing did.
-                Err(MediaError::Cancelled) => {}
+                // Cancelled. While a full decode of this file is in flight the
+                // slot stays parked for it (cheap-only probes bail this way by
+                // design) and the decode's completion releases it. Otherwise
+                // the cancel came from a generation bump, possibly another
+                // window's, which never clears this window's set: release the
+                // slot so the pump can re-queue the path instead of skipping
+                // it forever. A duplicate job after a same-window re-fire is
+                // bounded waste, a wedged slot is not.
+                Err(MediaError::Cancelled) => {
+                    if !viewer.in_flight.contains(&path) {
+                        viewer.in_flight_thumbs.remove(&path);
+                    }
+                }
                 Err(_) => {
                     viewer.in_flight_thumbs.remove(&path);
                     if urgency == ThumbUrgency::Background {
@@ -445,7 +463,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
-            viewer.nav.replace_files(files);
+            replace_files_keeping_pending(viewer, files);
 
             if viewer.resort_to_first {
                 viewer.resort_to_first = false;
@@ -538,6 +556,17 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
         }
     }
 }
+/// Swap in a reordered file list, keeping a pending move aimed at the same
+/// file. The old index means nothing in the new order, and a target no longer
+/// listed abandons the move.
+pub(crate) fn replace_files_keeping_pending(viewer: &mut Viewer, files: Vec<PathBuf>) {
+    let pending = viewer
+        .pending_nav
+        .and_then(|i| viewer.nav.files().get(i).cloned());
+    viewer.nav.replace_files(files);
+    viewer.pending_nav = pending.and_then(|p| viewer.nav.files().iter().position(|f| *f == p));
+}
+
 pub(crate) fn update_anim(
     win: &mut Window,
     shared: &mut Shared,
@@ -575,7 +604,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
-    use crate::app::test_support::{thumb, viewing_app};
+    use crate::app::test_support::{empty_app, thumb, viewing_app};
 
     #[test]
     fn thumb_loaded_caches_the_blur_and_clears_in_flight() {
@@ -674,7 +703,34 @@ mod tests {
     }
 
     #[test]
-    fn a_cancelled_thumb_keeps_its_slot_and_is_not_failed() {
+    fn a_cancelled_thumb_keeps_its_slot_while_a_decode_owns_it() {
+        // The cheap-only probe bailed with Cancelled because the in-flight
+        // full decode derives the thumbnail. The slot stays parked for it.
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        {
+            let v = app.viewer_mut().unwrap();
+            v.in_flight.insert("b.png".into());
+            v.in_flight_thumbs.insert("b.png".into());
+        }
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::ThumbLoaded {
+                path: "b.png".into(),
+                urgency: ThumbUrgency::Background,
+                result: Err(crate::media::MediaError::Cancelled),
+            },
+        );
+        let v = app.viewer().unwrap();
+        assert!(v.in_flight_thumbs.contains(Path::new("b.png")));
+        assert!(!v.failed_thumbs.contains(Path::new("b.png")));
+    }
+
+    #[test]
+    fn a_cancelled_thumb_with_no_decode_releases_its_slot() {
+        // Another window's navigation bumped the shared thumb generation, so
+        // the job bailed. This window never cleared its own set: the slot must
+        // release here or the cell wedges blank forever.
         let mut app = viewing_app(&["a.png", "b.png"], 0);
         app.viewer_mut()
             .unwrap()
@@ -690,9 +746,7 @@ mod tests {
             },
         );
         let v = app.viewer().unwrap();
-        // A re-fire after the jump may own the slot, so it isn't cleared, and a
-        // stale cancellation never marks the file as failed.
-        assert!(v.in_flight_thumbs.contains(Path::new("b.png")));
+        assert!(!v.in_flight_thumbs.contains(Path::new("b.png")));
         assert!(!v.failed_thumbs.contains(Path::new("b.png")));
     }
 
@@ -780,5 +834,142 @@ mod tests {
         assert!(matches!(v.displayed, DisplayedImage::Error { .. }));
         assert!(v.failed_loads.contains_key(b.as_path()));
         // `dir` (a TempDir) removes itself on drop.
+    }
+
+    #[test]
+    fn a_finished_decode_releases_the_thumb_slot() {
+        use crate::media::store::RamImage;
+        use iced::widget::image::Handle;
+
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        let source = crate::media::pipeline::Source::Fs;
+        let key = ImageKey::new(&source, Path::new("b.png"));
+        let (lease, _) =
+            app.shared
+                .store
+                .request(key.clone(), PathBuf::from("b.png"), source, Tier::Full);
+        {
+            let v = app.viewer_mut().unwrap();
+            v.cache.insert(PathBuf::from("b.png"), lease);
+            v.in_flight.insert("b.png".into());
+            // The cheap-only probe parked this slot for the decode to fill.
+            v.in_flight_thumbs.insert("b.png".into());
+        }
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::Decoded {
+                key,
+                path: "b.png".into(),
+                ram: Box::new(RamImage {
+                    handle: Handle::from_rgba(2, 2, vec![0u8; 16]),
+                    original_size: (2, 2),
+                    decode_time: None,
+                }),
+                thumb: Some(thumb(2, 2)),
+            },
+        );
+        let v = app.viewer().unwrap();
+        assert!(!v.in_flight.contains(Path::new("b.png")));
+        assert!(!v.in_flight_thumbs.contains(Path::new("b.png")));
+    }
+
+    #[test]
+    fn a_failed_decode_releases_the_thumb_slot() {
+        let mut app = viewing_app(&["a.png", "b.png"], 0);
+        {
+            let v = app.viewer_mut().unwrap();
+            v.in_flight.insert("b.png".into());
+            v.in_flight_thumbs.insert("b.png".into());
+        }
+        let key = ImageKey::new(&crate::media::pipeline::Source::Fs, Path::new("b.png"));
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::DecodeFailed {
+                key,
+                path: "b.png".into(),
+                err: crate::media::MediaError::Decode("bad".into()),
+            },
+        );
+        let v = app.viewer().unwrap();
+        assert!(!v.in_flight.contains(Path::new("b.png")));
+        assert!(!v.in_flight_thumbs.contains(Path::new("b.png")));
+    }
+
+    #[test]
+    fn an_archive_entry_that_fails_to_decode_stays_listed_with_an_error() {
+        use std::io::Write;
+
+        use tempfile::TempDir;
+
+        // A real zip, since ArchiveIndex only builds from one. Entry contents
+        // never decode here, so junk bytes are enough.
+        let dir = TempDir::new().unwrap();
+        let zip_path = dir.path().join("photos.zip");
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        for name in ["a.png", "b.png"] {
+            writer.start_file(name, options).unwrap();
+            writer.write_all(b"not really a png").unwrap();
+        }
+        writer.finish().unwrap();
+
+        let index =
+            std::sync::Arc::new(crate::media::archive::ArchiveIndex::open(&zip_path).unwrap());
+        let entries = index.image_entries();
+        let start = entries[0].clone();
+        let nav = crate::nav::Nav::new(entries, &start).unwrap();
+        let viewer = crate::app::state::Viewer::new(
+            nav,
+            crate::media::pipeline::Source::Archive(index),
+            crate::anim::AnimPlayer::new(),
+        );
+        let mut app = empty_app();
+        app.window.session = Session::Viewing(Box::new(viewer));
+
+        let entry = app.viewer().unwrap().nav.current().to_path_buf();
+        let key = ImageKey::new(&app.viewer().unwrap().source, &entry);
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::DecodeFailed {
+                key,
+                path: entry.clone(),
+                err: crate::media::MediaError::Decode("bad".into()),
+            },
+        );
+
+        let v = app.viewer().unwrap();
+        // The entry name never exists on disk, but it was not deleted: it must
+        // stay listed and show an error stop, not silently vanish.
+        assert_eq!(v.nav.len(), 2);
+        assert!(v.failed_loads.contains_key(entry.as_path()));
+        assert!(matches!(v.displayed, DisplayedImage::Error { .. }));
+    }
+
+    #[test]
+    fn a_resort_remaps_a_pending_move_to_the_same_file() {
+        let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
+        // Aimed at b.png, which the resort moves to index 2.
+        app.viewer_mut().unwrap().pending_nav = Some(1);
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::Resorted(vec!["c.png".into(), "a.png".into(), "b.png".into()]),
+        );
+        assert_eq!(app.viewer().unwrap().pending_nav, Some(2));
+    }
+
+    #[test]
+    fn a_resort_abandons_a_pending_move_whose_target_vanished() {
+        let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
+        app.viewer_mut().unwrap().pending_nav = Some(1);
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::Resorted(vec!["a.png".into(), "c.png".into()]),
+        );
+        assert!(app.viewer().unwrap().pending_nav.is_none());
     }
 }

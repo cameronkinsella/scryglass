@@ -21,7 +21,8 @@ use iced::Task;
 use iced::time::Instant;
 
 use crate::app::state::Session;
-use crate::app::update::{open_path, open_viewer, push_toast};
+use crate::app::update::media::replace_files_keeping_pending;
+use crate::app::update::{complete_navigation, open_path, open_viewer, push_toast};
 use crate::app::{Message as AppMessage, OpenMessage, Shared, Window};
 use crate::components::toasts::ToastKind;
 use crate::config::AppConfig;
@@ -149,10 +150,24 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             {
                 return Task::none();
             }
-            viewer.nav.replace_files(files);
+            if files.is_empty() {
+                // Every image in the folder is gone: nothing left to show.
+                win.session = Session::Empty;
+                return Task::none();
+            }
+            let previous = viewer.nav.current().to_path_buf();
+            replace_files_keeping_pending(viewer, files);
             // A file may have been fixed on disk, so drop remembered errors and
             // let the next visit decode afresh.
             viewer.failed_loads.clear();
+            if viewer.nav.current() != previous {
+                // The on-screen file was deleted externally and the cursor fell
+                // back to the start of the new listing. Move the display onto
+                // it too, or the deleted image stays on screen while the footer
+                // and filmstrip track the new cursor.
+                let cursor = viewer.nav.cursor();
+                return complete_navigation(win, shared, cursor, true);
+            }
             Task::none()
         }
     }
@@ -214,6 +229,65 @@ mod tests {
             Message::FileDialogResult(Some("x.png".into())),
         );
         assert!(app.window.opening_since.is_some());
+    }
+
+    #[test]
+    fn rescan_that_drops_the_current_file_moves_the_display() {
+        use crate::app::state::DisplayedImage;
+
+        // Viewing b.png, then an external delete removes it from the listing.
+        let mut app = viewing_app(&["a.png", "b.png"], 1);
+        {
+            let v = app.window.viewer_mut().unwrap();
+            v.displayed = DisplayedImage::Full {
+                original_size: (2, 2),
+                rotated: None,
+            };
+            v.displayed_path = Some(PathBuf::from("b.png"));
+        }
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::DirectoryRescanned(PathBuf::from(""), Some(vec![PathBuf::from("a.png")])),
+        );
+        let v = app.viewer().unwrap();
+        // The cursor fell back and the display followed it, so the deleted
+        // file is no longer what the image area refers to.
+        assert_eq!(v.nav.current(), std::path::Path::new("a.png"));
+        assert_ne!(
+            v.displayed_path.as_deref(),
+            Some(std::path::Path::new("b.png"))
+        );
+        assert!(!matches!(v.displayed, DisplayedImage::Full { .. }));
+    }
+
+    #[test]
+    fn rescan_with_no_files_left_empties_the_session() {
+        let mut app = viewing_app(&["a.png"], 0);
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::DirectoryRescanned(PathBuf::from(""), Some(vec![])),
+        );
+        assert!(matches!(app.window.session, Session::Empty));
+    }
+
+    #[test]
+    fn rescan_remaps_a_pending_move_by_file() {
+        let mut app = viewing_app(&["a.png", "b.png", "c.png"], 0);
+        // Aimed at c.png, which the rescan moves to index 0.
+        app.window.viewer_mut().unwrap().pending_nav = Some(2);
+        let files = vec![
+            PathBuf::from("c.png"),
+            PathBuf::from("a.png"),
+            PathBuf::from("b.png"),
+        ];
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::DirectoryRescanned(PathBuf::from(""), Some(files)),
+        );
+        assert_eq!(app.viewer().unwrap().pending_nav, Some(0));
     }
 
     #[test]
