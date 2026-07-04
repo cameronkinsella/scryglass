@@ -454,6 +454,13 @@ impl<M: Medium> Drop for Lease<M> {
     }
 }
 
+/// Consecutive mint failures after which an entry parks instead of re-emitting
+/// its upload. The upload task already retries the GPU handshake internally, so
+/// a failure that reaches the store is persistent (e.g. the image exceeds the
+/// device texture limit) and reconciling would loop the same doomed upload
+/// forever. A fresh request resets the count, so renewed interest retries.
+const MAX_MINT_FAILURES: u32 = 3;
+
 struct Entry<M: Medium> {
     counters: Arc<TierCounters>,
     /// Holders own the strong `Arc<Cell<_>>` and the entry only borrows it, so a
@@ -466,6 +473,9 @@ struct Entry<M: Medium> {
     /// The tier a decode/upload is currently in flight for, so a reconcile does not
     /// fire a duplicate job while one is pending.
     pending: Option<Tier>,
+    /// Consecutive upload failures. At [`MAX_MINT_FAILURES`] the entry parks:
+    /// reconcile stops re-emitting the upload until a fresh request resets it.
+    mint_failures: u32,
 }
 
 impl<M: Medium> Entry<M> {
@@ -512,8 +522,12 @@ impl<M: Medium> Store<M> {
             path,
             source,
             pending: None,
+            mint_failures: 0,
         });
         entry.counters.inc(want);
+        // A new claim is renewed interest: un-park a mint-failed entry so the
+        // upload gets another try.
+        entry.mint_failures = 0;
         // Reuse the live shared cell, or seed a fresh one with whatever is resident.
         let cell = entry.cell.upgrade().unwrap_or_else(|| {
             let cell = Arc::new(Cell::default());
@@ -580,6 +594,7 @@ impl<M: Medium> Store<M> {
     pub fn on_minted(&mut self, key: ImageKey, tier: Tier, minted: M::Minted) -> StoreOutcome<M> {
         if let Some(entry) = self.entries.get_mut(&key) {
             entry.pending = None;
+            entry.mint_failures = 0;
             entry.state = M::mint(std::mem::take(&mut entry.state), tier, minted);
             if let Some(cell) = entry.cell.upgrade() {
                 cell.store(M::shared(&entry.state));
@@ -626,12 +641,14 @@ impl<M: Medium> Store<M> {
         M::decode_time(&entry.state)
     }
 
-    /// An upload could not reach the GPU (the upload thread was not ready). Clear
-    /// the in-flight marker and reconcile, so the next pass re-attempts the mint
-    /// if the tier is still wanted.
+    /// An upload could not reach the GPU (the upload thread was not ready, or
+    /// it rejected the handle). Clear the in-flight marker and reconcile, so
+    /// the next pass re-attempts the mint if the tier is still wanted. After
+    /// [`MAX_MINT_FAILURES`] in a row the reconcile parks the entry instead.
     pub fn on_mint_failed(&mut self, key: &ImageKey) -> StoreOutcome<M> {
         if let Some(entry) = self.entries.get_mut(key) {
             entry.pending = None;
+            entry.mint_failures += 1;
         }
         self.reconcile(key)
     }
@@ -709,6 +726,12 @@ impl<M: Medium> Store<M> {
                 path: entry.path.clone(),
                 source: entry.source.clone(),
             },
+            // Parked: the last uploads all failed, so another would too.
+            // The entry rests at its current tier until a fresh request
+            // resets the count.
+            Some(_) if entry.mint_failures >= MAX_MINT_FAILURES => {
+                return StoreOutcome::default();
+            }
             // Carry the currently resident resource so a full -> view demote can
             // downscale that texture on the GPU rather than resizing RAM on the CPU.
             Some(ram) => Job::Upload {
@@ -1077,6 +1100,57 @@ mod tests {
             out.jobs.as_slice(),
             [Job::Upload {
                 tier: Tier::Full,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn repeated_mint_failures_park_the_entry_until_a_new_request() {
+        let mut store: Store = Store::default();
+        let (lease, _) = store.request(key(), "a.png".into(), Source::Fs, Tier::Full);
+        let out = store.on_decoded(key(), ram());
+        assert!(matches!(out.jobs.as_slice(), [Job::Upload { .. }]));
+
+        // Each failure below the cap re-emits the upload once.
+        for _ in 0..MAX_MINT_FAILURES - 1 {
+            let out = store.on_mint_failed(&key());
+            assert!(matches!(out.jobs.as_slice(), [Job::Upload { .. }]));
+        }
+
+        // The cap parks the entry: no more upload jobs from this failure or
+        // from any later reconcile, so the retry loop is broken.
+        let out = store.on_mint_failed(&key());
+        assert!(out.jobs.is_empty());
+        let out = store.retarget(&lease, Tier::Full);
+        assert!(out.jobs.is_empty());
+
+        // A fresh claim resets the count and tries the upload again.
+        let (_second, out) = store.request(key(), "a.png".into(), Source::Fs, Tier::Full);
+        assert!(matches!(
+            out.jobs.as_slice(),
+            [Job::Upload {
+                tier: Tier::Full,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn a_successful_mint_clears_the_failure_count() {
+        let mut store: Store = Store::default();
+        let (lease, _) = store.request(key(), "a.png".into(), Source::Fs, Tier::Full);
+        store.on_decoded(key(), ram());
+        let _ = store.on_mint_failed(&key());
+        let _ = store.on_minted(key(), Tier::Full, keep());
+
+        // The earlier failure left no residue: a later demote-to-view upload
+        // cycle starts from a clean count.
+        let out = store.retarget(&lease, Tier::View);
+        assert!(matches!(
+            out.jobs.as_slice(),
+            [Job::Upload {
+                tier: Tier::View,
                 ..
             }]
         ));
