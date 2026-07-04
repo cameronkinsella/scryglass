@@ -16,20 +16,48 @@ use super::uniforms::UNIFORM_SLOTS;
 /// re-produced from the RAM source on return.
 const MAX_CACHED_TILES: usize = 224;
 
-/// Most exact-scale tiles kept resident: the visible set plus pan margin
-/// (a 4K viewport at one texel per pixel shows ceil(3840/512+1) x
-/// ceil(2160/512+1) = 9x6 = 54). All drop together when the resting size
-/// changes.
+/// Most exact-scale tiles kept resident per target: the visible set plus pan
+/// margin (a 4K viewport at one texel per pixel shows ceil(3840/512+1) x
+/// ceil(2160/512+1) = 9x6 = 54).
 const MAX_EXACT_TILES: usize = 96;
 
-/// The exact-scale layer: tiles that are byte-exact crops of the one-pass
-/// downscale at `target`, keyed by grid position with `lod` fixed at 0.
+/// Most exact-scale targets kept at once: the pyramid is shared cross-window,
+/// so two windows resting on the same image at their own sizes each keep a
+/// layer, plus one recent size so a resize bounce finds its tiles instead of
+/// re-cutting them. Each layer holds at most a viewport's worth of view-size
+/// tiles, so the cap costs a few screen-size copies of VRAM. The least
+/// recently drawn or demanded target evicts first.
+const MAX_EXACT_TARGETS: usize = 3;
+
+/// One exact-scale layer: tiles that are byte-exact crops of the one-pass
+/// downscale at the layer's target size, keyed by grid position with `lod`
+/// fixed at 0.
 struct ExactLayer {
-    /// The whole-image size the tiles are exact for. (0, 0) before the
-    /// first rest.
-    target: (u32, u32),
     tiles: TileCache<Keepalive>,
     pending: std::collections::HashMap<TileKey, std::time::Instant>,
+}
+
+impl ExactLayer {
+    fn new() -> Self {
+        Self {
+            tiles: TileCache::new(MAX_EXACT_TILES),
+            pending: std::collections::HashMap::new(),
+        }
+    }
+}
+
+/// One tiled draw's record: what `prepare_tiles` placed and selected. The
+/// demand pass reads these back so production always targets the size and
+/// level a real placement sampled, never a recomputation that could disagree
+/// by a rounding step.
+#[derive(Clone, Copy)]
+pub struct DrawStamp {
+    /// The physical size the whole image spanned: the exact layer's target.
+    pub shown: (u32, u32),
+    /// The window scale factor the draw ran at.
+    pub scale: f32,
+    /// What the draw selected: the base alone or a mip level.
+    pub want: DrawWant,
 }
 
 /// The resident form of a tiled still: its bounded tile cache plus the
@@ -41,15 +69,18 @@ pub struct TileSet {
     /// so it stays a one-pass copy (a fixed base redrawn through the kernel
     /// would be softer than the View tier it must match).
     base: Mutex<Keepalive>,
-    /// Exact-scale tiles for the resting display size: byte-exact crops of
-    /// the one-pass whole-image downscale, produced for the visible region
-    /// only, so a rest costs viewport work instead of whole-image work.
-    /// Replaced whole when the resting size changes.
-    exact: Mutex<ExactLayer>,
-    /// The displayed size the last tiled draw spanned, packed `w << 32 | h`.
-    /// The demand pass targets exactly this, so the draw's size test and
-    /// the produced tiles can never disagree by a rounding step.
-    draw_shown: std::sync::atomic::AtomicU64,
+    /// Exact-scale tile layers keyed by target size, most recently used
+    /// first: byte-exact crops of the one-pass whole-image downscale,
+    /// produced for the visible region only, so a rest costs viewport work
+    /// instead of whole-image work. One layer per window resting on the
+    /// image at its own size, so windows sharing the pyramid never wipe
+    /// each other's tiles. Bounded by [`MAX_EXACT_TARGETS`].
+    exact: Mutex<Vec<((u32, u32), ExactLayer)>>,
+    /// The latest draw stamp per window, keyed by window id. Each window
+    /// stamps its own placement and the demand pass reads back its own
+    /// window's last draw directly, so concurrent windows never adopt each
+    /// other's target and a resize follows this window's live size.
+    stamps: Mutex<std::collections::HashMap<iced::window::Id, DrawStamp>>,
     tiles: Mutex<TileCache<Keepalive>>,
     /// Tiles requested but not yet landed, with their claim time, so a pan or
     /// zoom repeating its demand pass never produces the same tile twice. A
@@ -61,36 +92,22 @@ pub struct TileSet {
     /// obsoletes whole waves of tiles, and this is what stops them from
     /// being produced anyway.
     wanted_lod: AtomicU32,
-    /// What the last tiled draw actually selected, stamped by `prepare_tiles`
-    /// and read by the demand pass, so production always targets the level
-    /// the real placement samples. Holds [`DRAW_UNSTAMPED`] before any tiled
-    /// draw and [`DRAW_BASE_ONLY`] when the base layer alone sufficed.
-    draw_lod: AtomicU32,
-    /// The scale factor of the last tiled draw (`f32` bits), so the demand
-    /// pass works in the physical pixels of the window actually drawing.
-    draw_scale: AtomicU32,
 }
 
 /// Most tiles one demand pass may claim: what one frame can draw.
 pub const MAX_TILE_DRAWS: usize = UNIFORM_SLOTS as usize - 1;
-
-/// `draw_lod` sentinel: no tiled draw has resolved a level yet.
-const DRAW_UNSTAMPED: u32 = u32::MAX;
-/// `draw_lod` sentinel: the last draw needed no tiles at all.
-const DRAW_BASE_ONLY: u32 = u32::MAX - 1;
 
 /// How long a tile claim blocks re-requests before it is presumed lost. Far
 /// past any real produce plus upload, so it only fires for a settle message
 /// that will never arrive.
 const CLAIM_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// What the demand pass should do, read back from the last real draw.
+/// What a tiled draw selected, recorded in its stamp for the demand pass.
+#[derive(Clone, Copy)]
 pub enum DrawWant {
-    /// No tiled draw has happened. The caller derives the level itself.
-    Unknown,
-    /// The base layer sufficed. No tiles are needed.
+    /// The base layer sufficed (exact tiles draw over it when resident).
     BaseOnly,
-    /// The draw sampled this level.
+    /// The draw sampled this mip level.
     Level(u32),
 }
 
@@ -101,17 +118,11 @@ impl TileSet {
         Self {
             original,
             base: Mutex::new(base),
-            exact: Mutex::new(ExactLayer {
-                target: (0, 0),
-                tiles: TileCache::new(MAX_EXACT_TILES),
-                pending: std::collections::HashMap::new(),
-            }),
+            exact: Mutex::new(Vec::new()),
+            stamps: Mutex::new(std::collections::HashMap::new()),
             tiles: Mutex::new(TileCache::new(MAX_CACHED_TILES)),
             pending: Mutex::new(std::collections::HashMap::new()),
             wanted_lod: AtomicU32::new(0),
-            draw_lod: AtomicU32::new(DRAW_UNSTAMPED),
-            draw_scale: AtomicU32::new(1.0f32.to_bits()),
-            draw_shown: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -125,51 +136,74 @@ impl TileSet {
         self.base.lock().ok().map(|base| base.clone())
     }
 
-    /// Ready the exact layer for `target`, dropping tiles of any other size
-    /// (their VRAM frees off-thread as the keepalives drop).
+    /// Ready an exact layer for `target`, creating it when absent and marking
+    /// it most recently used. Past [`MAX_EXACT_TARGETS`] the stalest target
+    /// drops (its VRAM frees off-thread as the keepalives drop). Other
+    /// targets keep their tiles and claims, so windows sharing the pyramid
+    /// at different sizes coexist.
     pub fn ensure_exact(&self, target: (u32, u32)) {
-        if let Ok(mut layer) = self.exact.lock()
-            && layer.target != target
-        {
-            layer.target = target;
-            layer.tiles = TileCache::new(MAX_EXACT_TILES);
-            layer.pending.clear();
+        let Ok(mut layers) = self.exact.lock() else {
+            return;
+        };
+        if let Some(pos) = layers.iter().position(|(t, _)| *t == target) {
+            let layer = layers.remove(pos);
+            layers.insert(0, layer);
+            return;
         }
+        layers.insert(0, (target, ExactLayer::new()));
+        layers.truncate(MAX_EXACT_TARGETS);
     }
 
-    /// The size the exact layer currently serves.
-    pub fn exact_target(&self) -> (u32, u32) {
+    /// Whether an exact layer for `target` is still resident. Productions in
+    /// flight for an evicted target bail on this.
+    pub fn exact_serves(&self, target: (u32, u32)) -> bool {
         self.exact
             .lock()
-            .map(|layer| layer.target)
-            .unwrap_or((0, 0))
-    }
-
-    /// Claim one exact tile for production: false when it is resident, in
-    /// flight (unexpired), or the layer moved to another size.
-    pub fn try_claim_exact(&self, target: (u32, u32), key: TileKey) -> bool {
-        self.exact
-            .lock()
-            .map(|mut layer| {
-                if layer.target != target || layer.tiles.contains(key) {
-                    return false;
-                }
-                match layer.pending.get(&key) {
-                    Some(claimed) if claimed.elapsed() < CLAIM_TTL => false,
-                    _ => {
-                        layer.pending.insert(key, std::time::Instant::now());
-                        true
-                    }
-                }
-            })
+            .map(|layers| layers.iter().any(|(t, _)| *t == target))
             .unwrap_or(false)
     }
 
+    /// Whether an exact layer serves `target`, marking it drawn so eviction
+    /// at the target cap spares the layers windows still render.
+    pub(super) fn exact_drawn(&self, target: (u32, u32)) -> bool {
+        let Ok(mut layers) = self.exact.lock() else {
+            return false;
+        };
+        let Some(pos) = layers.iter().position(|(t, _)| *t == target) else {
+            return false;
+        };
+        let layer = layers.remove(pos);
+        layers.insert(0, layer);
+        true
+    }
+
+    /// Claim one exact tile for production: false when it is resident, in
+    /// flight (unexpired), or its target's layer was evicted.
+    pub fn try_claim_exact(&self, target: (u32, u32), key: TileKey) -> bool {
+        let Ok(mut layers) = self.exact.lock() else {
+            return false;
+        };
+        let Some((_, layer)) = layers.iter_mut().find(|(t, _)| *t == target) else {
+            return false;
+        };
+        if layer.tiles.contains(key) {
+            return false;
+        }
+        match layer.pending.get(&key) {
+            Some(claimed) if claimed.elapsed() < CLAIM_TTL => false,
+            _ => {
+                layer.pending.insert(key, std::time::Instant::now());
+                true
+            }
+        }
+    }
+
     /// A production for `target` finished: release its claim and install the
-    /// texture, unless the layer moved to another size in the meantime.
+    /// texture, unless that target's layer was evicted in the meantime.
+    /// Other targets are never touched.
     pub fn settle_exact(&self, target: (u32, u32), key: TileKey, texture: Option<Keepalive>) {
-        if let Ok(mut layer) = self.exact.lock()
-            && layer.target == target
+        if let Ok(mut layers) = self.exact.lock()
+            && let Some((_, layer)) = layers.iter_mut().find(|(t, _)| *t == target)
         {
             layer.pending.remove(&key);
             if let Some(texture) = texture {
@@ -178,20 +212,32 @@ impl TileSet {
         }
     }
 
-    /// A resident exact tile for `target`, refreshing its recency.
+    /// A resident exact tile for `target`, refreshing its recency within its
+    /// layer.
     pub(super) fn exact_get(&self, target: (u32, u32), key: TileKey) -> Option<Keepalive> {
-        self.exact.lock().ok().and_then(|mut layer| {
-            if layer.target != target {
-                return None;
-            }
-            layer.tiles.get(key).cloned()
+        self.exact.lock().ok().and_then(|mut layers| {
+            layers
+                .iter_mut()
+                .find(|(t, _)| *t == target)
+                .and_then(|(_, layer)| layer.tiles.get(key).cloned())
         })
     }
 
-    /// The displayed size the last tiled draw spanned.
-    pub fn draw_shown(&self) -> (u32, u32) {
-        let packed = self.draw_shown.load(Ordering::Relaxed);
-        ((packed >> 32) as u32, packed as u32)
+    /// Record what a tiled draw placed and selected, replacing this window's
+    /// previous stamp. Keyed by window id, so a window always reads back its
+    /// own latest draw.
+    pub(super) fn stamp_draw(&self, window: iced::window::Id, stamp: DrawStamp) {
+        let Ok(mut stamps) = self.stamps.lock() else {
+            return;
+        };
+        stamps.insert(window, stamp);
+    }
+
+    /// This window's last tiled draw. Read directly, no size matching, so
+    /// demand tracks the live size even mid-resize when the estimate drifts
+    /// from the drawn size. `None` before this window's first tiled draw.
+    pub fn draw_stamp_for(&self, window: iced::window::Id) -> Option<DrawStamp> {
+        self.stamps.lock().ok()?.get(&window).copied()
     }
 
     /// Production started: restart the tile's claim clock, so the TTL
@@ -202,11 +248,6 @@ impl TileSet {
         {
             *claimed = std::time::Instant::now();
         }
-    }
-
-    /// The scale factor of the last tiled draw.
-    pub fn draw_scale(&self) -> f32 {
-        f32::from_bits(self.draw_scale.load(Ordering::Relaxed))
     }
 
     /// Install a produced tile, evicting the stalest past the cap.
@@ -261,39 +302,6 @@ impl TileSet {
     pub fn wanted_lod(&self) -> u32 {
         self.wanted_lod.load(Ordering::Relaxed)
     }
-
-    /// Stamp the scale factor of the tiled draw in progress.
-    pub(super) fn stamp_draw_scale(&self, scale: f32) {
-        self.draw_scale.store(scale.to_bits(), Ordering::Relaxed);
-    }
-
-    /// Stamp the displayed size the tiled draw spans, packed for one read.
-    pub(super) fn stamp_draw_shown(&self, shown: (u32, u32)) {
-        self.draw_shown.store(
-            (u64::from(shown.0) << 32) | u64::from(shown.1),
-            Ordering::Relaxed,
-        );
-    }
-
-    /// Stamp what the tiled draw selected, read back by [`Self::draw_want`].
-    pub(super) fn stamp_draw_lod(&self, want: DrawWant) {
-        let lod = match want {
-            DrawWant::Unknown => DRAW_UNSTAMPED,
-            DrawWant::BaseOnly => DRAW_BASE_ONLY,
-            DrawWant::Level(lod) => lod,
-        };
-        self.draw_lod.store(lod, Ordering::Relaxed);
-    }
-
-    /// What the last real draw wanted, so demand and draw cannot disagree on
-    /// scale or rounding.
-    pub fn draw_want(&self) -> DrawWant {
-        match self.draw_lod.load(Ordering::Relaxed) {
-            DRAW_UNSTAMPED => DrawWant::Unknown,
-            DRAW_BASE_ONLY => DrawWant::BaseOnly,
-            lod => DrawWant::Level(lod),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -307,6 +315,10 @@ mod tests {
 
     fn set() -> TileSet {
         TileSet::new((8192, 8192), test_keepalive())
+    }
+
+    fn stamp(shown: (u32, u32), scale: f32, want: DrawWant) -> DrawStamp {
+        DrawStamp { shown, scale, want }
     }
 
     #[test]
@@ -323,6 +335,22 @@ mod tests {
     }
 
     #[test]
+    fn an_exact_claim_older_than_the_ttl_can_be_reclaimed() {
+        let set = set();
+        set.ensure_exact((800, 600));
+        assert!(set.try_claim_exact((800, 600), key(0, 0)));
+        assert!(!set.try_claim_exact((800, 600), key(0, 0)));
+        let expired = std::time::Instant::now()
+            .checked_sub(CLAIM_TTL + std::time::Duration::from_secs(1))
+            .expect("clock reaches past the TTL");
+        set.exact.lock().unwrap()[0]
+            .1
+            .pending
+            .insert(key(0, 0), expired);
+        assert!(set.try_claim_exact((800, 600), key(0, 0)));
+    }
+
+    #[test]
     fn a_resident_tile_is_never_claimed() {
         let set = set();
         set.insert(key(0, 0), test_keepalive());
@@ -330,27 +358,68 @@ mod tests {
     }
 
     #[test]
-    fn exact_layer_target_swap_drops_stale_tiles() {
+    fn two_exact_targets_coexist() {
         let set = set();
         set.ensure_exact((800, 600));
         set.settle_exact((800, 600), key(0, 0), Some(test_keepalive()));
-        assert!(set.exact_get((800, 600), key(0, 0)).is_some());
         set.ensure_exact((400, 300));
-        assert_eq!(set.exact_target(), (400, 300));
-        assert!(set.exact_get((400, 300), key(0, 0)).is_none());
-        // The old size no longer serves either.
-        assert!(set.exact_get((800, 600), key(0, 0)).is_none());
+        set.settle_exact((400, 300), key(0, 0), Some(test_keepalive()));
+        // Readying the second target left the first target's tiles alone.
+        assert!(set.exact_get((800, 600), key(0, 0)).is_some());
+        assert!(set.exact_get((400, 300), key(0, 0)).is_some());
+        assert!(set.exact_serves((800, 600)));
+        assert!(set.exact_serves((400, 300)));
     }
 
     #[test]
-    fn settle_exact_after_a_retarget_is_a_no_op() {
+    fn eviction_at_the_cap_drops_the_least_recently_drawn_target() {
+        let set = set();
+        set.ensure_exact((800, 600));
+        set.settle_exact((800, 600), key(0, 0), Some(test_keepalive()));
+        // Fill the remaining slots with other targets.
+        for i in 0..(MAX_EXACT_TARGETS as u32 - 1) {
+            set.ensure_exact((100 + i, 100 + i));
+        }
+        // A draw of (800, 600) refreshes it, so the first filler is stalest.
+        assert!(set.exact_drawn((800, 600)));
+        set.ensure_exact((999, 999));
+        assert!(set.exact_get((800, 600), key(0, 0)).is_some());
+        assert!(!set.exact_serves((100, 100)));
+        assert!(set.exact_serves((999, 999)));
+    }
+
+    #[test]
+    fn settle_for_one_target_does_not_disturb_another() {
+        let set = set();
+        set.ensure_exact((800, 600));
+        set.ensure_exact((400, 300));
+        assert!(set.try_claim_exact((800, 600), key(0, 0)));
+        assert!(set.try_claim_exact((400, 300), key(0, 0)));
+        set.settle_exact((800, 600), key(0, 0), Some(test_keepalive()));
+        assert!(set.exact_get((800, 600), key(0, 0)).is_some());
+        // The other target still holds its claim and has no tile.
+        assert!(set.exact_get((400, 300), key(0, 0)).is_none());
+        assert!(
+            !set.try_claim_exact((400, 300), key(0, 0)),
+            "claim survives"
+        );
+        set.settle_exact((400, 300), key(0, 0), Some(test_keepalive()));
+        assert!(set.exact_get((400, 300), key(0, 0)).is_some());
+        assert!(set.exact_get((800, 600), key(0, 0)).is_some());
+    }
+
+    #[test]
+    fn settle_exact_after_an_eviction_is_a_no_op() {
         let set = set();
         set.ensure_exact((800, 600));
         assert!(set.try_claim_exact((800, 600), key(0, 0)));
-        set.ensure_exact((400, 300));
+        // Push the target out of the cap.
+        for i in 0..MAX_EXACT_TARGETS as u32 {
+            set.ensure_exact((100 + i, 100 + i));
+        }
+        assert!(!set.exact_serves((800, 600)));
         set.settle_exact((800, 600), key(0, 0), Some(test_keepalive()));
-        assert!(set.exact_get((400, 300), key(0, 0)).is_none());
-        // Coming back to the old size finds nothing landed and no claim held.
+        // Coming back finds nothing landed and no claim held.
         set.ensure_exact((800, 600));
         assert!(set.exact_get((800, 600), key(0, 0)).is_none());
         assert!(set.try_claim_exact((800, 600), key(0, 0)));
@@ -371,34 +440,68 @@ mod tests {
     }
 
     #[test]
-    fn draw_shown_round_trips_through_the_packed_stamp() {
+    fn exact_drawn_only_finds_ensured_targets() {
         let set = set();
-        assert_eq!(set.draw_shown(), (0, 0));
-        set.stamp_draw_shown((3840, 2160));
-        assert_eq!(set.draw_shown(), (3840, 2160));
-        set.stamp_draw_shown((u32::MAX, 1));
-        assert_eq!(set.draw_shown(), (u32::MAX, 1));
+        assert!(!set.exact_drawn((800, 600)));
+        set.ensure_exact((800, 600));
+        assert!(set.exact_drawn((800, 600)));
+        assert!(!set.exact_drawn((400, 300)));
     }
 
     #[test]
-    fn draw_scale_round_trips_through_its_stamp() {
+    fn a_window_reads_back_its_own_stamp() {
         let set = set();
-        assert_eq!(set.draw_scale(), 1.0);
-        set.stamp_draw_scale(1.5);
-        assert_eq!(set.draw_scale(), 1.5);
+        let win = iced::window::Id::unique();
+        assert!(set.draw_stamp_for(win).is_none());
+        set.stamp_draw(win, stamp((1000, 800), 1.0, DrawWant::BaseOnly));
+        let found = set.draw_stamp_for(win).expect("stamped");
+        assert_eq!(found.shown, (1000, 800));
+        assert_eq!(found.scale, 1.0);
+        assert!(matches!(found.want, DrawWant::BaseOnly));
     }
 
     #[test]
-    fn draw_want_maps_the_lod_sentinels() {
+    fn a_second_windows_stamp_does_not_change_the_first() {
         let set = set();
-        assert_eq!(set.draw_lod.load(Ordering::Relaxed), DRAW_UNSTAMPED);
-        assert!(matches!(set.draw_want(), DrawWant::Unknown));
-        set.stamp_draw_lod(DrawWant::BaseOnly);
-        assert_eq!(set.draw_lod.load(Ordering::Relaxed), DRAW_BASE_ONLY);
-        assert!(matches!(set.draw_want(), DrawWant::BaseOnly));
-        set.stamp_draw_lod(DrawWant::Level(3));
-        assert!(matches!(set.draw_want(), DrawWant::Level(3)));
-        set.stamp_draw_lod(DrawWant::Unknown);
-        assert!(matches!(set.draw_want(), DrawWant::Unknown));
+        let a = iced::window::Id::unique();
+        let b = iced::window::Id::unique();
+        set.stamp_draw(a, stamp((1000, 800), 1.0, DrawWant::BaseOnly));
+        set.stamp_draw(b, stamp((1990, 1590), 2.0, DrawWant::Level(1)));
+        // Each window reads its own draw, never the other's.
+        let found = set.draw_stamp_for(a).expect("stamped");
+        assert_eq!(found.shown, (1000, 800));
+        assert!(matches!(found.want, DrawWant::BaseOnly));
+        let found = set.draw_stamp_for(b).expect("stamped");
+        assert_eq!(found.shown, (1990, 1590));
+        assert!(matches!(found.want, DrawWant::Level(1)));
+    }
+
+    #[test]
+    fn restamping_a_window_replaces_its_entry() {
+        let set = set();
+        let win = iced::window::Id::unique();
+        set.stamp_draw(win, stamp((1000, 800), 1.0, DrawWant::Level(0)));
+        set.stamp_draw(win, stamp((1000, 800), 1.0, DrawWant::BaseOnly));
+        assert_eq!(set.stamps.lock().unwrap().len(), 1);
+        let found = set.draw_stamp_for(win).expect("stamped");
+        assert!(matches!(found.want, DrawWant::BaseOnly));
+    }
+
+    #[test]
+    fn a_resize_reads_the_live_size_never_a_stale_one() {
+        // The regression: a shrink restamps a window at a new size, and the
+        // demand pass must read that size, not the size before the shrink.
+        let set = set();
+        let a = iced::window::Id::unique();
+        let b = iced::window::Id::unique();
+        set.stamp_draw(a, stamp((2000, 1600), 1.0, DrawWant::BaseOnly));
+        set.stamp_draw(a, stamp((1000, 800), 1.0, DrawWant::BaseOnly));
+        // A reads its current draw (S2), never the pre-shrink S1.
+        let found = set.draw_stamp_for(a).expect("stamped");
+        assert_eq!(found.shown, (1000, 800));
+        // A concurrent window stamping a different size leaves A on S2.
+        set.stamp_draw(b, stamp((640, 480), 1.0, DrawWant::Level(2)));
+        let found = set.draw_stamp_for(a).expect("stamped");
+        assert_eq!(found.shown, (1000, 800));
     }
 }

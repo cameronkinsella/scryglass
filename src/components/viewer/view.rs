@@ -185,6 +185,7 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
             let viewport = (win.viewport_size.width, win.viewport_size.height);
             match texture {
                 Some(texture) => ui::image_surface::view(
+                    win.id,
                     Some(texture),
                     *original_size,
                     viewer.zoom,
@@ -220,6 +221,7 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
             let viewport = (win.viewport_size.width, win.viewport_size.height);
             match viewer.anim_player.current_texture() {
                 Some(texture) => ui::image_surface::view(
+                    win.id,
                     Some(texture),
                     *original_size,
                     viewer.zoom,

@@ -55,22 +55,29 @@ pub(crate) fn fire_tiles(win: &Window, shared: &Shared) -> Task<Message> {
             viewport,
         )
     };
-    // The draw stamps the level and scale it actually sampled. Before the
-    // first tiled draw, derive them the same way in substrate texels.
     let substrate_zoom = zoom * true_size.0 as f32 / original.0 as f32;
-    let scale = match set.draw_want() {
-        DrawWant::Unknown => crate::ui::image_surface::current_scale_factor().max(1.0),
-        _ => set.draw_scale().max(1.0),
-    };
+    // The pyramid is shared cross-window and every drawing window stamps under
+    // its own id the size, scale, and level it actually sampled. Reading this
+    // window's own stamp keeps demand on this window's target even when another
+    // window on the same image drew last, and tracks the live size mid-resize.
+    // Before the first tiled draw there is no stamp and the scale falls back to
+    // the display's. The `expected` size below still drives the displayed-size
+    // geometry.
+    let expected = (
+        original.0 as f32 * substrate_zoom,
+        original.1 as f32 * substrate_zoom,
+    );
+    let stamp = set.draw_stamp_for(win.id);
+    let scale = stamp
+        .map(|stamp| stamp.scale)
+        .unwrap_or_else(crate::ui::image_surface::current_scale_factor)
+        .max(1.0);
     // A resting view that fits one texture is served by the base alone, at
     // EXACTLY the displayed size: the same one-pass copy the View tier
     // shows, grid-aligned so its single taps are texel-exact. Any size
     // mismatch, however small, samples between texels and softens.
     let max = crate::media::registry::MAX_TEXTURE_DIM as f32;
-    let displayed = (
-        original.0 as f32 * substrate_zoom * scale,
-        original.1 as f32 * substrate_zoom * scale,
-    );
+    let displayed = (expected.0 * scale, expected.1 * scale);
     // The placement geometry runs in displayed coordinates, like the draw's.
     let Some((_, src)) = crate::ui::geometry::display_geometry(
         zoom,
@@ -81,11 +88,13 @@ pub(crate) fn fire_tiles(win: &Window, shared: &Shared) -> Task<Message> {
         return Task::none();
     };
     if displayed.0 <= max && displayed.1 <= max {
-        // Demand targets the size the draw actually spanned, so the drawn
-        // grid and the produced tiles can never disagree by a rounding
-        // step. Before the first tiled draw, the settle that follows the
-        // mint brings demand back here.
-        let target = set.draw_shown();
+        // Demand targets the size this window's draw actually spanned, so
+        // the drawn grid and the produced tiles can never disagree by a
+        // rounding step. Before the first tiled draw, the settle that
+        // follows the mint brings demand back here.
+        let Some(target) = stamp.map(|stamp| stamp.shown) else {
+            return Task::none();
+        };
         if target == (0, 0) {
             return Task::none();
         }
@@ -116,9 +125,9 @@ pub(crate) fn fire_tiles(win: &Window, shared: &Shared) -> Task<Message> {
         return Task::batch(jobs);
     }
     // Past one texture's worth of display, tiles are the only way.
-    let lod = match set.draw_want() {
-        DrawWant::Level(lod) => lod,
-        DrawWant::BaseOnly | DrawWant::Unknown => tiles::lod_for_zoom(substrate_zoom * scale),
+    let lod = match stamp.map(|stamp| stamp.want) {
+        Some(DrawWant::Level(lod)) => lod,
+        Some(DrawWant::BaseOnly) | None => tiles::lod_for_zoom(substrate_zoom * scale),
     };
     Task::batch(claim_tiles(&key, &ram, &resident, set, src, original, lod))
 }
@@ -188,10 +197,8 @@ fn produce_exact(
     Task::future(async move {
         let _permit = TILE_GATE.acquire().await.ok();
         use crate::media::tiles;
-        // Bail when the rest moved to another size while this sat queued.
-        let stale = pyramid
-            .tiles()
-            .is_none_or(|set| set.exact_target() != target);
+        // Bail when the target's layer was evicted while this sat queued.
+        let stale = pyramid.tiles().is_none_or(|set| !set.exact_serves(target));
         let produced = if stale {
             None
         } else {

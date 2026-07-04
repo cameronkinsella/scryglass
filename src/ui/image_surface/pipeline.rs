@@ -14,7 +14,7 @@ use crate::media::tiles::TileKey;
 use crate::ui::geometry::snap_footprint_to_unit;
 
 pub(super) use super::resident::{Keepalive, ResidentImage};
-use super::tiles::{DrawWant, TileSet};
+use super::tiles::{DrawStamp, DrawWant, TileSet};
 use super::uniforms::{
     UNIFORM_SIZE, UNIFORM_SLOTS, UNIFORM_STRIDE, build_uniforms, tile_placement,
 };
@@ -268,12 +268,14 @@ impl ImagePipeline {
     /// Resolve this frame's draw list for a tiled still: the base layer first
     /// (stretched under everything, so a missing tile shows the view-quality
     /// copy instead of a hole), then every resident visible tile at the
-    /// zoom's level, each in its own uniform slot. Stamps what it selected on
-    /// the set, making the draw the single authority the demand pass follows.
+    /// zoom's level, each in its own uniform slot. Stamps what it placed and
+    /// selected on the set, making the draw the single authority the demand
+    /// pass follows.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn prepare_tiles(
         &mut self,
         queue: &wgpu::Queue,
+        window: iced::window::Id,
         set: &TileSet,
         dst: [f32; 4],
         src: [f32; 4],
@@ -285,7 +287,6 @@ impl ImagePipeline {
         use crate::media::tiles;
         self.tile_draws.clear();
         let original = set.original();
-        set.stamp_draw_scale(scale);
         // The physical size the WHOLE image is displayed at. Demand targets
         // it. When zoomed in, `dst` is clipped to the viewport and `src`
         // holds the visible fraction, so the full extent is their ratio.
@@ -298,7 +299,6 @@ impl ImagePipeline {
         } else {
             (0, 0)
         };
-        set.stamp_draw_shown(shown);
         // Texels per physical pixel of the substrate. Its inverse is the
         // physical zoom the LOD is chosen for.
         let footprint = [raw_footprint[0] / scale, raw_footprint[1] / scale];
@@ -336,7 +336,9 @@ impl ImagePipeline {
             // Re-snapping against the exact grid keeps a panned view's taps
             // on texel centers, and each tile maps through the visible
             // `src` window (dst only spans the viewport when zoomed in).
-            if shown != (0, 0) && set.exact_target() == shown {
+            // The layer lookup marks the target drawn, so cap eviction
+            // spares the sizes windows still render.
+            if shown != (0, 0) && set.exact_drawn(shown) {
                 let (edst, esrc) = crate::ui::geometry::snap_placement_to_pixels(
                     dst,
                     src,
@@ -378,7 +380,14 @@ impl ImagePipeline {
                     self.tile_draws.push((Arc::downgrade(&tile), slot));
                     slot += 1;
                 }
-                set.stamp_draw_lod(DrawWant::BaseOnly);
+                set.stamp_draw(
+                    window,
+                    DrawStamp {
+                        shown,
+                        scale,
+                        want: DrawWant::BaseOnly,
+                    },
+                );
                 return;
             }
             // The base covers the view when it is at least as fine as the
@@ -389,12 +398,26 @@ impl ImagePipeline {
             if crate::ui::geometry::near_one_to_one(base_fp)
                 || (base_fp[0] >= 1.0 && base_fp[1] >= 1.0)
             {
-                set.stamp_draw_lod(DrawWant::BaseOnly);
+                set.stamp_draw(
+                    window,
+                    DrawStamp {
+                        shown,
+                        scale,
+                        want: DrawWant::BaseOnly,
+                    },
+                );
                 return;
             }
         }
         let lod = tiles::lod_for_zoom(1.0 / footprint[0].max(footprint[1]));
-        set.stamp_draw_lod(DrawWant::Level(lod));
+        set.stamp_draw(
+            window,
+            DrawStamp {
+                shown,
+                scale,
+                want: DrawWant::Level(lod),
+            },
+        );
         let level = tiles::level_size(original, lod);
         let tile_fp = [
             snap_footprint_to_unit(footprint[0] * level.0 as f32 / original.0 as f32),

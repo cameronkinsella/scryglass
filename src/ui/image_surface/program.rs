@@ -26,6 +26,7 @@ use crate::ui::geometry::{
 /// app's viewport estimate, so a fast resize never draws a frame-stale placement.
 #[allow(clippy::too_many_arguments)]
 pub fn view(
+    window: iced::window::Id,
     texture: Option<Keepalive>,
     original: (u32, u32),
     zoom: f32,
@@ -36,6 +37,7 @@ pub fn view(
     manual_zoom: bool,
 ) -> Element<'static, Message> {
     shader::Shader::new(ImageSurface::new(
+        window,
         texture,
         original,
         zoom,
@@ -63,6 +65,9 @@ pub fn warmup() -> Element<'static, Message> {
 /// placement is resolved per frame in `prepare` from iced's real widget size, not
 /// stored here, so it can never lag the size actually being drawn into.
 struct ImageSurface {
+    /// The window this surface draws in, so a tiled draw stamps under its own
+    /// id and the demand pass reads back this window's own draw.
+    window: iced::window::Id,
     /// The resident texture to draw, or `None` for the warmup surface. Weak,
     /// because iced keeps the last widget tree and primitive of a window that
     /// stops redrawing (a minimized one): a strong ref here would pin VRAM the
@@ -84,6 +89,7 @@ struct ImageSurface {
 impl ImageSurface {
     #[allow(clippy::too_many_arguments)]
     fn new(
+        window: iced::window::Id,
         texture: Option<Keepalive>,
         original: (u32, u32),
         zoom: f32,
@@ -102,6 +108,7 @@ impl ImageSurface {
             .and_then(|t| t.size().or_else(|| t.tiles().map(|set| set.original())))
             .unwrap_or(original);
         Self {
+            window,
             texture: texture.as_ref().map(Arc::downgrade),
             original,
             zoom,
@@ -117,6 +124,8 @@ impl ImageSurface {
     /// A degenerate surface that builds the pipeline but draws nothing.
     fn warmup() -> Self {
         Self {
+            // Warmup never reaches the tiled prepare path, so this id is unused.
+            window: iced::window::Id::unique(),
             texture: None,
             original: (0, 0),
             zoom: 1.0,
@@ -141,6 +150,7 @@ impl<T> shader::Program<T> for ImageSurface {
         _bounds: Rectangle,
     ) -> ImagePrimitive {
         ImagePrimitive {
+            window: self.window,
             texture: self.texture.clone(),
             original: self.original,
             zoom: self.zoom,
@@ -156,6 +166,9 @@ impl<T> shader::Program<T> for ImageSurface {
 
 /// One frame's worth of work handed to the renderer.
 pub struct ImagePrimitive {
+    /// The window this draw belongs to, so a tiled prepare stamps under its
+    /// own id and the demand pass reads back this window's own draw.
+    window: iced::window::Id,
     /// The resident texture to draw. Weak like the surface's (iced retains the
     /// last primitive of a window that stops redrawing). Prepare and draw
     /// upgrade it, and the store cannot free it between them because no update
@@ -255,6 +268,7 @@ impl shader::Primitive for ImagePrimitive {
             if let Some(set) = texture.as_ref().and_then(|t| t.tiles()) {
                 pipeline.prepare_tiles(
                     queue,
+                    self.window,
                     set,
                     dst,
                     src,
