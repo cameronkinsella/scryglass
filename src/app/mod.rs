@@ -34,7 +34,6 @@ pub use crate::components::modal::Message as ModalMessage;
 pub use crate::components::nav_slider::Message as SliderMessage;
 pub use crate::components::settings::Message as SettingsMessage;
 pub use crate::components::toolbar::Message as ToolbarMessage;
-pub use crate::components::video_controls::Message as VideoControlsMessage;
 pub use crate::components::video_controls::Message as VideoMessage;
 pub use crate::components::viewer::Message as ViewerMessage;
 pub use boot::boot;

@@ -6,7 +6,7 @@ use std::time::Duration;
 use iced::widget::{button, container, row, slider, text};
 use iced::{Alignment, Element, Length};
 
-use crate::app::VideoMessage;
+use super::Message;
 use crate::ui::{icons, theme};
 
 /// Inputs for the control bar.
@@ -22,8 +22,8 @@ pub struct VideoControls {
 }
 
 /// Render the transport bar, anchored to the bottom of the image area.
-pub fn video_controls<'a>(state: VideoControls, opacity: f32) -> Element<'a, VideoMessage> {
-    let icon_button = |icon: iced::widget::Text<'a>, msg: VideoMessage| {
+pub fn video_controls<'a>(state: VideoControls, opacity: f32) -> Element<'a, Message> {
+    let icon_button = |icon: iced::widget::Text<'a>, msg: Message| {
         button(icon.size(16))
             .on_press(msg)
             .padding([2, 8])
@@ -56,15 +56,11 @@ pub fn video_controls<'a>(state: VideoControls, opacity: f32) -> Element<'a, Vid
         color: Some(theme::fade(theme::tokens(t).text_primary, opacity)),
     });
 
-    let seek = slider(
-        0.0..=total_secs.max(0.1),
-        shown_secs,
-        VideoMessage::SeekDrag,
-    )
-    .on_release(VideoMessage::SeekRelease)
-    .step(0.000_001)
-    .width(Length::Fill)
-    .style(move |t, s| theme::faded_slider(iced::widget::slider::default(t, s), opacity));
+    let seek = slider(0.0..=total_secs.max(0.1), shown_secs, Message::SeekDrag)
+        .on_release(Message::SeekRelease)
+        .step(0.000_001)
+        .width(Length::Fill)
+        .style(move |t, s| theme::faded_slider(iced::widget::slider::default(t, s), opacity));
 
     let volume_icon = if state.muted || state.volume == 0.0 {
         icons::volume_mute()
@@ -74,7 +70,7 @@ pub fn video_controls<'a>(state: VideoControls, opacity: f32) -> Element<'a, Vid
     let volume = slider(
         0.0..=1.0,
         if state.muted { 0.0 } else { state.volume },
-        VideoMessage::SetVolume,
+        Message::SetVolume,
     )
     .step(0.05)
     .width(Length::Fixed(80.0))
@@ -82,7 +78,7 @@ pub fn video_controls<'a>(state: VideoControls, opacity: f32) -> Element<'a, Vid
 
     let looping = state.looping;
     let loop_button = button(icons::arrow_repeat().size(16))
-        .on_press(VideoMessage::ToggleLoop)
+        .on_press(Message::ToggleLoop)
         .padding([2, 8])
         .style(move |t, s| {
             let base = if looping {
@@ -95,10 +91,10 @@ pub fn video_controls<'a>(state: VideoControls, opacity: f32) -> Element<'a, Vid
 
     let bar = container(
         row![
-            icon_button(play_icon, VideoMessage::PlayPause),
+            icon_button(play_icon, Message::PlayPause),
             time,
             seek,
-            icon_button(volume_icon, VideoMessage::ToggleMute),
+            icon_button(volume_icon, Message::ToggleMute),
             volume,
             loop_button,
         ]
