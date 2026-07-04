@@ -91,7 +91,7 @@ pub(crate) fn tick(win: &mut Window, shared: &mut Shared) -> Task<Message> {
         .video
         .controls_until
         .is_some_and(|until| Instant::now() < until);
-    let target = if crate::app::viewer_math::controls_visible(
+    let target = if crate::components::video_controls::controls_visible(
         playing,
         viewer.video.seek_drag.is_some(),
         controls_alive,
@@ -100,7 +100,7 @@ pub(crate) fn tick(win: &mut Window, shared: &mut Shared) -> Task<Message> {
     } else {
         0.0
     };
-    viewer.video.controls_opacity = crate::app::viewer_math::ease_toward(
+    viewer.video.controls_opacity = crate::components::video_controls::ease_toward(
         viewer.video.controls_opacity,
         target,
         crate::app::CONTROLS_FADE_STEP,

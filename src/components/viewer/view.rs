@@ -25,7 +25,7 @@ pub(crate) fn view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Messa
 
             let image_view = image_view(win, shared);
 
-            let hide_cursor = crate::app::viewer_math::hide_idle_cursor(
+            let hide_cursor = crate::components::video_controls::hide_idle_cursor(
                 viewer.video.session.as_ref().is_some_and(|s| s.playing),
                 viewer.video.seek_drag.is_some(),
                 viewer.video.controls_opacity > 0.0,
