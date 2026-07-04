@@ -109,9 +109,26 @@ pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Envelope>) {
     };
 
     let open = match initial_open_path(initial_path) {
-        Some(path) => {
+        Some(Ok(path)) => {
             win.opening_since = Some(iced::time::Instant::now());
             Envelope::wrap(id, update::open_path(path))
+        }
+        // A CLI path that doesn't exist (a typo, or an "Open with" handoff for
+        // a just-deleted file): open the empty window but say why it is empty.
+        Some(Err(path)) => {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            Envelope::wrap(
+                id,
+                update::push_toast(
+                    &mut win,
+                    &mut shared,
+                    ToastKind::Error,
+                    format!("Couldn't open {name}: no such file or folder"),
+                ),
+            )
         }
         None => Task::none(),
     };
@@ -228,10 +245,15 @@ fn window_icon() -> Option<window::Icon> {
     window::icon::from_rgba(img.into_raw(), w, h).ok()
 }
 
-/// The CLI path, if it points to an existing file or directory.
-fn initial_open_path(path: Option<PathBuf>) -> Option<PathBuf> {
+/// The CLI path, classified: `Ok` points to an existing file or directory and
+/// opens, `Err` points nowhere and boot surfaces it as an error toast.
+fn initial_open_path(path: Option<PathBuf>) -> Option<Result<PathBuf, PathBuf>> {
     let path = path?;
-    (path.is_file() || path.is_dir()).then_some(path)
+    if path.is_file() || path.is_dir() {
+        Some(Ok(path))
+    } else {
+        Some(Err(path))
+    }
 }
 
 #[cfg(test)]
@@ -260,7 +282,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("photo.png");
         fs::write(&file, b"").unwrap();
-        assert_eq!(initial_open_path(Some(file.clone())), Some(file));
+        assert_eq!(initial_open_path(Some(file.clone())), Some(Ok(file)));
     }
 
     #[test]
@@ -268,15 +290,16 @@ mod tests {
         let dir = TempDir::new().unwrap();
         assert_eq!(
             initial_open_path(Some(dir.path().to_path_buf())),
-            Some(dir.path().to_path_buf())
+            Some(Ok(dir.path().to_path_buf()))
         );
     }
 
+    // A missing path is classified, not dropped, so boot can toast about it.
     #[test]
     fn initial_open_path_rejects_missing_path() {
         let dir = TempDir::new().unwrap();
         let missing = dir.path().join("nope.png");
-        assert_eq!(initial_open_path(Some(missing)), None);
+        assert_eq!(initial_open_path(Some(missing.clone())), Some(Err(missing)));
     }
 
     #[test]
