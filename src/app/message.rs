@@ -124,40 +124,37 @@ pub fn is_background_message(msg: &Message) -> bool {
     matches!(msg, Message::Window(w) if !matches!(w, window::Message::CloseRequested(_)))
 }
 
-pub fn is_menu_message(msg: &Message) -> bool {
+/// Async completions and timer ticks: background events that are never the
+/// user interacting, so neither an open toolbar menu nor a context menu may
+/// dismiss on them (the CheckMinimize-closes-menu bug class). Shared by
+/// [`is_menu_message`] and [`is_context_menu_message`], which add only the
+/// arms where the two menus genuinely differ.
+fn is_passive_message(msg: &Message) -> bool {
     matches!(
         msg,
-        Message::Toolbar(_)
-            | Message::Settings(_)
-            | Message::ContextMenu(_)
-            | Message::Open(
-                open::Message::OpenFile
-                    | open::Message::CloseFile
-                    | open::Message::Quit
-                    | open::Message::DirectoryScanned(_, _, _)
-                    | open::Message::DirectoryChanged(_)
-                    | open::Message::DirectoryRescanned(_, _)
-                    | open::Message::ArchiveScanned(_, _)
-                    | open::Message::FileDialogResult(_)
-            )
-            | Message::Media(
-                media::Message::Decoded { .. }
-                    | media::Message::TextureReady { .. }
-                    | media::Message::TileReady { .. }
-                    | media::Message::TilesSettled { .. }
-                    | media::Message::ExactReady { .. }
-                    | media::Message::MintFailed { .. }
-                    | media::Message::DecodeFailed { .. }
-                    | media::Message::AnimDecoded { .. }
-                    | media::Message::ThumbLoaded { .. }
-                    | media::Message::FileSizeProbed(_, _)
-                    | media::Message::Resorted(_)
-                    | media::Message::ExifLoaded(_, _)
-                    | media::Message::ViewRotated { .. }
-                    | media::Message::PromoteCurrent(_)
-                    | media::Message::SpinnerTick
-            )
-            | Message::Toast(toasts::Message::Dismiss(_))
+        Message::Open(
+            open::Message::DirectoryScanned(_, _, _)
+                | open::Message::DirectoryChanged(_)
+                | open::Message::DirectoryRescanned(_, _)
+                | open::Message::ArchiveScanned(_, _)
+                | open::Message::FileDialogResult(_)
+        ) | Message::Media(
+            media::Message::Decoded { .. }
+                | media::Message::TextureReady { .. }
+                | media::Message::TileReady { .. }
+                | media::Message::TilesSettled { .. }
+                | media::Message::ExactReady { .. }
+                | media::Message::MintFailed { .. }
+                | media::Message::DecodeFailed { .. }
+                | media::Message::AnimDecoded { .. }
+                | media::Message::ThumbLoaded { .. }
+                | media::Message::FileSizeProbed(_, _)
+                | media::Message::Resorted(_)
+                | media::Message::ExifLoaded(_, _)
+                | media::Message::ViewRotated { .. }
+                | media::Message::PromoteCurrent(_)
+                | media::Message::SpinnerTick
+        ) | Message::Toast(toasts::Message::Dismiss(_))
             | Message::Filmstrip(filmstrip::Message::Scrolled(_))
             | Message::VideoControls(
                 video_controls::Message::Tick | video_controls::Message::Extracted { .. }
@@ -166,61 +163,45 @@ pub fn is_menu_message(msg: &Message) -> bool {
             | Message::Viewer(
                 viewer::Message::DragMove(_)
                     | viewer::Message::CursorLeft
-                    | viewer::Message::DragEnd
                     | viewer::Message::NextReleased
                     | viewer::Message::PrevReleased
+            )
+    )
+}
+
+pub fn is_menu_message(msg: &Message) -> bool {
+    is_passive_message(msg)
+        || matches!(
+            msg,
+            Message::Toolbar(_)
+                | Message::Settings(_)
+                | Message::ContextMenu(_)
+                | Message::Open(
+                    open::Message::OpenFile | open::Message::CloseFile | open::Message::Quit
+                )
+                | Message::Viewer(
+                    // The dropdown opens on a left click and every left release
+                    // emits DragEnd, so its own opening release must not close
+                    // it. The context menu (right-click) deliberately closes on
+                    // a left release instead.
+                    viewer::Message::DragEnd
                     // Layout toggles live in the Layout menu, so flipping
                     // them leaves it open like its toolbar siblings.
                     | viewer::Message::ToggleInfo
                     | viewer::Message::ToggleCheckerboard
-            )
-            | Message::Modal(modal::Message::RequestDelete | modal::Message::RequestRename)
-    )
+                )
+                | Message::Modal(modal::Message::RequestDelete | modal::Message::RequestRename)
+        )
 }
 
 pub fn is_context_menu_message(msg: &Message) -> bool {
-    matches!(
-        msg,
-        Message::ContextMenu(_)
-            | Message::Toolbar(toolbar::Message::ToggleToolbar)
-            | Message::Modal(modal::Message::RequestDelete | modal::Message::RequestRename)
-            | Message::Open(
-                open::Message::DirectoryScanned(_, _, _)
-                    | open::Message::DirectoryChanged(_)
-                    | open::Message::DirectoryRescanned(_, _)
-                    | open::Message::ArchiveScanned(_, _)
-                    | open::Message::FileDialogResult(_)
-            )
-            | Message::Media(
-                media::Message::Decoded { .. }
-                    | media::Message::TextureReady { .. }
-                    | media::Message::TileReady { .. }
-                    | media::Message::TilesSettled { .. }
-                    | media::Message::ExactReady { .. }
-                    | media::Message::MintFailed { .. }
-                    | media::Message::DecodeFailed { .. }
-                    | media::Message::AnimDecoded { .. }
-                    | media::Message::ThumbLoaded { .. }
-                    | media::Message::FileSizeProbed(_, _)
-                    | media::Message::Resorted(_)
-                    | media::Message::ExifLoaded(_, _)
-                    | media::Message::ViewRotated { .. }
-                    | media::Message::PromoteCurrent(_)
-                    | media::Message::SpinnerTick
-            )
-            | Message::Toast(toasts::Message::Dismiss(_))
-            | Message::Filmstrip(filmstrip::Message::Scrolled(_))
-            | Message::VideoControls(
-                video_controls::Message::Tick | video_controls::Message::Extracted { .. }
-            )
-            | Message::Anim(_)
-            | Message::Viewer(
-                viewer::Message::DragMove(_)
-                    | viewer::Message::CursorLeft
-                    | viewer::Message::NextReleased
-                    | viewer::Message::PrevReleased
-            )
-    )
+    is_passive_message(msg)
+        || matches!(
+            msg,
+            Message::ContextMenu(_)
+                | Message::Toolbar(toolbar::Message::ToggleToolbar)
+                | Message::Modal(modal::Message::RequestDelete | modal::Message::RequestRename)
+        )
 }
 
 #[cfg(test)]
@@ -285,6 +266,45 @@ mod tests {
     fn layout_toggles_keep_the_menu_open() {
         assert!(is_menu_message(&viewer::Message::ToggleInfo.into()));
         assert!(is_menu_message(&viewer::Message::ToggleCheckerboard.into()));
+    }
+
+    #[test]
+    fn passive_completions_flow_through_both_menu_predicates() {
+        // The shared passive set feeds both predicates identically, so a
+        // background completion never closes either menu.
+        for msg in [
+            Message::from(media::Message::SpinnerTick),
+            Message::from(toasts::Message::Dismiss(1)),
+            Message::from(video_controls::Message::Tick),
+            Message::from(viewer::Message::CursorLeft),
+            Message::from(open::Message::FileDialogResult(None)),
+        ] {
+            assert!(is_passive_message(&msg));
+            assert!(is_menu_message(&msg));
+            assert!(is_context_menu_message(&msg));
+        }
+    }
+
+    #[test]
+    fn drag_end_keeps_the_dropdown_but_closes_the_context_menu() {
+        // Deliberate asymmetry: the dropdown opens on a left click, so the
+        // DragEnd from its own opening release must not close it. A left
+        // release anywhere does close the (right-click) context menu.
+        let msg: Message = viewer::Message::DragEnd.into();
+        assert!(is_menu_message(&msg));
+        assert!(!is_context_menu_message(&msg));
+    }
+
+    #[test]
+    fn file_menu_actions_keep_the_dropdown_but_close_the_context_menu() {
+        for msg in [
+            Message::from(open::Message::OpenFile),
+            Message::from(open::Message::CloseFile),
+            Message::from(viewer::Message::ToggleInfo),
+        ] {
+            assert!(is_menu_message(&msg));
+            assert!(!is_context_menu_message(&msg));
+        }
     }
 
     #[test]
