@@ -52,7 +52,6 @@ use std::time::Duration;
 use iced::{Size, Task};
 
 use super::decay::{self, DecayStage};
-use crate::app::viewer_math::{clamp_pan, compute_zoom};
 use crate::app::{Message as AppMessage, Shared, Window, recalc_viewport};
 
 pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) -> Task<AppMessage> {
@@ -70,15 +69,8 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             let zoom_mode = shared.config.standard.display.zoom_mode;
             let viewport = win.viewport_size;
 
-            if let Some(viewer) = win.viewer_mut()
-                && let Some((w, h)) = viewer.displayed.original_size()
-            {
-                if !viewer.manual_zoom {
-                    viewer.zoom = compute_zoom(zoom_mode, w, h, viewport);
-                }
-                let img_w = w as f32 * viewer.zoom;
-                let img_h = h as f32 * viewer.zoom;
-                viewer.pan = clamp_pan(viewer.pan, img_w, img_h, viewport);
+            if let Some(viewer) = win.viewer_mut() {
+                viewer.refit(zoom_mode, viewport);
             }
 
             // A new width would reveal strip only on the right (its offset is
@@ -230,15 +222,8 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             }
             win.viewport_size = size;
             let zoom_mode = shared.config.standard.display.zoom_mode;
-            if let Some(viewer) = win.viewer_mut()
-                && let Some((w, h)) = viewer.displayed.original_size()
-            {
-                if !viewer.manual_zoom {
-                    viewer.zoom = compute_zoom(zoom_mode, w, h, size);
-                }
-                let img_w = w as f32 * viewer.zoom;
-                let img_h = h as f32 * viewer.zoom;
-                viewer.pan = clamp_pan(viewer.pan, img_w, img_h, size);
+            if let Some(viewer) = win.viewer_mut() {
+                viewer.refit(zoom_mode, size);
             }
             // The corrected viewport shifts the placement, like a resize.
             super::settle_tiles(win)

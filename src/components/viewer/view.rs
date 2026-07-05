@@ -182,7 +182,6 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
                 path.and_then(|p| viewer.cache.get(p))
                     .and_then(|lease| lease.texture())
             });
-            let viewport = (win.viewport_size.width, win.viewport_size.height);
             match texture {
                 Some(texture) => ui::image_surface::view(
                     win.id,
@@ -195,30 +194,14 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
                     shared.config.standard.display.zoom_mode,
                     viewer.manual_zoom,
                 ),
-                None => match path.and_then(|p| {
-                    shared
-                        .thumbs
-                        .peek(&crate::media::pipeline::thumb_key(&viewer.source, p))
-                }) {
-                    Some(thumb) => ui::image_display::image_display(
-                        &thumb.handle,
-                        thumb.size,
-                        thumb.original_size,
-                        viewer.zoom,
-                        viewer.pan,
-                        viewport,
-                        false,
-                    ),
-                    // Evicted with no thumbnail (rare and brief): a refocus
-                    // re-decodes behind this empty frame.
-                    None => ui::image_display::empty_viewport(),
-                },
+                // Evicted with no thumbnail (rare and brief): a refocus
+                // re-decodes behind this empty frame.
+                None => blur_fallback(viewer, shared, win, path),
             }
         }
         DisplayedImage::Animated { original_size } => {
             // Like a still, the frame is derived at render time from its resource
             // owner (the player's current frame texture), else the thumbnail blur.
-            let viewport = (win.viewport_size.width, win.viewport_size.height);
             match viewer.anim_player.current_texture() {
                 Some(texture) => ui::image_surface::view(
                     win.id,
@@ -231,22 +214,7 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
                     shared.config.standard.display.zoom_mode,
                     viewer.manual_zoom,
                 ),
-                None => match viewer.displayed_path.as_deref().and_then(|p| {
-                    shared
-                        .thumbs
-                        .peek(&crate::media::pipeline::thumb_key(&viewer.source, p))
-                }) {
-                    Some(thumb) => ui::image_display::image_display(
-                        &thumb.handle,
-                        thumb.size,
-                        thumb.original_size,
-                        viewer.zoom,
-                        viewer.pan,
-                        viewport,
-                        false,
-                    ),
-                    None => ui::image_display::empty_viewport(),
-                },
+                None => blur_fallback(viewer, shared, win, viewer.displayed_path.as_deref()),
             }
         }
         DisplayedImage::Placeholder(thumb) => {
@@ -275,22 +243,7 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
             ),
             // No frame yet, or one dropped on release: the thumbnail blur
             // stands in, exactly like a still or animation without a texture.
-            _ => match viewer.displayed_path.as_deref().and_then(|p| {
-                shared
-                    .thumbs
-                    .peek(&crate::media::pipeline::thumb_key(&viewer.source, p))
-            }) {
-                Some(thumb) => ui::image_display::image_display(
-                    &thumb.handle,
-                    thumb.size,
-                    thumb.original_size,
-                    viewer.zoom,
-                    viewer.pan,
-                    (win.viewport_size.width, win.viewport_size.height),
-                    false,
-                ),
-                None => ui::image_display::empty_viewport(),
-            },
+            _ => blur_fallback(viewer, shared, win, viewer.displayed_path.as_deref()),
         },
         DisplayedImage::Error { message } => ui::image_display::error_viewport(message),
     };
@@ -338,6 +291,33 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
         ])
         .into(),
         _ => image_view,
+    }
+}
+
+/// The thumbnail blur that stands in for a still, animation, or video with no
+/// texture yet: peek the cached thumb for `path` and draw it, else an empty
+/// frame. Shared by the three display arms that can lack a texture.
+fn blur_fallback<'a>(
+    viewer: &'a Viewer,
+    shared: &'a Shared,
+    win: &'a Window,
+    path: Option<&'a std::path::Path>,
+) -> Element<'a, Message> {
+    match path.and_then(|p| {
+        shared
+            .thumbs
+            .peek(&crate::media::pipeline::thumb_key(&viewer.source, p))
+    }) {
+        Some(thumb) => ui::image_display::image_display(
+            &thumb.handle,
+            thumb.size,
+            thumb.original_size,
+            viewer.zoom,
+            viewer.pan,
+            (win.viewport_size.width, win.viewport_size.height),
+            false,
+        ),
+        None => ui::image_display::empty_viewport(),
     }
 }
 

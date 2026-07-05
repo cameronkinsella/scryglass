@@ -35,10 +35,11 @@ pub enum Message {
     EdgePress(Direction),
     EdgeRepeat,
 }
+use iced::Size;
 use iced::Task;
 use iced::time::Instant;
 
-use crate::app::state::{Direction, DisplayedImage, DragState};
+use crate::app::state::{Direction, DisplayedImage, DragState, Viewer};
 use crate::app::update::window::Message as WindowMessage;
 use crate::app::update::{
     NavTarget, complete_navigation, fire_exif, fire_rotate, navigate, push_toast, save_config,
@@ -51,6 +52,7 @@ use crate::app::{
     Message as AppMessage, Shared, Window, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, recalc_viewport,
 };
 use crate::components::toasts::ToastKind;
+use crate::config::ZoomMode;
 use crate::media::store::ImageKey;
 
 pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) -> Task<AppMessage> {
@@ -149,23 +151,12 @@ fn update_view(win: &mut Window, shared: &mut Shared, message: Message) -> Task<
             }
         }
         Message::Escape => {
-            if win.modal.is_some() {
-                win.modal = None;
-                return Task::none();
-            }
-            if win.zoom_slider_open {
-                win.zoom_slider_open = false;
-                return Task::none();
-            }
-            if win.help_open {
-                win.help_open = false;
-                return Task::none();
-            }
+            // The modal, zoom pop-up, help sheet, and open menus are dismissed
+            // by the app dispatch policy (cross-cutting overlay state) before
+            // this runs. Fullscreen, which the viewer owns, exits here.
             if win.fullscreen {
                 return update(win, shared, Message::ToggleFullscreen);
             }
-            win.open_menu = None;
-            win.context_menu_pos = None;
             Task::none()
         }
         Message::NextReleased => release_hold(win, shared, Direction::Forward),
@@ -181,27 +172,18 @@ fn update_view(win: &mut Window, shared: &mut Shared, message: Message) -> Task<
             let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
-            let old = viewer.zoom;
             let factor = if delta_y > 0.0 {
                 ZOOM_STEP
             } else {
                 1.0 / ZOOM_STEP
             };
-            let new = (old * factor).clamp(ZOOM_MIN, ZOOM_MAX);
-            if (new - old).abs() < f32::EPSILON {
-                return Task::none();
-            }
-            viewer.zoom = new;
-            viewer.manual_zoom = true;
-            let d = (
+            let cursor_offset = (
                 cursor.x - viewport.width / 2.0,
                 cursor.y - toolbar_offset - viewport.height / 2.0,
             );
-            viewer.pan = pan_for_zoom_toward_cursor(viewer.pan, viewer.zoom / old, d);
-            if let Some((w, h)) = viewer.displayed.original_size() {
-                let img_w = w as f32 * viewer.zoom;
-                let img_h = h as f32 * viewer.zoom;
-                viewer.pan = clamp_pan(viewer.pan, img_w, img_h, viewport);
+            let target = viewer.zoom * factor;
+            if !viewer.apply_zoom(target, cursor_offset, viewport) {
+                return Task::none();
             }
             // A wheel zoom reaches even an unfocused (hovered) window, where the
             // image may have decayed. Restore it to full-res (re-decoding if its
@@ -221,24 +203,13 @@ fn update_view(win: &mut Window, shared: &mut Shared, message: Message) -> Task<
             let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
-            let old = viewer.zoom;
             let factor = if direction > 0 {
                 ZOOM_STEP
             } else {
                 1.0 / ZOOM_STEP
             };
-            let new = (old * factor).clamp(ZOOM_MIN, ZOOM_MAX);
-            if (new - old).abs() < f32::EPSILON {
-                return Task::none();
-            }
-            viewer.zoom = new;
-            viewer.manual_zoom = true;
-            viewer.pan = pan_for_zoom_toward_cursor(viewer.pan, viewer.zoom / old, (0.0, 0.0));
-            if let Some((w, h)) = viewer.displayed.original_size() {
-                let img_w = w as f32 * viewer.zoom;
-                let img_h = h as f32 * viewer.zoom;
-                viewer.pan = clamp_pan(viewer.pan, img_w, img_h, viewport);
-            }
+            let target = viewer.zoom * factor;
+            viewer.apply_zoom(target, (0.0, 0.0), viewport);
             Task::none()
         }
         Message::ZoomActual => {
@@ -258,18 +229,18 @@ fn update_view(win: &mut Window, shared: &mut Shared, message: Message) -> Task<
         Message::ResetZoom => {
             let zoom_mode = shared.config.standard.display.zoom_mode;
             let viewport = win.viewport_size;
-            let Some(viewer) = win.viewer_mut() else {
-                return Task::none();
-            };
-            viewer.manual_zoom = false;
-            viewer.pan = (0.0, 0.0);
-            if let Some((w, h)) = viewer.displayed.original_size() {
-                viewer.zoom = compute_zoom(zoom_mode, w, h, viewport);
+            if let Some(viewer) = win.viewer_mut() {
+                viewer.manual_zoom = false;
+                viewer.pan = (0.0, 0.0);
+                viewer.refit(zoom_mode, viewport);
             }
             Task::none()
         }
         Message::SetZoom(zoom) => {
-            apply_zoom(win, shared, zoom);
+            let viewport = win.viewport_size;
+            if let Some(viewer) = win.viewer_mut() {
+                viewer.apply_zoom(zoom, (0.0, 0.0), viewport);
+            }
             Task::none()
         }
         Message::ToggleZoomSlider => {
@@ -289,12 +260,10 @@ fn update_view(win: &mut Window, shared: &mut Shared, message: Message) -> Task<
             Task::none()
         }
         Message::NudgeZoom(dir) => {
-            if let Some(zoom) = win.viewer().map(|v| v.zoom) {
-                apply_zoom(
-                    win,
-                    shared,
-                    nudge_zoom_percent(zoom, dir, ZOOM_MIN, ZOOM_MAX),
-                );
+            let viewport = win.viewport_size;
+            if let Some(viewer) = win.viewer_mut() {
+                let target = nudge_zoom_percent(viewer.zoom, dir, ZOOM_MIN, ZOOM_MAX);
+                viewer.apply_zoom(target, (0.0, 0.0), viewport);
             }
             Task::none()
         }
@@ -466,24 +435,39 @@ fn needs_reactivation(win: &Window) -> bool {
     }
 }
 
-/// Set an absolute zoom factor, zooming toward the viewport center.
-fn apply_zoom(win: &mut Window, _shared: &mut Shared, zoom: f32) {
-    let viewport = win.viewport_size;
-    let Some(viewer) = win.viewer_mut() else {
-        return;
-    };
-    let old = viewer.zoom;
-    let new = zoom.clamp(ZOOM_MIN, ZOOM_MAX);
-    if (new - old).abs() < f32::EPSILON {
-        return;
+impl Viewer {
+    /// Apply an absolute zoom, re-anchoring the pan so the source point under
+    /// `cursor_offset` (offset from the viewport center, `(0.0, 0.0)` for the
+    /// center) stays fixed, then clamping the pan into the viewport. Returns
+    /// whether the zoom changed: an epsilon-equal target is left untouched.
+    fn apply_zoom(&mut self, zoom: f32, cursor_offset: (f32, f32), viewport: Size) -> bool {
+        let old = self.zoom;
+        let new = zoom.clamp(ZOOM_MIN, ZOOM_MAX);
+        if (new - old).abs() < f32::EPSILON {
+            return false;
+        }
+        self.zoom = new;
+        self.manual_zoom = true;
+        self.pan = pan_for_zoom_toward_cursor(self.pan, new / old, cursor_offset);
+        if let Some((w, h)) = self.displayed.original_size() {
+            let img_w = w as f32 * new;
+            let img_h = h as f32 * new;
+            self.pan = clamp_pan(self.pan, img_w, img_h, viewport);
+        }
+        true
     }
-    viewer.zoom = new;
-    viewer.manual_zoom = true;
-    viewer.pan = pan_for_zoom_toward_cursor(viewer.pan, new / old, (0.0, 0.0));
-    if let Some((w, h)) = viewer.displayed.original_size() {
-        let img_w = w as f32 * new;
-        let img_h = h as f32 * new;
-        viewer.pan = clamp_pan(viewer.pan, img_w, img_h, viewport);
+
+    /// Recompute the fit zoom for `zoom_mode` unless a manual zoom is set, then
+    /// clamp the pan into the viewport. The refit a resize or reset runs.
+    pub(crate) fn refit(&mut self, zoom_mode: ZoomMode, viewport: Size) {
+        if let Some((w, h)) = self.displayed.original_size() {
+            if !self.manual_zoom {
+                self.zoom = compute_zoom(zoom_mode, w, h, viewport);
+            }
+            let img_w = w as f32 * self.zoom;
+            let img_h = h as f32 * self.zoom;
+            self.pan = clamp_pan(self.pan, img_w, img_h, viewport);
+        }
     }
 }
 
@@ -523,7 +507,6 @@ fn end_edge_hold(win: &mut Window, shared: &mut Shared) -> Task<AppMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::Modal;
     use crate::app::state::Viewer;
     use crate::app::test_support::{TestApp, empty_app, viewing_app};
 
@@ -676,14 +659,6 @@ mod tests {
     }
 
     #[test]
-    fn escape_closes_the_zoom_slider() {
-        let mut app = viewing_app(&["a.png"], 0);
-        app.window.zoom_slider_open = true;
-        let _ = update(&mut app.window, &mut app.shared, Message::Escape);
-        assert!(!app.window.zoom_slider_open);
-    }
-
-    #[test]
     fn close_zoom_slider_closes_it() {
         let mut app = viewing_app(&["a.png"], 0);
         app.window.zoom_slider_open = true;
@@ -728,39 +703,15 @@ mod tests {
         assert_eq!(app.window.viewport_size, app.window.window_size);
     }
 
+    // The overlay-dismissal priority chain (modal, zoom slider, help, menus)
+    // moved to the app dispatch policy; its tests live beside it in
+    // `app::update`. Fullscreen exit stays viewer-local.
     #[test]
-    fn escape_closes_the_modal_before_anything_else() {
-        let mut app = empty_app();
-        app.window.modal = Some(Modal::Settings);
-        app.window.help_open = true;
-        let _ = update(&mut app.window, &mut app.shared, Message::Escape);
-        assert!(app.window.modal.is_none());
-        // Help is left for the next Escape.
-        assert!(app.window.help_open);
-    }
-
-    #[test]
-    fn escape_closes_help_when_no_modal_is_open() {
-        let mut app = empty_app();
-        app.window.help_open = true;
-        let _ = update(&mut app.window, &mut app.shared, Message::Escape);
-        assert!(!app.window.help_open);
-    }
-
-    #[test]
-    fn escape_exits_fullscreen_after_modal_and_help() {
+    fn escape_exits_fullscreen() {
         let mut app = empty_app();
         app.window.fullscreen = true;
         let _ = update(&mut app.window, &mut app.shared, Message::Escape);
         assert!(!app.window.fullscreen);
-    }
-
-    #[test]
-    fn escape_clears_menus_when_nothing_else_is_open() {
-        let mut app = empty_app();
-        app.window.context_menu_pos = Some(iced::Point::ORIGIN);
-        let _ = update(&mut app.window, &mut app.shared, Message::Escape);
-        assert!(app.window.context_menu_pos.is_none());
     }
 
     #[test]

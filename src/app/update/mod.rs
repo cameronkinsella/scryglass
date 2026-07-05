@@ -23,6 +23,7 @@ use iced::Task;
 
 use crate::components::toasts::{Message as ToastMessage, Toast, ToastKind};
 use crate::config::AppConfig;
+use crate::media::pipeline::Pipeline;
 
 pub(crate) use file_ops::{
     copy_bitmap, copy_rgba_bitmap, file_op_target, fire_delete, purge_disk_thumb, validate_rename,
@@ -42,7 +43,7 @@ use super::message::{
     is_background_message, is_context_menu_message, is_menu_message, is_modal_blocked,
 };
 use super::state::Direction;
-use super::{App, Envelope, Message, Shared, Window};
+use super::{App, Envelope, Message, Shared, ViewerMessage, Window};
 
 /// Where a navigation lands: one step in a direction, or an absolute index.
 pub(crate) enum NavTarget {
@@ -129,17 +130,7 @@ fn route(app: &mut App, envelope: Envelope) -> Task<Envelope> {
 /// it), and let the decay tiers pick up the new values on their next pass. Window
 /// geometry only takes effect on the next window.
 fn apply_config(app: &mut App, config: AppConfig) -> Task<Envelope> {
-    app.shared.pipeline.set_ram_budget(
-        config
-            .advanced
-            .resource
-            .large_image_ram_budget
-            .resolve(crate::config::total_system_ram()),
-    );
-    set_prefetch_scaler(config.advanced.resource.prefetch_scaler);
-    app.shared
-        .pipeline
-        .set_prefetch_parallelism(config.advanced.resource.prefetch_parallelism);
+    adopt_runtime_config(&app.shared.pipeline, &config);
     app.shared.config = config;
     let mut tasks = Vec::new();
     for (id, win) in app.windows.iter_mut() {
@@ -148,6 +139,21 @@ fn apply_config(app: &mut App, config: AppConfig) -> Task<Envelope> {
         tasks.push(Envelope::wrap(*id, settle_tiles(win)));
     }
     Task::batch(tasks)
+}
+
+/// Push the config's resource knobs (large-image RAM budget, prefetch scaler and
+/// parallelism) into the live pipeline. Boot and a live config reload adopt them
+/// the same way.
+pub(crate) fn adopt_runtime_config(pipeline: &Pipeline, config: &AppConfig) {
+    pipeline.set_ram_budget(
+        config
+            .advanced
+            .resource
+            .large_image_ram_budget
+            .resolve(crate::config::total_system_ram()),
+    );
+    set_prefetch_scaler(config.advanced.resource.prefetch_scaler);
+    pipeline.set_prefetch_parallelism(config.advanced.resource.prefetch_parallelism);
 }
 
 /// Warn that a live config edit no longer parses, on the focused window (or any
@@ -207,25 +213,43 @@ fn orphaned_media(app: &mut App, message: Message) -> Task<Envelope> {
     let Message::Media(message) = message else {
         return Task::none();
     };
+    match apply_store_transition(&mut app.shared, &message) {
+        Some(outcome) => run_shared_jobs(app, outcome),
+        None => Task::none(),
+    }
+}
+
+/// The store-state transition a media completion drives, with no window display
+/// effects: install a decode or an upload, clear a failure, or forget an
+/// animation. `orphaned_media` runs exactly this when the completion's window is
+/// gone. The live `media::update` handler runs the same core before its own
+/// display work, and should route through this helper too (it lives in
+/// `media.rs`, outside this refactor's touch set). Returns the store's re-mint
+/// jobs, or `None` for a message that drives no still-store transition.
+fn apply_store_transition(
+    shared: &mut Shared,
+    message: &media::Message,
+) -> Option<crate::media::store::StoreOutcome> {
     let outcome = match message {
-        media::Message::Decoded { key, ram, .. } => app.shared.store.on_decoded(key, *ram),
-        media::Message::TextureReady { key, tier, texture } => {
-            app.shared.store.on_minted(key, tier, texture)
+        media::Message::Decoded { key, ram, .. } => {
+            shared.store.on_decoded(key.clone(), (**ram).clone())
         }
-        media::Message::MintFailed { key } => app.shared.store.on_mint_failed(&key),
-        media::Message::DecodeFailed { key, err, .. } => app
-            .shared
+        media::Message::TextureReady { key, tier, texture } => {
+            shared.store.on_minted(key.clone(), *tier, texture.clone())
+        }
+        media::Message::MintFailed { key } => shared.store.on_mint_failed(key),
+        media::Message::DecodeFailed { key, err, .. } => shared
             .store
-            .on_decode_failed(&key, matches!(err, crate::media::MediaError::Cancelled)),
+            .on_decode_failed(key, matches!(err, crate::media::MediaError::Cancelled)),
         // Nobody leases the frames. The still store forgets the key like the
         // live handler does. Tile settles heal through their claim TTL.
         media::Message::AnimDecoded { key, .. } => {
-            app.shared.store.abandon(&key);
-            return Task::none();
+            shared.store.abandon(key);
+            return None;
         }
-        _ => return Task::none(),
+        _ => return None,
     };
-    run_shared_jobs(app, outcome)
+    Some(outcome)
 }
 
 /// Run store jobs that belong to no particular window through any live one.
@@ -293,6 +317,25 @@ fn dispatch(win: &mut Window, shared: &mut Shared, message: Message) -> Task<Mes
         && !is_background_message(&message)
     {
         win.context_menu_pos = None;
+    }
+
+    // Escape dismisses one transient overlay in priority order: the modal, then
+    // the zoom pop-up, then the help sheet. The open menus above are already
+    // cleared by the auto-dismiss policy, and fullscreen (below these) is the
+    // viewer's own exit, so it falls through to the viewer.
+    if matches!(message, Message::Viewer(ViewerMessage::Escape)) {
+        if win.modal.is_some() {
+            win.modal = None;
+            return Task::none();
+        }
+        if win.zoom_slider_open {
+            win.zoom_slider_open = false;
+            return Task::none();
+        }
+        if win.help_open {
+            win.help_open = false;
+            return Task::none();
+        }
     }
 
     // A modal dialog owns the keyboard: hotkey actions go inert so keys the
@@ -390,6 +433,54 @@ mod tests {
             Envelope::Win(id, Message::Viewer(ViewerMessage::Next)),
         );
         assert!(app.windows[&id].viewer().unwrap().pending_nav.is_none());
+    }
+
+    // The Escape overlay-dismissal priority chain is cross-cutting UI policy, so
+    // it lives in dispatch beside the menu auto-dismiss. These drive it through
+    // the app update, the way a real Escape arrives.
+    fn escape(app: &mut App, id: iced::window::Id) {
+        let _ = update(
+            app,
+            Envelope::Win(id, Message::Viewer(ViewerMessage::Escape)),
+        );
+    }
+
+    #[test]
+    fn escape_dismisses_the_modal_before_anything_else() {
+        let (mut app, id) = into_app(empty_app());
+        {
+            let win = app.windows.get_mut(&id).unwrap();
+            win.modal = Some(Modal::Settings);
+            win.help_open = true;
+        }
+        escape(&mut app, id);
+        assert!(app.windows[&id].modal.is_none());
+        // Help is left for the next Escape.
+        assert!(app.windows[&id].help_open);
+    }
+
+    #[test]
+    fn escape_dismisses_the_zoom_slider_when_no_modal_is_open() {
+        let (mut app, id) = into_app(empty_app());
+        app.windows.get_mut(&id).unwrap().zoom_slider_open = true;
+        escape(&mut app, id);
+        assert!(!app.windows[&id].zoom_slider_open);
+    }
+
+    #[test]
+    fn escape_dismisses_help_after_the_modal_and_zoom_slider() {
+        let (mut app, id) = into_app(empty_app());
+        app.windows.get_mut(&id).unwrap().help_open = true;
+        escape(&mut app, id);
+        assert!(!app.windows[&id].help_open);
+    }
+
+    #[test]
+    fn escape_clears_menus_when_nothing_else_is_open() {
+        let (mut app, id) = into_app(empty_app());
+        app.windows.get_mut(&id).unwrap().context_menu_pos = Some(iced::Point::ORIGIN);
+        escape(&mut app, id);
+        assert!(app.windows[&id].context_menu_pos.is_none());
     }
 
     #[test]

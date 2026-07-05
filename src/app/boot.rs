@@ -39,15 +39,7 @@ pub fn boot(initial_path: Option<PathBuf>) -> (App, Task<Envelope>) {
     .discard();
 
     let pipeline = Pipeline::new(disk_thumbs);
-    pipeline.set_ram_budget(
-        config
-            .advanced
-            .resource
-            .large_image_ram_budget
-            .resolve(crate::config::total_system_ram()),
-    );
-    crate::app::update::set_prefetch_scaler(config.advanced.resource.prefetch_scaler);
-    pipeline.set_prefetch_parallelism(config.advanced.resource.prefetch_parallelism);
+    update::adopt_runtime_config(&pipeline, &config);
 
     let mut shared = Shared {
         config,
