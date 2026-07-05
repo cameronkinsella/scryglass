@@ -8,6 +8,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::{GenericNamespaced, Listener, ListenerOptions, Stream, ToNsName};
@@ -78,14 +79,53 @@ pub fn establish(initial_path: Option<&Path>) -> Role {
     }
 }
 
+/// The accept loop's reaction to a run of consecutive `accept()` errors. A
+/// healthy accept resets the streak, so this only ever sees it growing.
+enum AcceptRetry {
+    /// Pause this long, then try again.
+    Backoff(Duration),
+    /// Too many failures in a row: stop the accept thread.
+    GiveUp,
+}
+
+/// Decide how to react after `failures` consecutive `accept()` errors. Mirrors
+/// [`establish`]'s bounded retry: back off briefly instead of spinning a core,
+/// and give up once a broken listener keeps failing.
+fn accept_retry(failures: u32) -> AcceptRetry {
+    const MAX_ACCEPT_FAILURES: u32 = 5;
+    if failures >= MAX_ACCEPT_FAILURES {
+        AcceptRetry::GiveUp
+    } else {
+        // Grow the pause with the streak so a lone blip barely delays a real
+        // connection while a stuck listener winds down toward give-up.
+        AcceptRetry::Backoff(Duration::from_millis(50 * u64::from(failures)))
+    }
+}
+
 /// One blocking thread owns the listener: each connection carries a single path.
 fn spawn_accept_loop(listener: Listener) {
     let (tx, rx) = unbounded_channel();
     let _ = FORWARDS.set(Mutex::new(Some(rx)));
     std::thread::spawn(move || {
+        // Consecutive accept() failures. A success resets it; a stuck listener
+        // backs off and eventually gives up instead of spinning a full core.
+        let mut failures: u32 = 0;
         loop {
-            let Ok(mut stream) = listener.accept() else {
-                continue;
+            let mut stream = match listener.accept() {
+                Ok(stream) => {
+                    failures = 0;
+                    stream
+                }
+                Err(_) => {
+                    failures += 1;
+                    match accept_retry(failures) {
+                        AcceptRetry::Backoff(delay) => {
+                            std::thread::sleep(delay);
+                            continue;
+                        }
+                        AcceptRetry::GiveUp => return,
+                    }
+                }
             };
             let mut payload = String::new();
             if stream.read_to_string(&mut payload).is_ok() {
@@ -106,4 +146,23 @@ pub fn take_forwards() -> Option<UnboundedReceiver<Option<PathBuf>>> {
     FORWARDS
         .get()
         .and_then(|m| m.lock().ok().and_then(|mut g| g.take()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accept_backs_off_with_the_streak_then_gives_up() {
+        // A short streak backs off, and the pause grows with each failure so a
+        // broken listener cannot spin a core.
+        let (first, second) = match (accept_retry(1), accept_retry(2)) {
+            (AcceptRetry::Backoff(a), AcceptRetry::Backoff(b)) => (a, b),
+            _ => panic!("early failures should back off, not give up"),
+        };
+        assert!(second > first, "backoff grows with the streak");
+        // Enough consecutive failures stops the accept thread.
+        assert!(matches!(accept_retry(5), AcceptRetry::GiveUp));
+        assert!(matches!(accept_retry(50), AcceptRetry::GiveUp));
+    }
 }
