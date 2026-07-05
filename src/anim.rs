@@ -124,7 +124,20 @@ impl AnimPlayer {
 
                 let pixels = active.canvas.pixels().to_vec();
                 let handle = Handle::from_rgba(frames.width, frames.height, pixels);
-                let task = upload_frame(handle, current_path.to_path_buf());
+                // Reuse the animation's existing texture by writing the new frame
+                // into it (its size never changes frame to frame), sparing a
+                // per-frame allocate and free. The texture is what is reused, not
+                // the pixel snapshot: the canvas keeps compositing the next frame,
+                // so the to_vec snapshot decouples it from the in-flight write.
+                let dims = (frames.width, frames.height);
+                let existing = active.frame_texture.as_ref().and_then(|k| k.size());
+                let task = if should_reuse(existing, dims) {
+                    let into = active.frame_texture.clone().expect("reuse checked size");
+                    write_frame(handle, into, current_path.to_path_buf())
+                } else {
+                    // First frame, or a re-decode that changed dimensions.
+                    upload_frame(handle, current_path.to_path_buf())
+                };
                 (task, None)
             }
         }
@@ -248,6 +261,13 @@ impl AnimPlayer {
     }
 }
 
+/// Whether the next frame can be written into the existing texture instead of
+/// allocating a fresh one: a texture already exists and its size matches the
+/// animation's dimensions. A re-decode that changed size needs a fresh upload.
+fn should_reuse(existing_size: Option<(u32, u32)>, dims: (u32, u32)) -> bool {
+    existing_size == Some(dims)
+}
+
 /// Upload a composited frame through the still-image worker (off the render
 /// thread) and report its keepalive token. Retries briefly so a frame composited
 /// before the first render still finds the upload worker.
@@ -256,6 +276,28 @@ fn upload_frame(handle: Handle, path: PathBuf) -> Task<AnimMessage> {
         for _ in 0..50 {
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
             if crate::ui::image_surface::submit_upload(handle.clone(), ready_tx) {
+                return AnimMessage::FrameAllocated(path, ready_rx.await.ok());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        AnimMessage::FrameAllocated(path, None)
+    })
+}
+
+/// Write a composited frame into the animation's existing texture in place (no
+/// allocation) and report the same keepalive back. Modeled on `upload_frame`,
+/// retrying briefly for the same reason. `FrameAllocated` then re-stores the
+/// returned keepalive and drives the redraw exactly as a fresh upload does.
+fn write_frame(
+    handle: Handle,
+    into: crate::ui::image_surface::Keepalive,
+    path: PathBuf,
+) -> Task<AnimMessage> {
+    Task::future(async move {
+        for _ in 0..50 {
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            if crate::ui::image_surface::submit_write_frame(handle.clone(), into.clone(), ready_tx)
+            {
                 return AnimMessage::FrameAllocated(path, ready_rx.await.ok());
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -304,6 +346,22 @@ mod tests {
             },
         );
         lease
+    }
+
+    // The Tick reuse-vs-upload choice depends only on the existing texture's
+    // size, which needs a real device to produce. So the decision is factored
+    // into the pure `should_reuse` and tested here directly: after the first
+    // frame lands with a size, a same-dimension tick takes the write-into path,
+    // while a missing or size-changed texture falls back to a fresh upload.
+    #[test]
+    fn reuse_decision_matches_on_dimensions() {
+        // First frame: no texture yet, so allocate fresh.
+        assert!(!should_reuse(None, (2, 2)));
+        // Same dimensions as the resident texture: write into it.
+        assert!(should_reuse(Some((2, 2)), (2, 2)));
+        // A re-decode changed size: allocate fresh instead of writing.
+        assert!(!should_reuse(Some((3, 3)), (2, 2)));
+        assert!(!should_reuse(Some((2, 3)), (2, 2)));
     }
 
     #[test]

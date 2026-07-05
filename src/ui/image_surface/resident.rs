@@ -46,6 +46,15 @@ impl ResidentImage {
         }
     }
 
+    /// The texture to overwrite in place for an animation's next frame, with its
+    /// size. `None` for a tile pyramid or the tokenless test keepalive.
+    pub(super) fn write_target(&self) -> Option<(&wgpu::Texture, (u32, u32))> {
+        match &self.body {
+            Resident::Texture { image, .. } => Some((&image.texture, image.size)),
+            Resident::Tiled(_) | Resident::Empty => None,
+        }
+    }
+
     /// The texture view to sample when rendering this image into another texture
     /// (the view-res downscale), or `None` for the tokenless test keepalive.
     pub(super) fn input_view(&self) -> Option<&wgpu::TextureView> {

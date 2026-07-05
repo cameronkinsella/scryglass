@@ -50,6 +50,15 @@ pub(super) enum Job {
         target: (u32, u32),
         ready: tokio::sync::oneshot::Sender<Keepalive>,
     },
+    /// Overwrite an existing animation texture in place, no allocation. An
+    /// animation's dimensions never change frame to frame, so one texture serves
+    /// its whole life and its bind groups are reused. The same keepalive is
+    /// returned once its texture holds the new frame.
+    WriteFrame {
+        handle: Handle,
+        into: Keepalive,
+        ready: tokio::sync::oneshot::Sender<Keepalive>,
+    },
     Drop(GpuImage),
 }
 
@@ -136,6 +145,76 @@ fn bind_texture(
     }
 }
 
+/// Stage `pixels` through the recycled belt and copy them into `texture`,
+/// growing `staging` when the aligned upload outsizes it. Returns the submission
+/// so the caller waits it out. Shared by a fresh upload and an in-place animation
+/// frame write.
+#[allow(clippy::too_many_arguments)]
+fn stage_copy(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    belt: &mut wgpu::util::StagingBelt,
+    staging: &mut Option<wgpu::Buffer>,
+    staging_cap: &mut u64,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+    texture: &wgpu::Texture,
+) -> wgpu::SubmissionIndex {
+    let bytes_per_row = (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+    let total = bytes_per_row as u64 * height as u64;
+    if *staging_cap < total {
+        *staging = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scryglass image staging"),
+            size: total,
+            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        *staging_cap = total;
+    }
+    let staging_buf = staging.as_ref().expect("staging buffer");
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("scryglass image upload"),
+    });
+    // Copy each row into recycled staging at the aligned row stride, then
+    // schedule the buffer-to-texture copy.
+    if let Some(size) = wgpu::BufferSize::new(total) {
+        let mut view = belt.write_buffer(&mut encoder, staging_buf, 0, size, device);
+        let row = (width * 4) as usize;
+        let stride = bytes_per_row as usize;
+        for y in 0..height as usize {
+            let src = y * row;
+            let dst = y * stride;
+            view[dst..dst + row].copy_from_slice(&pixels[src..src + row]);
+        }
+    }
+    belt.finish();
+    encoder.copy_buffer_to_texture(
+        wgpu::TexelCopyBufferInfo {
+            buffer: staging_buf,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    let submission = queue.submit([encoder.finish()]);
+    belt.recall();
+    submission
+}
+
 /// Whether the upload thread exists yet. It is built by the first frame any
 /// window draws, which a window revealed late (a maximized relaunch) delays.
 pub fn upload_ready() -> bool {
@@ -156,6 +235,36 @@ pub fn submit_upload(handle: Handle, ready: tokio::sync::oneshot::Sender<Keepali
         return false;
     }
     ctx.jobs.send(Job::Upload { handle, ready }).is_ok()
+}
+
+/// Queue a new animation frame to be written into an existing texture in place,
+/// no allocation. Returns false (the caller then falls back to a fresh upload)
+/// when the pipeline is not built yet, the handle is not Rgba, or its dimensions
+/// do not match the target texture (a re-decode changed size).
+pub fn submit_write_frame(
+    handle: Handle,
+    into: Keepalive,
+    ready: tokio::sync::oneshot::Sender<Keepalive>,
+) -> bool {
+    let Some(ctx) = UPLOAD_CONTEXT.get() else {
+        return false;
+    };
+    let Handle::Rgba { width, height, .. } = &handle else {
+        return false;
+    };
+    let Some((_, (tw, th))) = into.write_target() else {
+        return false;
+    };
+    if *width != tw || *height != th {
+        return false;
+    }
+    ctx.jobs
+        .send(Job::WriteFrame {
+            handle,
+            into,
+            ready,
+        })
+        .is_ok()
 }
 
 /// The display scale factor the most recent draw reported (`1.0` before any draw),
@@ -275,61 +384,18 @@ pub(super) fn spawn_upload_thread(
                             continue;
                         };
                         let (width, height) = (*width, *height);
-                        let bytes_per_row =
-                            (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-                        let total = bytes_per_row as u64 * height as u64;
-                        if staging_cap < total {
-                            staging = Some(device.create_buffer(&wgpu::BufferDescriptor {
-                                label: Some("scryglass image staging"),
-                                size: total,
-                                usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-                                mapped_at_creation: false,
-                            }));
-                            staging_cap = total;
-                        }
-                        let staging_buf = staging.as_ref().expect("staging buffer");
                         let texture = create_rgba_texture(&device, width, height, false);
-                        let mut encoder =
-                            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                label: Some("scryglass image upload"),
-                            });
-                        // Copy each row into recycled staging at the aligned row
-                        // stride, then schedule the buffer-to-texture copy.
-                        if let Some(size) = wgpu::BufferSize::new(total) {
-                            let mut view =
-                                belt.write_buffer(&mut encoder, staging_buf, 0, size, &device);
-                            let row = (width * 4) as usize;
-                            let stride = bytes_per_row as usize;
-                            for y in 0..height as usize {
-                                let src = y * row;
-                                let dst = y * stride;
-                                view[dst..dst + row].copy_from_slice(&pixels[src..src + row]);
-                            }
-                        }
-                        belt.finish();
-                        encoder.copy_buffer_to_texture(
-                            wgpu::TexelCopyBufferInfo {
-                                buffer: staging_buf,
-                                layout: wgpu::TexelCopyBufferLayout {
-                                    offset: 0,
-                                    bytes_per_row: Some(bytes_per_row),
-                                    rows_per_image: Some(height),
-                                },
-                            },
-                            wgpu::TexelCopyTextureInfo {
-                                texture: &texture,
-                                mip_level: 0,
-                                origin: wgpu::Origin3d::ZERO,
-                                aspect: wgpu::TextureAspect::All,
-                            },
-                            wgpu::Extent3d {
-                                width,
-                                height,
-                                depth_or_array_layers: 1,
-                            },
+                        let submission = stage_copy(
+                            &device,
+                            &queue,
+                            &mut belt,
+                            &mut staging,
+                            &mut staging_cap,
+                            width,
+                            height,
+                            pixels,
+                            &texture,
                         );
-                        let submission = queue.submit([encoder.finish()]);
-                        belt.recall();
                         let image = bind_texture(
                             &device,
                             &layout,
@@ -348,6 +414,55 @@ pub(super) fn spawn_upload_thread(
                         // Dropping the last Arc frees the texture via `drop_tx`.
                         let resident = ResidentImage::texture(image, drop_tx.clone());
                         let _ = ready.send(resident);
+                    }
+                    Job::WriteFrame {
+                        handle,
+                        into,
+                        ready,
+                    } => {
+                        let Handle::Rgba {
+                            width,
+                            height,
+                            pixels,
+                            ..
+                        } = &handle
+                        else {
+                            // Never reached (frames composite to Rgba). Drop
+                            // `ready` so the awaiter sees no keepalive.
+                            continue;
+                        };
+                        let Some((texture, (tw, th))) = into.write_target() else {
+                            // Not a single texture (drained or tiled). Drop
+                            // `ready` so the caller falls back to a fresh upload.
+                            continue;
+                        };
+                        let (width, height) = (*width, *height);
+                        // submit_write_frame already gated on this. Guard again so
+                        // a texture is never written with mismatched dimensions.
+                        if width != tw || height != th {
+                            continue;
+                        }
+                        let submission = stage_copy(
+                            &device,
+                            &queue,
+                            &mut belt,
+                            &mut staging,
+                            &mut staging_cap,
+                            width,
+                            height,
+                            pixels,
+                            texture,
+                        );
+                        // Wait like Job::Upload: the copy fully completes before
+                        // any later-submitted draw samples the texture, so writing
+                        // the live displayed frame never tears.
+                        let _ = device.poll(wgpu::PollType::Wait {
+                            submission_index: Some(submission),
+                            timeout: None,
+                        });
+                        // Return the SAME keepalive, its texture now holding the
+                        // new frame. No texture or bind groups were created.
+                        let _ = ready.send(into);
                     }
                     Job::RenderDownscale {
                         source,
