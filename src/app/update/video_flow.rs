@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use iced::Task;
 use iced::time::Instant;
@@ -79,6 +79,15 @@ pub(crate) fn fire_video_extract(index: Arc<ArchiveIndex>, entry: PathBuf) -> Ta
 }
 
 pub(crate) fn tick(win: &mut Window, shared: &mut Shared) -> Task<Message> {
+    // A volume drag or nudge burst arms a save deadline. Fire it here on the
+    // update thread once it settles, so the write captures the live config
+    // rather than a stale clone from arm time. A different setting changed
+    // during the settle then survives instead of being reverted.
+    let save = poll_volume_save(shared);
+    Task::batch([save, tick_frame(win, shared)])
+}
+
+fn tick_frame(win: &mut Window, shared: &mut Shared) -> Task<Message> {
     let zoom_mode = shared.config.standard.display.zoom_mode;
     let viewport = win.viewport_size;
     let Some(viewer) = win.viewer_mut() else {
@@ -323,22 +332,49 @@ pub(crate) fn seek_by(win: &mut Window, _shared: &mut Shared, delta: f64) -> Tas
 /// at once, so only the settled value needs the fsync'd write.
 const VOLUME_SAVE_SETTLE: std::time::Duration = std::time::Duration::from_millis(400);
 
-/// The latest volume change. A save armed under an older value no-ops, so a
-/// burst of steps coalesces into one write, like the window-state probe.
-static VOLUME_SAVE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// When the settled volume save is due. Each step pushes it forward, so a burst
+/// coalesces into one write: `tick` fires the save once now passes the deadline.
+/// Sitting on the update thread (via `tick`), the save then reads the live
+/// config, not a clone frozen at arm time.
+static VOLUME_SAVE_DUE: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 
-/// Save the config once the volume rests, superseding any pending save.
-fn debounce_volume_save(shared: &Shared) -> Task<Message> {
-    use std::sync::atomic::Ordering;
-    let seq = VOLUME_SAVE_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
-    let config = shared.config.clone();
-    Task::future(async move {
-        tokio::time::sleep(VOLUME_SAVE_SETTLE).await;
-        if VOLUME_SAVE_SEQ.load(Ordering::Relaxed) == seq {
-            config.save().await;
-        }
-    })
-    .discard()
+/// Push the volume save deadline out past the settle window, superseding any
+/// pending one so a drag or nudge burst writes only once, after it rests.
+fn arm_volume_save() {
+    if let Ok(mut due) = VOLUME_SAVE_DUE.lock() {
+        *due = Some(std::time::Instant::now() + VOLUME_SAVE_SETTLE);
+    }
+}
+
+/// Whether the armed volume save is due now, and the deadline to keep. A passed
+/// deadline fires once and clears (one write per burst); a future one waits.
+fn volume_save_due(
+    now: std::time::Instant,
+    due: Option<std::time::Instant>,
+) -> (bool, Option<std::time::Instant>) {
+    match due {
+        Some(at) if now >= at => (true, None),
+        other => (false, other),
+    }
+}
+
+/// Fire the settled volume save if its deadline has passed, writing the live
+/// config. Called each `tick` while a session runs, so the save lands about one
+/// settle window after the last volume change.
+fn poll_volume_save(shared: &Shared) -> Task<Message> {
+    let ready = {
+        let Ok(mut due) = VOLUME_SAVE_DUE.lock() else {
+            return Task::none();
+        };
+        let (ready, keep) = volume_save_due(std::time::Instant::now(), *due);
+        *due = keep;
+        ready
+    };
+    if ready {
+        Task::future(shared.config.clone().save()).discard()
+    } else {
+        Task::none()
+    }
 }
 
 pub(crate) fn set_volume(win: &mut Window, shared: &mut Shared, volume: f32) -> Task<Message> {
@@ -349,7 +385,8 @@ pub(crate) fn set_volume(win: &mut Window, shared: &mut Shared, volume: f32) -> 
     {
         session.set_volume(volume);
     }
-    debounce_volume_save(shared)
+    arm_volume_save();
+    Task::none()
 }
 
 pub(crate) fn nudge_volume(win: &mut Window, shared: &mut Shared, delta: f32) -> Task<Message> {
@@ -405,6 +442,19 @@ mod tests {
         // Only the disk write is debounced.
         assert_eq!(app.shared.config.standard.video.volume, 0.3);
         assert!(!app.shared.config.standard.video.muted);
+    }
+
+    #[test]
+    fn a_volume_save_fires_once_after_its_deadline_passes() {
+        let now = std::time::Instant::now();
+        // A passed deadline fires and clears, so the burst writes exactly once.
+        let past = now - std::time::Duration::from_millis(1);
+        assert_eq!(volume_save_due(now, Some(past)), (true, None));
+        // A deadline still in the future waits, keeping the pending save armed.
+        let future = now + std::time::Duration::from_millis(1);
+        assert_eq!(volume_save_due(now, Some(future)), (false, Some(future)));
+        // Nothing armed is nothing to do.
+        assert_eq!(volume_save_due(now, None), (false, None));
     }
 
     #[test]
