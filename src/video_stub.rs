@@ -146,6 +146,20 @@ impl VideoSession {
         session
     }
 
+    pub fn resume_at(saved: &SuspendedVideo, path: PathBuf) -> Self {
+        let mut session = Self::open(
+            path,
+            Duration::ZERO,
+            saved.volume,
+            saved.muted,
+            saved.looping,
+            false,
+        );
+        session.playing = saved.playing;
+        session.temp = saved.temp.clone();
+        session
+    }
+
     pub fn looping(&self) -> bool {
         self.looping
     }

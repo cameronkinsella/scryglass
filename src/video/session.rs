@@ -280,6 +280,30 @@ impl VideoSession {
         session
     }
 
+    /// Re-open a suspended session under a new `path`, otherwise identical to
+    /// [`resume`](Self::resume). Used when the file was renamed while the
+    /// session was down, so playback continues under the new name at the saved
+    /// position, carrying the known duration, temp guard, hardware choice, and
+    /// pause state forward.
+    pub fn resume_at(saved: &SuspendedVideo, path: PathBuf) -> Self {
+        let mut session = Self::open(
+            path,
+            saved.position,
+            saved.volume,
+            saved.muted,
+            saved.looping,
+            saved.hardware,
+        );
+        session
+            .duration_us
+            .store(saved.duration_us, Ordering::Relaxed);
+        session.temp = saved.temp.clone();
+        if !saved.playing {
+            session.pause();
+        }
+        session
+    }
+
     /// Playback clock relative to the session start.
     fn clock(&self) -> Duration {
         compute_clock(

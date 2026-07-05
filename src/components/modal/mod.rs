@@ -307,18 +307,14 @@ fn resume_video(win: &mut Window, resume: VideoResume) {
     viewer.video.session = Some(crate::video::VideoSession::resume(&resume.0));
 }
 
-/// Reopen a torn-down video whose file was renamed. The memo keeps its fields
-/// private, so resume at the recorded name, re-point the session's path, and
-/// respawn through its own `reopen_at`, which carries the known duration, the
-/// temp guard, and the pause state. The intermediate session opens a name
-/// that no longer exists and is dropped before it is ever polled.
+/// Reopen a torn-down video whose file was renamed, resuming at its saved
+/// position under the new `path`. The memo carries the known duration, temp
+/// guard, hardware choice, and pause state forward.
 fn resume_video_at(win: &mut Window, resume: VideoResume, path: PathBuf) {
     let Some(viewer) = win.viewer_mut() else {
         return;
     };
-    let mut at_old_name = crate::video::VideoSession::resume(&resume.0);
-    at_old_name.path = path;
-    viewer.video.session = Some(at_old_name.reopen_at(at_old_name.position()));
+    viewer.video.session = Some(crate::video::VideoSession::resume_at(&resume.0, path));
 }
 
 /// How the view should react to a successful rename.
