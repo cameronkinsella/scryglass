@@ -92,7 +92,7 @@ impl<T> shader::Program<T> for VideoSurface {
             zoom_mode: self.zoom_mode,
             manual_zoom: self.manual_zoom,
             high_quality: self.high_quality,
-            nearest: self.pixelated && self.zoom > 1.0,
+            pixelated: self.pixelated,
         }
     }
 }
@@ -105,13 +105,14 @@ pub struct VideoPrimitive {
     zoom_mode: ZoomMode,
     manual_zoom: bool,
     high_quality: bool,
-    nearest: bool,
+    pixelated: bool,
 }
 
 impl VideoPrimitive {
-    /// Resolve the placement for the render-time image-area size (`bounds`).
-    fn placement(&self, viewport: (f32, f32)) -> SurfacePlacement {
-        let zoom = if self.manual_zoom {
+    /// The zoom the frame actually draws at in `viewport`: the manual zoom,
+    /// or the fit recomputed from the render-time size, like the placement.
+    fn resolved_zoom(&self, viewport: (f32, f32)) -> f32 {
+        if self.manual_zoom {
             self.zoom
         } else {
             compute_zoom(
@@ -120,9 +121,13 @@ impl VideoPrimitive {
                 self.frame.height,
                 Size::new(viewport.0, viewport.1),
             )
-        };
+        }
+    }
+
+    /// Resolve the placement for the render-time image-area size (`bounds`).
+    fn placement(&self, viewport: (f32, f32)) -> SurfacePlacement {
         let original = (self.frame.width, self.frame.height);
-        SurfacePlacement::new(zoom, self.pan, viewport, original)
+        SurfacePlacement::new(self.resolved_zoom(viewport), self.pan, viewport, original)
     }
 }
 
@@ -161,6 +166,12 @@ impl shader::Primitive for VideoPrimitive {
                 snap_footprint_to_unit(raw[0] / scale),
                 snap_footprint_to_unit(raw[1] / scale),
             ];
+            // Nearest sampling keys off the zoom the frame actually draws at,
+            // resolved from the same render-time bounds as the placement. The
+            // update-side estimate lags during a live resize and could pick
+            // the wrong sampler for a fit zoom straddling 1.0. Stored on the
+            // pipeline (prepare cannot reach draw through the primitive).
+            let nearest = self.pixelated && self.resolved_zoom(vp) > 1.0;
             pipeline.prepare(
                 device,
                 queue,
@@ -168,13 +179,14 @@ impl shader::Primitive for VideoPrimitive {
                 placement.dst,
                 placement.src,
                 footprint,
+                nearest,
             );
         }
     }
 
     fn draw(&self, pipeline: &VideoPipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
         if self.frame.width > 0 && self.frame.height > 0 && self.zoom > 0.0 {
-            pipeline.draw(render_pass, self.nearest, self.high_quality);
+            pipeline.draw(render_pass, self.high_quality);
         }
         true
     }

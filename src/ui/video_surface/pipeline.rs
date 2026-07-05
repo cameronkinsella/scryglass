@@ -22,6 +22,10 @@ pub struct VideoPipeline {
     sampler_linear: wgpu::Sampler,
     sampler_nearest: wgpu::Sampler,
     is_srgb: bool,
+    /// Whether the current frame draws through the nearest sampler, resolved
+    /// per prepare() from the placement zoom (like the uniforms), since the
+    /// primitive cannot carry prepare-time results into draw.
+    nearest: bool,
     textures: Option<YuvTextures>,
     last_id: Option<u64>,
     /// Scratch buffers for the keep-alive, allocated on first use.
@@ -146,6 +150,7 @@ impl shader::Pipeline for VideoPipeline {
             sampler_linear: device.create_sampler(&sampler_desc(wgpu::FilterMode::Linear)),
             sampler_nearest: device.create_sampler(&sampler_desc(wgpu::FilterMode::Nearest)),
             is_srgb: format.is_srgb(),
+            nearest: false,
             textures: None,
             last_id: None,
             keepalive: None,
@@ -154,6 +159,7 @@ impl shader::Pipeline for VideoPipeline {
 }
 
 impl VideoPipeline {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn prepare(
         &mut self,
         device: &wgpu::Device,
@@ -162,7 +168,9 @@ impl VideoPipeline {
         dst: [f32; 4],
         src: [f32; 4],
         footprint: [f32; 2],
+        nearest: bool,
     ) {
+        self.nearest = nearest;
         // Hold the memory clock up once decode has stuttered. See
         // `gpu_keepalive`.
         if crate::gpu_keepalive::needed() {
@@ -339,16 +347,11 @@ impl VideoPipeline {
         }
     }
 
-    pub(super) fn draw(
-        &self,
-        render_pass: &mut wgpu::RenderPass<'_>,
-        nearest: bool,
-        high_quality: bool,
-    ) {
+    pub(super) fn draw(&self, render_pass: &mut wgpu::RenderPass<'_>, high_quality: bool) {
         let Some(textures) = &self.textures else {
             return;
         };
-        let bind = if nearest {
+        let bind = if self.nearest {
             &textures.bind_nearest
         } else {
             &textures.bind_linear
