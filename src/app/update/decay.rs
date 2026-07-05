@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use iced::{Size, Task};
+use iced::{Size, Task, window};
 
 use super::window::Message;
 use super::{fire_load, fire_prefetch, fire_rotate, run_jobs_at, try_start_shared_anim};
@@ -99,6 +99,7 @@ pub(super) fn run_decay_stage(
     }
     let view = win.viewport_size;
     let minimized = win.minimized;
+    let window = win.id;
     let pipeline = shared.pipeline.clone();
     let Some(viewer) = win.viewer_mut() else {
         return Task::none();
@@ -119,12 +120,12 @@ pub(super) fn run_decay_stage(
     match stage {
         DecayStage::Demote => {
             // Demote the on-screen image to a smaller view-res texture.
-            retarget_displayed(viewer, shared, Tier::View, &pipeline, view)
+            retarget_displayed(window, viewer, shared, Tier::View, &pipeline, view)
         }
         DecayStage::DropVram => {
             // Drop the texture. The view falls back to the thumbnail blur, and a
             // refocus re-uploads from the RAM source with no disk read.
-            retarget_displayed(viewer, shared, Tier::InRam, &pipeline, view)
+            retarget_displayed(window, viewer, shared, Tier::InRam, &pipeline, view)
         }
         DecayStage::EvictRam => {
             let is_anim = matches!(viewer.displayed, DisplayedImage::Animated { .. });
@@ -145,7 +146,7 @@ pub(super) fn run_decay_stage(
                 // no window wants it higher. While another window holds the image it
                 // stays sharp. Once the last holder releases it the cell empties and
                 // the view falls back to the blur. A return re-decodes.
-                retarget_displayed(viewer, shared, Tier::Evicted, &pipeline, view)
+                retarget_displayed(window, viewer, shared, Tier::Evicted, &pipeline, view)
             }
         }
         DecayStage::EvictVideo | DecayStage::ShedPrefetch => {
@@ -189,6 +190,7 @@ fn stage_rank(stage: DecayStage) -> u8 {
 /// for (a smaller texture when demoting full to view). A no-op when nothing is on
 /// screen or it is not leased by this window.
 fn retarget_displayed(
+    window: window::Id,
     viewer: &mut Viewer,
     shared: &mut Shared,
     tier: Tier,
@@ -205,7 +207,14 @@ fn retarget_displayed(
         return Task::none();
     };
     let outcome = shared.store.retarget(lease, tier);
-    run_jobs_at(outcome.jobs, pipeline, Lane::Prefetch, view, Some(zoom))
+    run_jobs_at(
+        window,
+        outcome.jobs,
+        pipeline,
+        Lane::Prefetch,
+        view,
+        Some(zoom),
+    )
 }
 
 /// Re-evaluate the window's resource state after a focus or minimize change.
@@ -353,6 +362,7 @@ fn restore_display(
         return Vec::new();
     }
     let focused = win.focused;
+    let window = win.id;
     let pipeline = shared.pipeline.clone();
     let Some(viewer) = win.viewer_mut() else {
         return Vec::new();
@@ -377,6 +387,7 @@ fn restore_display(
                 tasks.push(anim_task.map(AppMessage::Anim));
             } else {
                 tasks.push(fire_load(
+                    window,
                     &mut shared.store,
                     &pipeline,
                     viewer,
@@ -387,6 +398,7 @@ fn restore_display(
             }
         } else {
             tasks.push(fire_load(
+                window,
                 &mut shared.store,
                 &pipeline,
                 viewer,
@@ -402,6 +414,7 @@ fn restore_display(
     // scroll restores only the visible image.
     if focused {
         tasks.extend(fire_prefetch(
+            window,
             &mut shared.store,
             &pipeline,
             viewer,

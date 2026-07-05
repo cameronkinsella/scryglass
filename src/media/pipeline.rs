@@ -2,18 +2,22 @@
 //!
 //! Loads go through three steps: async file read, decode on a blocking
 //! worker, GPU upload (done by the caller), with staleness checks between
-//! steps. Every navigation bumps a generation counter, and loads fired for an
-//! older generation bail out with [`MediaError::Cancelled`] at the next
-//! checkpoint instead of wasting a worker on a result nobody wants.
+//! steps. Every navigation bumps a generation counter scoped to its window,
+//! and loads fired for an older generation of the same window bail out with
+//! [`MediaError::Cancelled`] at the next checkpoint instead of wasting a
+//! worker on a result nobody wants. Scoping cancellation to the window keeps
+//! one window's browsing from restarting another window's in-flight decodes.
 //! The caller re-fires cancelled loads that are still relevant.
 //!
 //! Two semaphore lanes keep the image being viewed ahead of prefetch:
 //! a stampede of prefetch requests can never starve the current image.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use iced::window;
 use tokio::io::AsyncReadExt;
 use tokio::sync::Semaphore;
 
@@ -78,7 +82,13 @@ impl Source {
 /// Shared load orchestrator. Cheap to clone.
 #[derive(Clone)]
 pub struct Pipeline {
-    generation: Arc<AtomicU64>,
+    /// Per-window navigation generations. A window's bump cancels only its
+    /// own in-flight loads (see [`Pipeline::bump_generation_for`]).
+    generations: Arc<std::sync::Mutex<HashMap<window::Id, Arc<AtomicU64>>>>,
+    /// Generation scope for jobs that belong to no window (store re-mints and
+    /// decodes surfacing after their window closed). Nothing bumps it, so a
+    /// window-less job is never cancelled by any window's navigation.
+    shared_scope: window::Id,
     /// Separate generation for background thumbnails, bumped when the cursor
     /// jumps so stale filmstrip work yields to the new neighborhood.
     thumb_generation: Arc<AtomicU64>,
@@ -100,7 +110,8 @@ impl Pipeline {
     pub fn new(disk: Option<DiskThumbs>) -> Self {
         let prefetch_permits = crate::config::PrefetchParallelism::default().resolve();
         Self {
-            generation: Arc::new(AtomicU64::new(0)),
+            generations: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            shared_scope: window::Id::unique(),
             thumb_generation: Arc::new(AtomicU64::new(0)),
             current_lane: Arc::new(Semaphore::new(2)),
             prefetch_lane: Arc::new(std::sync::Mutex::new(Arc::new(Semaphore::new(
@@ -148,14 +159,31 @@ impl Pipeline {
         }
     }
 
-    /// The generation of the most recent navigation.
-    pub fn generation(&self) -> u64 {
-        self.generation.load(Ordering::SeqCst)
+    /// The generation cell for `window`, created on first use.
+    fn scope(&self, window: window::Id) -> Arc<AtomicU64> {
+        self.generations
+            .lock()
+            .map(|mut scopes| scopes.entry(window).or_default().clone())
+            .unwrap_or_default()
     }
 
-    /// Mark a new navigation. Loads fired for older generations become stale.
-    pub fn bump_generation(&self) -> u64 {
-        self.generation.fetch_add(1, Ordering::SeqCst) + 1
+    /// The generation of `window`'s most recent navigation.
+    pub fn generation_for(&self, window: window::Id) -> u64 {
+        self.scope(window).load(Ordering::SeqCst)
+    }
+
+    /// Mark a new navigation in `window`. Loads fired there for older
+    /// generations become stale. Other windows' loads are untouched.
+    pub fn bump_generation_for(&self, window: window::Id) -> u64 {
+        self.scope(window).fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// The generation scope for jobs that belong to no window: store re-mints
+    /// off the shared pump, and decodes that surface after their window closed.
+    /// No window's bump touches it, so a window-less job is never cancelled by
+    /// browsing in any window. Passed as the scope when running such jobs.
+    pub fn shared_scope(&self) -> window::Id {
+        self.shared_scope
     }
 
     /// The current background-thumbnail generation.
@@ -169,17 +197,19 @@ impl Pipeline {
         self.thumb_generation.fetch_add(1, Ordering::SeqCst) + 1
     }
 
-    /// Load and decode `path`. Returns [`MediaError::Cancelled`] if a newer
-    /// generation supersedes this load before it finishes decoding.
-    pub fn load(
+    /// Load and decode `path` for `window`. Returns [`MediaError::Cancelled`]
+    /// if a newer generation in the same window supersedes this load before
+    /// it finishes decoding.
+    pub fn load_for(
         &self,
+        window: window::Id,
         source: Source,
         path: PathBuf,
         opts: DecodeOpts,
         lane: Lane,
         generation: u64,
     ) -> impl Future<Output = Result<DecodedMedia, MediaError>> + Send + 'static {
-        let live = self.generation.clone();
+        let live = self.scope(window);
         let semaphore = match lane {
             Lane::Current => self.current_lane.clone(),
             Lane::Prefetch => self
@@ -567,10 +597,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = write_png(&dir, "a.png", 4, 2);
         let pipeline = Pipeline::new(None);
-        let generation = pipeline.generation();
+        let window = window::Id::unique();
+        let generation = pipeline.generation_for(window);
 
         let media = pipeline
-            .load(
+            .load_for(
+                window,
                 Source::Fs,
                 path,
                 DecodeOpts::default(),
@@ -590,13 +622,15 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = write_png(&dir, "a.png", 4, 2);
         let pipeline = Pipeline::new(None);
-        let generation = pipeline.generation();
+        let window = window::Id::unique();
+        let generation = pipeline.generation_for(window);
 
         // Supersede the load before it runs.
-        pipeline.bump_generation();
+        pipeline.bump_generation_for(window);
 
         let result = pipeline
-            .load(
+            .load_for(
+                window,
                 Source::Fs,
                 path,
                 DecodeOpts::default(),
@@ -612,14 +646,16 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = write_png(&dir, "a.png", 4, 2);
         let pipeline = Pipeline::new(None);
-        let generation = pipeline.generation();
+        let window = window::Id::unique();
+        let generation = pipeline.generation_for(window);
 
         // Hold every permit so the load parks at the semaphore.
         let held: Vec<_> = (0..2)
             .map(|_| pipeline.current_lane.clone().try_acquire_owned().unwrap())
             .collect();
 
-        let task = tokio::spawn(pipeline.load(
+        let task = tokio::spawn(pipeline.load_for(
+            window,
             Source::Fs,
             path,
             DecodeOpts::default(),
@@ -627,11 +663,118 @@ mod tests {
             generation,
         ));
 
-        pipeline.bump_generation();
+        pipeline.bump_generation_for(window);
         drop(held);
 
         let result = task.await.unwrap();
         assert!(matches!(result, Err(MediaError::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn another_windows_bump_leaves_an_in_flight_load_alone() {
+        let dir = TempDir::new().unwrap();
+        let path = write_png(&dir, "a.png", 4, 2);
+        let pipeline = Pipeline::new(None);
+        let mine = window::Id::unique();
+        let other = window::Id::unique();
+        let generation = pipeline.generation_for(mine);
+
+        // Park the load at the lane, bump the other window, then release.
+        let held: Vec<_> = (0..2)
+            .map(|_| pipeline.current_lane.clone().try_acquire_owned().unwrap())
+            .collect();
+        let task = tokio::spawn(pipeline.load_for(
+            mine,
+            Source::Fs,
+            path,
+            DecodeOpts::default(),
+            Lane::Current,
+            generation,
+        ));
+        pipeline.bump_generation_for(other);
+        drop(held);
+
+        let media = task
+            .await
+            .unwrap()
+            .expect("another window's bump must not cancel this load");
+        assert!(matches!(media, DecodedMedia::Static(_)));
+    }
+
+    #[tokio::test]
+    async fn a_windows_own_bump_cancels_its_stale_load() {
+        let dir = TempDir::new().unwrap();
+        let path = write_png(&dir, "a.png", 4, 2);
+        let pipeline = Pipeline::new(None);
+        let mine = window::Id::unique();
+        let generation = pipeline.generation_for(mine);
+        pipeline.bump_generation_for(mine);
+        let result = pipeline
+            .load_for(
+                mine,
+                Source::Fs,
+                path,
+                DecodeOpts::default(),
+                Lane::Current,
+                generation,
+            )
+            .await;
+        assert!(matches!(result, Err(MediaError::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn a_shared_scope_bump_leaves_window_loads_alone() {
+        let dir = TempDir::new().unwrap();
+        let path = write_png(&dir, "a.png", 4, 2);
+        let pipeline = Pipeline::new(None);
+        let mine = window::Id::unique();
+        let generation = pipeline.generation_for(mine);
+        pipeline.bump_generation_for(pipeline.shared_scope());
+        let result = pipeline
+            .load_for(
+                mine,
+                Source::Fs,
+                path,
+                DecodeOpts::default(),
+                Lane::Current,
+                generation,
+            )
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_shared_scope_load_survives_a_window_bump() {
+        // Window-less store jobs (a re-mint off the shared pump, or a decode
+        // that outlived its window) run under the shared scope. No window's
+        // bump reaches it, so browsing elsewhere never cancels one.
+        let dir = TempDir::new().unwrap();
+        let path = write_png(&dir, "a.png", 4, 2);
+        let pipeline = Pipeline::new(None);
+        let shared = pipeline.shared_scope();
+        let other = window::Id::unique();
+        let generation = pipeline.generation_for(shared);
+
+        // Park the load at the lane, bump an unrelated window, then release.
+        let held: Vec<_> = (0..2)
+            .map(|_| pipeline.current_lane.clone().try_acquire_owned().unwrap())
+            .collect();
+        let task = tokio::spawn(pipeline.load_for(
+            shared,
+            Source::Fs,
+            path,
+            DecodeOpts::default(),
+            Lane::Current,
+            generation,
+        ));
+        pipeline.bump_generation_for(other);
+        drop(held);
+
+        let media = task
+            .await
+            .unwrap()
+            .expect("a window's bump must not cancel a shared-scope load");
+        assert!(matches!(media, DecodedMedia::Static(_)));
     }
 
     #[tokio::test]
@@ -741,9 +884,11 @@ mod tests {
     #[tokio::test]
     async fn missing_file_is_a_read_error() {
         let pipeline = Pipeline::new(None);
-        let generation = pipeline.generation();
+        let window = window::Id::unique();
+        let generation = pipeline.generation_for(window);
         let result = pipeline
-            .load(
+            .load_for(
+                window,
                 Source::Fs,
                 PathBuf::from("definitely/not/here.png"),
                 DecodeOpts::default(),
@@ -760,9 +905,11 @@ mod tests {
         let path = dir.path().join("notes.xyz");
         std::fs::write(&path, b"this is not an image at all").unwrap();
         let pipeline = Pipeline::new(None);
-        let generation = pipeline.generation();
+        let window = window::Id::unique();
+        let generation = pipeline.generation_for(window);
         let result = pipeline
-            .load(
+            .load_for(
+                window,
                 Source::Fs,
                 path,
                 DecodeOpts::default(),

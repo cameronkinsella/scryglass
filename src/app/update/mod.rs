@@ -242,7 +242,11 @@ fn run_shared_jobs(app: &mut App, outcome: crate::media::store::StoreOutcome) ->
         return Task::none();
     };
     let pipeline = app.shared.pipeline.clone();
+    // These jobs belong to no window: run them under the pipeline's shared
+    // scope, which no window's bump reaches, so navigating any window never
+    // cancels them. `id` is only where the completion routes, not the scope.
     let task = run_jobs(
+        pipeline.shared_scope(),
         outcome.jobs,
         &pipeline,
         crate::media::pipeline::Lane::Prefetch,

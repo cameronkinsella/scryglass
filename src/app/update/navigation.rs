@@ -137,6 +137,7 @@ pub(crate) fn open_viewer(
             ThumbUrgency::Urgent,
         ));
         tasks.push(fire_load(
+            window_id,
             &mut shared.store,
             &pipeline,
             &mut viewer,
@@ -183,6 +184,7 @@ pub(crate) fn open_viewer(
     ));
     // Prefetch after thumbnailing (see complete_navigation).
     tasks.extend(fire_prefetch(
+        window_id,
         &mut shared.store,
         &pipeline,
         &mut viewer,
@@ -302,6 +304,7 @@ fn reset_for_move(viewer: &mut Viewer, zoom_mode: ZoomMode) {
 pub(crate) fn navigate(win: &mut Window, shared: &mut Shared, target: NavTarget) -> Task<Message> {
     let pipeline = shared.pipeline.clone();
     let view = win.viewport_size;
+    let window_id = win.id;
     let Some(viewer) = win.viewer_mut() else {
         return Task::none();
     };
@@ -351,6 +354,7 @@ pub(crate) fn navigate(win: &mut Window, shared: &mut Shared, target: NavTarget)
             ThumbUrgency::Urgent,
         ),
         fire_load(
+            window_id,
             &mut shared.store,
             &pipeline,
             viewer,
@@ -491,8 +495,9 @@ pub(crate) fn complete_navigation(
 
     if bump_generation {
         // Everything in flight for the old position is now stale, including
-        // background thumbnails for the neighborhood left behind.
-        pipeline.bump_generation();
+        // background thumbnails for the neighborhood left behind. Only this
+        // window's own in-flight decodes cancel; other windows keep browsing.
+        pipeline.bump_generation_for(window_id);
         pipeline.bump_thumb_generation();
         // Forget the queued thumbnails so the new neighborhood re-fires now
         // instead of waiting behind the stale queue. The stale tasks bail.
@@ -547,6 +552,7 @@ pub(crate) fn complete_navigation(
             Tier::Full
         };
         tasks.push(fire_load(
+            window_id,
             &mut shared.store,
             &pipeline,
             viewer,
@@ -580,6 +586,7 @@ pub(crate) fn complete_navigation(
             show_placeholder_or_clear(viewer, &shared.thumbs, &current, zoom_mode, viewport);
             if want < Tier::Full {
                 tasks.push(fire_load(
+                    window_id,
                     &mut shared.store,
                     &pipeline,
                     viewer,
@@ -644,6 +651,7 @@ pub(crate) fn complete_navigation(
         show_filmstrip,
     ));
     tasks.extend(fire_prefetch(
+        window_id,
         &mut shared.store,
         &pipeline,
         viewer,

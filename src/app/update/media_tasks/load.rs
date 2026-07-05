@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use iced::widget::image::Handle;
-use iced::{Size, Task};
+use iced::{Size, Task, window};
 
 use crate::app::state::{Thumb, Viewer};
 use crate::app::{MediaMessage, Message};
@@ -54,6 +54,7 @@ fn downscale(handle: &Handle, target: (u32, u32)) -> Handle {
 /// Already-leased here, it only raises the tier if this request wants more.
 /// Animations and videos keep their own paths.
 pub(crate) fn fire_load(
+    window: window::Id,
     store: &mut Store,
     pipeline: &Pipeline,
     viewer: &mut Viewer,
@@ -69,7 +70,7 @@ pub(crate) fn fire_load(
         // Keep the higher demand, and reconcile even when it is unchanged:
         // the touch heals an entry whose completion message was lost.
         let outcome = store.retarget(lease, want.max(lease.want()));
-        return run_jobs(outcome.jobs, pipeline, lane, view);
+        return run_jobs(window, outcome.jobs, pipeline, lane, view);
     }
     let key = ImageKey::new(&viewer.source, &path);
     let (lease, outcome) = store.request(key, path.clone(), viewer.source.clone(), want);
@@ -85,7 +86,7 @@ pub(crate) fn fire_load(
         viewer.in_flight.insert(path.clone());
     }
     viewer.cache.insert(path, lease);
-    run_jobs(outcome.jobs, pipeline, lane, view)
+    run_jobs(window, outcome.jobs, pipeline, lane, view)
 }
 
 /// If `path`'s decoded frames are resident in the shared animation store (this
@@ -128,18 +129,20 @@ pub(crate) fn try_start_shared_anim(
 /// from disk (or finds an animation). An upload pushes RAM to the GPU. Each
 /// reports back so the store can install the result and swap the shared cell.
 pub(crate) fn run_jobs(
+    window: window::Id,
     jobs: Vec<Job>,
     pipeline: &Pipeline,
     lane: Lane,
     view: Size,
 ) -> Task<Message> {
-    run_jobs_at(jobs, pipeline, lane, view, None)
+    run_jobs_at(window, jobs, pipeline, lane, view, None)
 }
 
 /// Like [`run_jobs`], but for a demote of the on-screen image `zoom` is its current
 /// zoom, so its view-res copy is sized to what is actually displayed rather than the
 /// fit zoom it opened at. `None` (prefetch and fresh loads) uses the fit zoom.
 pub(crate) fn run_jobs_at(
+    window: window::Id,
     jobs: Vec<Job>,
     pipeline: &Pipeline,
     lane: Lane,
@@ -148,11 +151,12 @@ pub(crate) fn run_jobs_at(
 ) -> Task<Message> {
     Task::batch(
         jobs.into_iter()
-            .map(|job| run_job(job, pipeline, lane, view, zoom)),
+            .map(|job| run_job(window, job, pipeline, lane, view, zoom)),
     )
 }
 
 fn run_job(
+    window: window::Id,
     job: Job,
     pipeline: &Pipeline,
     lane: Lane,
@@ -161,8 +165,9 @@ fn run_job(
 ) -> Task<Message> {
     match job {
         Job::Decode { key, path, source } => {
-            let generation = pipeline.generation();
-            let load = pipeline.load(
+            let generation = pipeline.generation_for(window);
+            let load = pipeline.load_for(
+                window,
                 source,
                 path.clone(),
                 pipeline.decode_opts(),
@@ -353,6 +358,7 @@ pub(crate) fn set_prefetch_scaler(scaler: crate::config::PrefetchScaler) {
 /// Warm the prefetch window around the cursor, each neighbor leased at the tier
 /// the `prefetch_vram` setting asks for (full-res, view-res, or RAM only).
 pub(crate) fn fire_prefetch(
+    window: window::Id,
     store: &mut Store,
     pipeline: &Pipeline,
     viewer: &mut Viewer,
@@ -365,7 +371,7 @@ pub(crate) fn fire_prefetch(
         .nav
         .peek_around(depth)
         .into_iter()
-        .map(|p| fire_load(store, pipeline, viewer, p, want, view))
+        .map(|p| fire_load(window, store, pipeline, viewer, p, want, view))
         .collect()
 }
 
@@ -382,9 +388,11 @@ mod tests {
 
         let mut app = viewing_app(&["a.png"], 0);
         cache_image(&mut app, "a.png");
+        let window = app.window.id;
         let pipeline = app.shared.pipeline.clone();
         let viewer = app.window.viewer_mut().unwrap();
         let _ = fire_load(
+            window,
             &mut app.shared.store,
             &pipeline,
             viewer,

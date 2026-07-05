@@ -149,7 +149,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                     show_loaded(viewer, &path, original_size, zoom_mode, viewport);
                 }
             }
-            let upload = run_jobs(outcome.jobs, &pipeline, Lane::Current, viewport);
+            let upload = run_jobs(win.id, outcome.jobs, &pipeline, Lane::Current, viewport);
             Task::batch([upload, resolve_pending_nav(win, shared)])
         }
 
@@ -184,7 +184,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 // A rotated image returning from decay re-derives its override
                 rotate = fire_rotate(viewer, &shared.store);
             }
-            let jobs = run_jobs(outcome.jobs, &pipeline, Lane::Current, viewport);
+            let jobs = run_jobs(win.id, outcome.jobs, &pipeline, Lane::Current, viewport);
             if tiled {
                 // A freshly minted pyramid is empty: fill its visible set now.
                 return Task::batch([jobs, rotate, super::media_tasks::fire_tiles(win, shared)]);
@@ -196,7 +196,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             let viewport = win.viewport_size;
             let pipeline = shared.pipeline.clone();
             let outcome = shared.store.on_mint_failed(&key);
-            run_jobs(outcome.jobs, &pipeline, Lane::Current, viewport)
+            run_jobs(win.id, outcome.jobs, &pipeline, Lane::Current, viewport)
         }
 
         Message::TileReady {
@@ -314,7 +314,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             // it. A real failure or an animation: forget it.
             let retry = matches!(err, MediaError::Cancelled);
             let outcome = shared.store.on_decode_failed(&key, retry);
-            let retry_jobs = run_jobs(outcome.jobs, &pipeline, Lane::Current, viewport);
+            let retry_jobs = run_jobs(win.id, outcome.jobs, &pipeline, Lane::Current, viewport);
 
             let Some(viewer) = win.viewer_mut() else {
                 return retry_jobs;
@@ -524,6 +524,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
 
         Message::PromoteCurrent(path) => {
             let viewport = win.viewport_size;
+            let window = win.id;
             let pipeline = shared.pipeline.clone();
             let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
@@ -539,7 +540,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 return Task::none();
             };
             let outcome = shared.store.retarget(lease, Tier::Full);
-            run_jobs(outcome.jobs, &pipeline, Lane::Current, viewport)
+            run_jobs(window, outcome.jobs, &pipeline, Lane::Current, viewport)
         }
 
         Message::ExifLoaded(path, fields) => {
