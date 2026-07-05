@@ -378,19 +378,41 @@ impl AppConfig {
         toml::to_string_pretty(self).unwrap_or_default()
     }
 
-    /// Write the config to disk atomically: write a unique temp file, then
-    /// rename it over the target. A reader (or a second window saving at the
-    /// same time) never sees the half-written file a plain write would produce
-    /// when two windows close at once. Errors are deliberately swallowed:
-    /// failing to persist settings must never disturb the viewer.
-    pub async fn save(self) {
-        let Some(path) = Self::path() else {
+    /// Write the config to disk atomically and in order: write a unique temp
+    /// file, then rename it over the target. A reader (or a second window
+    /// saving at the same time) never sees the half-written file a plain
+    /// write would produce when two windows close at once. Concurrent saves
+    /// write one at a time, and a save that lost the race to a newer one
+    /// skips its write, since renaming a stale snapshot over a fresher file
+    /// would hand the live config watcher old settings to re-apply. Errors
+    /// are deliberately swallowed: failing to persist settings must never
+    /// disturb the viewer.
+    pub fn save(self) -> impl Future<Output = ()> + Send + 'static {
+        // Take the ticket here, not in the future: callers fire saves on the
+        // update thread right after changing the config, so ticket order is
+        // snapshot order even when the writes are polled out of order.
+        let seq = SAVE_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        async move {
+            let Some(path) = Self::path() else {
+                return;
+            };
+            self.save_at(&path, seq).await;
+        }
+    }
+
+    /// The write half of [`AppConfig::save`], aimed at an explicit path so
+    /// tests can exercise the ordering without touching the real config.
+    async fn save_at(self, path: &Path, seq: u64) {
+        // One write at a time, so renames cannot land out of ticket order.
+        let _turn = SAVE_LOCK.lock().await;
+        // A newer snapshot already reached this path. Writing the stale one
+        // would revert it.
+        if latest_written(path) > seq {
             return;
-        };
+        }
         if let Some(parent) = path.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
-        let seq = SAVE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let tmp = path.with_extension(format!("toml.{seq}.tmp"));
         // Sync before the rename: without it a crash right after can swap the
         // name to a file whose data never reached the disk.
@@ -401,15 +423,38 @@ impl AppConfig {
             file.sync_all().await
         }
         .await;
-        if written.is_ok() && tokio::fs::rename(&tmp, &path).await.is_err() {
+        if written.is_ok() && tokio::fs::rename(&tmp, path).await.is_ok() {
+            mark_written(path, seq);
+        } else {
             let _ = tokio::fs::remove_file(&tmp).await;
         }
     }
 }
 
-/// Disambiguates concurrent saves' temp files (window closes race in one
-/// process), so each writes its own temp before the atomic rename.
+/// Save ticket counter. Orders concurrent saves by fire time and gives each
+/// its own temp file name before the atomic rename.
 static SAVE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Serializes save writes within the process.
+static SAVE_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// The newest ticket whose write reached each path, so a slower older save
+/// knows to skip. Keyed by path only so tests on temp files stay independent.
+static LAST_WRITTEN: LazyLock<std::sync::Mutex<std::collections::HashMap<PathBuf, u64>>> =
+    LazyLock::new(Default::default);
+
+fn latest_written(path: &Path) -> u64 {
+    LAST_WRITTEN
+        .lock()
+        .map(|written| written.get(path).copied().unwrap_or(0))
+        .unwrap_or(0)
+}
+
+fn mark_written(path: &Path, seq: u64) {
+    if let Ok(mut written) = LAST_WRITTEN.lock() {
+        written.insert(path.to_path_buf(), seq);
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -681,5 +726,54 @@ mod tests {
             assert!(AppConfig::is_supported_extension("nef"));
             assert!(AppConfig::is_supported_extension("dng"));
         }
+    }
+
+    /// Take a save ticket the way [`AppConfig::save`] does at fire time.
+    fn ticket() -> u64 {
+        SAVE_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+    }
+
+    async fn saved_depth(path: &Path) -> usize {
+        let text = tokio::fs::read_to_string(path).await.unwrap();
+        AppConfig::try_from_toml(&text)
+            .unwrap()
+            .standard
+            .browsing
+            .prefetch_depth
+    }
+
+    #[tokio::test]
+    async fn a_stale_save_cannot_overwrite_a_newer_one() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let older = AppConfig::default();
+        let mut newer = AppConfig::default();
+        newer.standard.browsing.prefetch_depth = 9;
+
+        // Tickets follow fire order, but the older write lands last.
+        let older_seq = ticket();
+        let newer_seq = ticket();
+        newer.save_at(&path, newer_seq).await;
+        older.save_at(&path, older_seq).await;
+
+        assert_eq!(saved_depth(&path).await, 9);
+    }
+
+    #[tokio::test]
+    async fn in_order_saves_apply_the_newest_config() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let older = AppConfig::default();
+        let mut newer = AppConfig::default();
+        newer.standard.browsing.prefetch_depth = 7;
+
+        let older_seq = ticket();
+        let newer_seq = ticket();
+        older.save_at(&path, older_seq).await;
+        newer.save_at(&path, newer_seq).await;
+
+        assert_eq!(saved_depth(&path).await, 7);
     }
 }
