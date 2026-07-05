@@ -1,4 +1,6 @@
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -14,15 +16,15 @@ pub enum Message {
     Cancel,
 }
 
-/// How to resume a video torn down to free its file for a rename or delete.
-#[derive(Debug, Clone, Copy)]
-pub struct VideoResume {
-    position: Duration,
-    volume: f32,
-    muted: bool,
-    looping: bool,
-    hardware: bool,
-    playing: bool,
+/// How to resume a video torn down to free its file for a rename or delete:
+/// the session's own suspend memo, shared so completion messages stay Clone.
+#[derive(Clone)]
+pub struct VideoResume(Arc<crate::video::SuspendedVideo>);
+
+impl fmt::Debug for VideoResume {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VideoResume").finish_non_exhaustive()
+    }
 }
 
 use iced::{Element, Task};
@@ -63,7 +65,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 win.modal = Some(Modal::ConfirmDelete(target));
                 Task::none()
             } else {
-                let resume = take_open_video(win, shared, &target);
+                let resume = take_open_video(win, &target);
                 fire_delete(win, shared, target, resume)
             }
         }
@@ -72,15 +74,19 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             let Some(Modal::ConfirmDelete(path)) = win.modal.take() else {
                 return Task::none();
             };
-            let resume = take_open_video(win, shared, &path);
+            let resume = take_open_video(win, &path);
             fire_delete(win, shared, path, resume)
         }
 
         Message::DeleteFinished(path, result, resume) => match result {
             Err(e) => {
-                // Deletion failed, so put the torn-down video back as it was.
-                if let Some(resume) = resume {
-                    resume_video(win, shared, resume, path.clone());
+                // Deletion failed, so put the torn-down video back as it was,
+                // unless navigation moved on during the retries. Resuming then
+                // would paint the old video over the file now on screen.
+                if let Some(resume) = resume
+                    && win.viewer().is_some_and(|v| v.nav.current() == path)
+                {
+                    resume_video(win, resume);
                 }
                 push_toast(
                     win,
@@ -170,7 +176,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             }
             // Renaming the open video means FFmpeg is holding its file handle,
             // so tear the session down (remembering how to resume) first.
-            let resume = take_open_video(win, shared, &old);
+            let resume = take_open_video(win, &old);
             let (from, to) = (old.clone(), new.clone());
             Task::perform(rename_with_retry(from, to), move |result| {
                 AppMessage::Modal(Message::RenameFinished(old, new, result, resume))
@@ -179,9 +185,12 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
 
         Message::RenameFinished(old, new, result, resume) => match result {
             Err(e) => {
-                // The rename failed, so put the torn-down video back as it was.
-                if let Some(resume) = resume {
-                    resume_video(win, shared, resume, old.clone());
+                // The rename failed, so put the torn-down video back as it
+                // was, unless navigation moved on during the retries.
+                if let Some(resume) = resume
+                    && win.viewer().is_some_and(|v| v.nav.current() == old)
+                {
+                    resume_video(win, resume);
                 }
                 push_toast(
                     win,
@@ -224,10 +233,13 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                     resume.is_some(),
                 );
                 match refresh {
-                    // Still a video: resume it on the new file at its position.
+                    // Still a video: resume it on the new file at its position,
+                    // unless navigation moved on while the rename ran.
                     RenameRefresh::Resume => {
-                        if let Some(resume) = resume {
-                            resume_video(win, shared, resume, new);
+                        if let Some(resume) = resume
+                            && win.viewer().is_some_and(|v| v.nav.current() == new)
+                        {
+                            resume_video_at(win, resume, new);
                         }
                         purge
                     }
@@ -275,43 +287,38 @@ async fn rename_with_retry(old: PathBuf, new: PathBuf) -> Result<(), String> {
 }
 
 /// If `path` is the open video, drop its session (releasing the file handle)
-/// and return how to resume it once the file operation finishes.
-fn take_open_video(win: &mut Window, shared: &mut Shared, path: &Path) -> Option<VideoResume> {
-    let hardware = shared.config.standard.video.hardware_decode;
+/// and return the memo to resume it once the file operation finishes.
+fn take_open_video(win: &mut Window, path: &Path) -> Option<VideoResume> {
     let viewer = win.viewer_mut()?;
     let session = viewer.video.session.as_ref()?;
     if session.path != *path {
         return None;
     }
-    let resume = VideoResume {
-        position: session.position(),
-        volume: session.volume,
-        muted: session.muted,
-        looping: session.looping(),
-        hardware,
-        playing: session.playing,
-    };
+    let memo = session.suspend(session.playing);
     viewer.video.session = None;
-    Some(resume)
+    Some(VideoResume(Arc::new(memo)))
 }
 
-/// Reopen a torn-down video at `path` and its saved position.
-fn resume_video(win: &mut Window, _shared: &mut Shared, resume: VideoResume, path: PathBuf) {
+/// Reopen a torn-down video from its suspend memo, at its saved position.
+fn resume_video(win: &mut Window, resume: VideoResume) {
     let Some(viewer) = win.viewer_mut() else {
         return;
     };
-    let mut session = crate::video::VideoSession::open(
-        path,
-        resume.position,
-        resume.volume,
-        resume.muted,
-        resume.looping,
-        resume.hardware,
-    );
-    if !resume.playing {
-        session.pause();
-    }
-    viewer.video.session = Some(session);
+    viewer.video.session = Some(crate::video::VideoSession::resume(&resume.0));
+}
+
+/// Reopen a torn-down video whose file was renamed. The memo keeps its fields
+/// private, so resume at the recorded name, re-point the session's path, and
+/// respawn through its own `reopen_at`, which carries the known duration, the
+/// temp guard, and the pause state. The intermediate session opens a name
+/// that no longer exists and is dropped before it is ever polled.
+fn resume_video_at(win: &mut Window, resume: VideoResume, path: PathBuf) {
+    let Some(viewer) = win.viewer_mut() else {
+        return;
+    };
+    let mut at_old_name = crate::video::VideoSession::resume(&resume.0);
+    at_old_name.path = path;
+    viewer.video.session = Some(at_old_name.reopen_at(at_old_name.position()));
 }
 
 /// How the view should react to a successful rename.
@@ -547,34 +554,113 @@ mod tests {
         };
         app.viewer_mut().unwrap().video.session = Some(open());
         // A file op on the open video releases its session so the file unlocks.
-        assert!(take_open_video(&mut app.window, &mut app.shared, &path).is_some());
+        assert!(take_open_video(&mut app.window, &path).is_some());
         assert!(app.viewer().unwrap().video.session.is_none());
         // A different file leaves the video alone.
         app.viewer_mut().unwrap().video.session = Some(open());
-        assert!(
-            take_open_video(&mut app.window, &mut app.shared, Path::new("other.mp4")).is_none()
-        );
+        assert!(take_open_video(&mut app.window, Path::new("other.mp4")).is_none());
         assert!(app.viewer().unwrap().video.session.is_some());
+    }
+
+    /// Open a session on the viewer's current file and take its resume memo,
+    /// as a delete or rename of the open video does.
+    fn open_and_take(
+        app: &mut crate::app::test_support::TestApp,
+        path: &Path,
+    ) -> Option<VideoResume> {
+        app.viewer_mut().unwrap().video.session = Some(crate::video::VideoSession::open(
+            path.to_path_buf(),
+            Duration::ZERO,
+            0.4,
+            false,
+            true,
+            false,
+        ));
+        take_open_video(&mut app.window, path)
     }
 
     #[tokio::test]
     async fn a_failed_video_delete_restores_the_session() {
         let mut app = viewing_app(&["clip.mp4"], 0);
         let path = app.viewer().unwrap().nav.current().to_path_buf();
-        let resume = VideoResume {
-            position: Duration::ZERO,
-            volume: 0.4,
-            muted: false,
-            looping: true,
-            hardware: false,
-            playing: true,
-        };
+        let resume = open_and_take(&mut app, &path);
+        assert!(resume.is_some());
         let _ = update(
             &mut app.window,
             &mut app.shared,
-            Message::DeleteFinished(path, Err("locked".into()), Some(resume)),
+            Message::DeleteFinished(path.clone(), Err("locked".into()), resume),
         );
-        assert!(app.viewer().unwrap().video.session.is_some());
+        let viewer = app.viewer().unwrap();
+        let session = viewer.video.session.as_ref().expect("session restored");
+        // The memo carries the session's own settings through suspend/resume.
+        assert_eq!(session.path, path);
+        assert_eq!(session.volume, 0.4);
+        assert!(!session.muted);
+        assert!(session.looping());
+    }
+
+    #[tokio::test]
+    async fn a_failed_delete_after_navigation_leaves_the_video_closed() {
+        let mut app = viewing_app(&["clip.mp4", "b.png"], 0);
+        let path = app.viewer().unwrap().nav.current().to_path_buf();
+        let resume = open_and_take(&mut app, &path);
+        // The user moved on while the delete was retrying.
+        app.viewer_mut().unwrap().nav.set_cursor(1);
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::DeleteFinished(path, Err("locked".into()), resume),
+        );
+        // Resuming now would paint the old video over the new file.
+        assert!(app.viewer().unwrap().video.session.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_failed_rename_after_navigation_leaves_the_video_closed() {
+        let mut app = viewing_app(&["clip.mp4", "b.png"], 0);
+        let old = app.viewer().unwrap().nav.current().to_path_buf();
+        let resume = open_and_take(&mut app, &old);
+        app.viewer_mut().unwrap().nav.set_cursor(1);
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::RenameFinished(old, "clip2.mp4".into(), Err("locked".into()), resume),
+        );
+        assert!(app.viewer().unwrap().video.session.is_none());
+    }
+
+    #[cfg(feature = "video")]
+    #[tokio::test]
+    async fn a_renamed_video_resumes_at_its_new_path() {
+        let mut app = viewing_app(&["clip.mp4", "b.png"], 0);
+        let old = app.viewer().unwrap().nav.current().to_path_buf();
+        let resume = open_and_take(&mut app, &old);
+        let new = PathBuf::from("clip2.mp4");
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::RenameFinished(old, new.clone(), Ok(()), resume),
+        );
+        let viewer = app.viewer().unwrap();
+        let session = viewer.video.session.as_ref().expect("session resumed");
+        assert_eq!(session.path, new);
+        assert_eq!(session.volume, 0.4);
+        assert!(session.looping());
+    }
+
+    #[cfg(feature = "video")]
+    #[tokio::test]
+    async fn a_renamed_video_does_not_resume_after_navigation() {
+        let mut app = viewing_app(&["clip.mp4", "b.png"], 0);
+        let old = app.viewer().unwrap().nav.current().to_path_buf();
+        let resume = open_and_take(&mut app, &old);
+        app.viewer_mut().unwrap().nav.set_cursor(1);
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::RenameFinished(old, "clip2.mp4".into(), Ok(()), resume),
+        );
+        assert!(app.viewer().unwrap().video.session.is_none());
     }
 
     #[tokio::test]
