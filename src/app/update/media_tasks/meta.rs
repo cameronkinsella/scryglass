@@ -42,12 +42,7 @@ pub(crate) fn fire_rotate(viewer: &mut Viewer, store: &Store) -> Task<Message> {
         let handle = Handle::from_rgba(width, height, pixels);
         let p = path.clone();
         Task::future(async move {
-            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-            let keepalive = if crate::ui::image_surface::submit_upload(handle.clone(), ready_tx) {
-                ready_rx.await.ok()
-            } else {
-                None
-            };
+            let keepalive = super::submit_and_wait(handle).await;
             Message::Media(MediaMessage::ViewRotated {
                 path: p.clone(),
                 baked,
