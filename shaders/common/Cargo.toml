@@ -1,8 +1,10 @@
 [package]
 name = "scryglass-shader-common"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
-publish = false
+description = "Shared pure-math kernel weights and transfer curves for scryglass"
+license = "MIT"
+repository = "https://github.com/cameronkinsella/scryglass"
 
 [dependencies]
 # Pure-Rust libm so sinf compiles both to SPIR-V and on the host for tests.
