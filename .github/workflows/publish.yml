@@ -38,6 +38,31 @@ jobs:
         id: auth
         uses: rust-lang/crates-io-auth-action@v1
 
+      # The math crate's version moves rarely, and crates.io rejects a
+      # version it already has.
+      - name: Check whether shader-common is new to crates.io
+        id: shader-common
+        shell: bash
+        working-directory: shaders/common
+        run: |
+          version=$(cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[] | select(.name == "scryglass-shader-common") | .version')
+          if curl -fsSL "https://crates.io/api/v1/crates/scryglass-shader-common" \
+            | jq -er --arg v "$version" '.versions[] | select(.num == $v)' >/dev/null; then
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # cargo publish waits for the index, so the main publish below can
+      # resolve the fresh version.
+      - name: Publish shader-common to crates.io
+        if: steps.shader-common.outputs.new == 'true'
+        working-directory: shaders/common
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
       # CI and the release build already compile every platform, so skip the
       # redundant verify build here (it would only add the GUI build deps back).
       - name: Publish to crates.io

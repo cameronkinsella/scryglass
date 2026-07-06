@@ -87,3 +87,6 @@ jobs:
         run: cargo package --list
       - name: Dry-run the crates.io publish
         run: cargo publish --dry-run --locked
+      - name: Dry-run the shader-common publish
+        working-directory: shaders/common
+        run: cargo publish --dry-run --locked
