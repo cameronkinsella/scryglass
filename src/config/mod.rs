@@ -25,7 +25,12 @@ pub use resource::{
 // plain (test-less) build sees this re-export as unused though it is not.
 #[allow(unused_imports)]
 pub use resource::EvictPolicy;
-pub use startup::{PresentMode, StartupConfig};
+// The present probe reaches this as `crate::config::PresentMode` only on
+// Windows, and the roundtrip test on every platform, so a plain Linux build
+// sees the re-export as unused though it is not.
+#[allow(unused_imports)]
+pub use startup::PresentMode;
+pub use startup::StartupConfig;
 pub use ui::{DownscaleKernel, SortKey, ThemeChoice, ZoomMode};
 
 /// Supported image file extensions (lowercase, no dot), collected from

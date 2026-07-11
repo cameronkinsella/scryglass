@@ -31,10 +31,10 @@ pub fn copy_file_to_clipboard(path: &Path) {
 // ---------------------------------------------------------------------------
 
 /// Ask the OS to return this process's resident pages, shrinking its reported
-/// working set. The pages fault back in when next touched. A no-op off Windows,
-/// where the kernel reclaims idle memory under pressure on its own.
+/// working set. The pages fault back in when next touched. Windows only, like
+/// its callers: elsewhere the kernel reclaims idle memory on its own.
+#[cfg(target_os = "windows")]
 pub fn trim_working_set() {
-    #[cfg(target_os = "windows")]
     windows::trim_working_set();
 }
 

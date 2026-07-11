@@ -294,7 +294,6 @@ pub fn icon_button(theme: &Theme, status: button::Status) -> button::Style {
 }
 
 /// Inline accent link: borderless, accent text, faint wash on hover.
-#[cfg(feature = "update-check")]
 pub fn link_button(theme: &Theme, status: button::Status) -> button::Style {
     let t = tokens(theme);
     let background = match status {

@@ -72,7 +72,7 @@ pub fn video_controls<'a>(state: VideoControls, opacity: f32) -> Element<'a, Mes
         if state.muted { 0.0 } else { state.volume },
         Message::SetVolume,
     )
-    .step(0.05)
+    .step(0.05_f32)
     .width(Length::Fixed(80.0))
     .style(move |t, s| theme::faded_slider(iced::widget::slider::default(t, s), opacity));
 
