@@ -6,6 +6,15 @@ ignore = [
     # paste is unmaintained but frozen and compile-time only. It reaches
     # the tree through wgpu's macOS backend (metal), not anything here.
     "RUSTSEC-2024-0436",
+    # ttf-parser is unmaintained with no safe upgrade. It reaches the tree
+    # through iced's font stack, which pins it until upstream migrates.
+    "RUSTSEC-2026-0192",
+    # quick-xml DoS on untrusted XML. It reaches the tree only as a
+    # build-time dependency of wayland-scanner, which parses the Wayland
+    # protocol XML bundled in the crate, never outside input. The wayland
+    # stack caps quick-xml below the fixed release.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]
 
 [licenses]
@@ -44,3 +53,6 @@ multiple-versions = "allow"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+# The pinned iced fork carrying the minimized-swapchain fix, dropped when
+# an iced release ships it.
+allow-git = ["https://github.com/cameronkinsella/iced"]
