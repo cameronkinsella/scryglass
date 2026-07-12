@@ -164,7 +164,8 @@ fn update_view(win: &mut Window, shared: &mut Shared, message: Message) -> Task<
         Message::ScrollZoom(delta_y) => {
             let viewport = win.viewport_size;
             let cursor = win.last_cursor_pos;
-            let toolbar_offset = if shared.config.standard.chrome.toolbar {
+            // Fullscreen hides the toolbar, so no offset applies there.
+            let toolbar_offset = if shared.config.standard.chrome.toolbar && !win.fullscreen {
                 crate::app::TOOLBAR_HEIGHT
             } else {
                 0.0
@@ -540,6 +541,32 @@ mod tests {
         app.viewer_mut().unwrap().zoom = ZOOM_MAX;
         let _ = update(&mut app.window, &mut app.shared, Message::ZoomStep(1));
         assert_eq!(viewer(&app).zoom, ZOOM_MAX);
+    }
+
+    #[test]
+    fn fullscreen_scroll_zoom_ignores_the_hidden_toolbar() {
+        // Fullscreen hides the toolbar even while it is configured on, so
+        // the wheel must anchor exactly as it does with no toolbar at all.
+        let cursor = iced::Point::new(100.0, 100.0);
+
+        let mut fs = viewing_app(&["a.png"], 0);
+        fs.shared.config.standard.chrome.toolbar = true;
+        fs.window.fullscreen = true;
+        fs.window.last_cursor_pos = cursor;
+        fs.viewer_mut().unwrap().zoom = 1.0;
+        let _ = update(&mut fs.window, &mut fs.shared, Message::ScrollZoom(1.0));
+
+        let mut plain = viewing_app(&["a.png"], 0);
+        plain.shared.config.standard.chrome.toolbar = false;
+        plain.window.last_cursor_pos = cursor;
+        plain.viewer_mut().unwrap().zoom = 1.0;
+        let _ = update(
+            &mut plain.window,
+            &mut plain.shared,
+            Message::ScrollZoom(1.0),
+        );
+
+        assert_eq!(viewer(&fs).pan, viewer(&plain).pan);
     }
 
     #[test]
