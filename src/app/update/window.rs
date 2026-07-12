@@ -229,20 +229,28 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             super::settle_tiles(win)
         }
 
-        Message::CloseRequested(id) => {
-            // Persist this window's full restore stack as the next window's
-            // geometry: the restored windowed bounds, plus the maximized and
-            // fullscreen flags to replay on top.
-            shared.config.managed.window.width = win.restored_size.width;
-            shared.config.managed.window.height = win.restored_size.height;
-            shared.config.managed.window.x = Some(win.restored_pos.x);
-            shared.config.managed.window.y = Some(win.restored_pos.y);
-            shared.config.managed.window.maximized = win.maximized;
-            shared.config.managed.window.fullscreen = win.fullscreen;
-            let config = shared.config.clone();
-            Task::future(config.save()).then(move |_| iced::window::close(id))
-        }
+        Message::CloseRequested(id) => persist_geometry_and_close(win, shared, id),
     }
+}
+
+/// Persist this window's full restore stack as the next window's geometry
+/// (the restored windowed bounds, plus the maximized and fullscreen flags to
+/// replay on top), then save and close. The OS close button and the menu
+/// Quit both land here: the runtime's close() never emits CloseRequested,
+/// so Quit cannot lean on that handler.
+pub(crate) fn persist_geometry_and_close(
+    win: &Window,
+    shared: &mut Shared,
+    id: iced::window::Id,
+) -> Task<AppMessage> {
+    shared.config.managed.window.width = win.restored_size.width;
+    shared.config.managed.window.height = win.restored_size.height;
+    shared.config.managed.window.x = Some(win.restored_pos.x);
+    shared.config.managed.window.y = Some(win.restored_pos.y);
+    shared.config.managed.window.maximized = win.maximized;
+    shared.config.managed.window.fullscreen = win.fullscreen;
+    let config = shared.config.clone();
+    Task::future(config.save()).then(move |_| iced::window::close(id))
 }
 
 /// How long a window must sit still before its state is probed for the

@@ -121,12 +121,12 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             Task::none()
         }
 
-        // Close this window, saving its state. The process exits when the
-        // last window closes (see the daemon's Closed handler).
+        // Close this window, saving its state including the geometry, same
+        // as the OS close button. The process exits when the last window
+        // closes (see the daemon's Closed handler).
         Message::Quit => {
             let id = win.id;
-            let config = shared.config.clone();
-            Task::future(config.save()).then(move |_| iced::window::close(id))
+            crate::app::update::window::persist_geometry_and_close(win, shared, id)
         }
 
         Message::DirectoryChanged(dir) => Task::perform(
@@ -183,6 +183,23 @@ mod tests {
         let mut app = viewing_app(&["a.png"], 0);
         let _ = update(&mut app.window, &mut app.shared, Message::CloseFile);
         assert!(matches!(app.window.session, Session::Empty));
+    }
+
+    #[test]
+    fn quit_persists_this_windows_restore_stack() {
+        // The menu Quit saves geometry exactly like the OS close button.
+        // The runtime's close() never emits CloseRequested, so Quit has to
+        // persist before it closes.
+        let mut app = empty_app();
+        app.window.restored_size = iced::Size::new(1024.0, 768.0);
+        app.window.restored_pos = iced::Point::new(120.0, 80.0);
+        app.window.maximized = true;
+        let _ = update(&mut app.window, &mut app.shared, Message::Quit);
+        assert_eq!(app.shared.config.managed.window.width, 1024.0);
+        assert_eq!(app.shared.config.managed.window.height, 768.0);
+        assert_eq!(app.shared.config.managed.window.x, Some(120.0));
+        assert_eq!(app.shared.config.managed.window.y, Some(80.0));
+        assert!(app.shared.config.managed.window.maximized);
     }
 
     #[test]
