@@ -299,9 +299,13 @@ impl Viewer {
         let nav = &self.nav;
         // Each distance is a linear scan of the file list, so compute them
         // once instead of once for the max and again per retained entry.
+        // Prefetched animations lease through the player, not the still
+        // cache, and their frame sets are the heaviest entries of all, so
+        // they shed in the same rings.
         let distances: Vec<(PathBuf, usize)> = self
             .cache
             .keys()
+            .chain(self.anim_player.leased_paths())
             .filter(|p| !keep.contains(*p))
             .map(|p| (p.clone(), nav.distance(p).unwrap_or(usize::MAX)))
             .collect();
@@ -311,9 +315,11 @@ impl Viewer {
         for (path, distance) in &distances {
             if *distance == ring {
                 self.cache.remove(path);
+                self.anim_player.remove(path);
             }
         }
         self.cache.keys().any(|p| !keep.contains(p))
+            || self.anim_player.leased_paths().any(|p| !keep.contains(p))
     }
 
     /// The paths that must stay cached: the current image plus the
@@ -713,6 +719,47 @@ mod tests {
         // Nothing left to shed: still false, the on-screen image untouched.
         assert!(!viewer.drop_prefetch_ring());
         assert!(viewer.cache.contains_key(Path::new("c.png")));
+    }
+
+    #[test]
+    fn prefetched_animations_shed_with_the_still_rings() {
+        use crate::media::animation::AnimatedImage;
+        use crate::media::store::{Anim, AnimRam, ImageKey, Store, Tier};
+        use std::sync::Arc;
+
+        // Five files so the wrap-aware distances differ: from c.png the
+        // GIF sits at 2 and the still at 1.
+        let mut viewer = test_viewer(&["a.gif", "b.png", "c.png", "d.png", "e.png"], 2);
+        viewer.displayed_path = Some(PathBuf::from("c.png"));
+        cache_image(&mut viewer, "b.png");
+
+        // A prefetched neighbor GIF leases its decoded frames through the
+        // player, not the still cache.
+        let mut store: Store<Anim> = Store::default();
+        let key = ImageKey::new(&Source::Fs, Path::new("a.gif"));
+        let (lease, _) = store.request(key.clone(), "a.gif".into(), Source::Fs, Tier::InRam);
+        store.on_decoded(
+            key,
+            AnimRam {
+                frames: Arc::new(AnimatedImage {
+                    width: 2,
+                    height: 2,
+                    frames: Vec::new(),
+                    thumbnail: None,
+                }),
+                decode_time: None,
+            },
+        );
+        viewer.anim_player.insert(PathBuf::from("a.gif"), lease);
+
+        // The GIF's frames go in the first ring, and the shed reports the
+        // nearer still remaining.
+        assert!(viewer.drop_prefetch_ring());
+        assert!(!viewer.anim_player.has_cached(Path::new("a.gif")));
+        assert!(viewer.cache.contains_key(Path::new("b.png")));
+
+        assert!(!viewer.drop_prefetch_ring());
+        assert!(!viewer.cache.contains_key(Path::new("b.png")));
     }
 
     #[test]

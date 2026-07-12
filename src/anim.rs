@@ -293,6 +293,12 @@ impl AnimPlayer {
         self.cache.retain(|path, _| keep.contains(path));
     }
 
+    /// The paths this window holds animation leases for, so the prefetch shed
+    /// can walk them alongside the still cache.
+    pub fn leased_paths(&self) -> impl Iterator<Item = &PathBuf> {
+        self.cache.keys()
+    }
+
     /// Drop a single lease (file deleted or renamed).
     pub fn remove(&mut self, path: &Path) {
         self.cache.remove(path);
