@@ -197,9 +197,9 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 tiles.settle(tile);
                 match outcome {
                     TileOutcome::Ready(texture) => tiles.insert(tile, texture),
-                    // Re-request a canceled tile the view still wants. The
+                    // Re-request a canceled tile some view still wants. The
                     // level guard stops cross-window ping-pong.
-                    TileOutcome::Canceled if tiles.wanted_lod() == tile.lod => {
+                    TileOutcome::Canceled if tiles.wants_lod(tile.lod) => {
                         return super::media_tasks::fire_tiles(win, shared);
                     }
                     TileOutcome::Canceled => {}

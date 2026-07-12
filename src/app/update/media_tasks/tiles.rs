@@ -129,7 +129,9 @@ pub(crate) fn fire_tiles(win: &Window, shared: &Shared) -> Task<Message> {
         Some(DrawWant::Level(lod)) => lod,
         Some(DrawWant::BaseOnly) | None => tiles::lod_for_zoom(substrate_zoom * scale),
     };
-    Task::batch(claim_tiles(&key, &ram, &resident, set, src, original, lod))
+    Task::batch(claim_tiles(
+        win.id, &key, &ram, &resident, set, src, original, lod,
+    ))
 }
 
 /// Claim and produce the visible tiles at `lod` that are neither resident nor
@@ -137,7 +139,9 @@ pub(crate) fn fire_tiles(win: &Window, shared: &Shared) -> Task<Message> {
 /// every pass converges on the same tiles and a display larger than the slot
 /// budget degrades to the base layer instead of producing and evicting in a
 /// loop.
+#[allow(clippy::too_many_arguments)]
 fn claim_tiles(
+    window: iced::window::Id,
     key: &ImageKey,
     ram: &RamImage,
     resident: &crate::ui::image_surface::Keepalive,
@@ -148,8 +152,9 @@ fn claim_tiles(
 ) -> Vec<Task<Message>> {
     use crate::media::tiles;
     let level = tiles::level_size(original, lod);
-    // Queued productions for any other level bail once this is stored.
-    set.set_wanted_lod(lod);
+    // This window's queued productions for any other level bail once this
+    // is stored. Other windows' levels stay wanted on the shared pyramid.
+    set.set_wanted_lod(window, lod);
     // Half a tile of pan margin on every side.
     let margin = (
         tiles::TILE_SIZE as f32 / (2.0 * level.0 as f32),
@@ -264,12 +269,12 @@ pub(crate) fn produce_tile(
     let pixels = pixels.clone();
     Task::future(async move {
         let _permit = TILE_GATE.acquire().await.ok();
-        // Bail without resampling when the view crossed to another level
-        // while this sat queued, or when the tile already landed (an expired
-        // claim can admit a queued duplicate).
+        // Bail without resampling when every window's view crossed away from
+        // this level while this sat queued, or when the tile already landed
+        // (an expired claim can admit a queued duplicate).
         if pyramid
             .tiles()
-            .is_none_or(|set| set.wanted_lod() != tile.lod || set.get(tile).is_some())
+            .is_none_or(|set| !set.wants_lod(tile.lod) || set.get(tile).is_some())
         {
             return Message::Media(MediaMessage::TileReady {
                 key,

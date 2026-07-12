@@ -3,7 +3,7 @@
 //! back. The grid math itself lives in `crate::media::tiles`.
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::media::tiles::{TileCache, TileKey};
 
@@ -87,11 +87,15 @@ pub struct TileSet {
     /// claim whose settle message was lost (its window closed mid-production)
     /// expires rather than blocking the tile for the pyramid's lifetime.
     pending: Mutex<std::collections::HashMap<TileKey, std::time::Instant>>,
-    /// The mip level the latest demand pass asked for. A queued production
-    /// for another level bails before its resample: a zoom that keeps moving
-    /// obsoletes whole waves of tiles, and this is what stops them from
-    /// being produced anyway.
-    wanted_lod: AtomicU32,
+    /// The mip level each window's latest demand pass asked for, unioned
+    /// into `wanted_mask`. A queued production for a level no window wants
+    /// bails before its resample: a zoom that keeps moving obsoletes whole
+    /// waves of tiles. Kept per window so a zoom cancels only that window's
+    /// own stale wave, never a sibling resting at another level on the same
+    /// shared pyramid. Bounded by the pyramid's lifetime, like `stamps`.
+    wanted_lods: Mutex<std::collections::HashMap<iced::window::Id, u32>>,
+    /// Bit `l` set when some window wants level `l` (levels stay far below 64).
+    wanted_mask: AtomicU64,
 }
 
 /// Most tiles one demand pass may claim: what one frame can draw.
@@ -122,7 +126,8 @@ impl TileSet {
             stamps: Mutex::new(std::collections::HashMap::new()),
             tiles: Mutex::new(TileCache::new(MAX_CACHED_TILES)),
             pending: Mutex::new(std::collections::HashMap::new()),
-            wanted_lod: AtomicU32::new(0),
+            wanted_lods: Mutex::new(std::collections::HashMap::new()),
+            wanted_mask: AtomicU64::new(0),
         }
     }
 
@@ -293,14 +298,21 @@ impl TileSet {
         }
     }
 
-    /// Record the level the current view wants. Stale productions bail.
-    pub fn set_wanted_lod(&self, lod: u32) {
-        self.wanted_lod.store(lod, Ordering::Relaxed);
+    /// Record the level `window`'s current view wants. Its own stale
+    /// productions bail; other windows' levels stay wanted.
+    pub fn set_wanted_lod(&self, window: iced::window::Id, lod: u32) {
+        if let Ok(mut wants) = self.wanted_lods.lock() {
+            wants.insert(window, lod);
+            let mask = wants
+                .values()
+                .fold(0u64, |mask, &l| mask | 1u64 << l.min(63));
+            self.wanted_mask.store(mask, Ordering::Relaxed);
+        }
     }
 
-    /// The level the latest demand pass asked for.
-    pub fn wanted_lod(&self) -> u32 {
-        self.wanted_lod.load(Ordering::Relaxed)
+    /// Whether any window's latest demand pass wants `lod`.
+    pub fn wants_lod(&self, lod: u32) -> bool {
+        self.wanted_mask.load(Ordering::Relaxed) & (1u64 << lod.min(63)) != 0
     }
 }
 
