@@ -499,6 +499,13 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
         } => {
             let zoom_mode = shared.config.standard.display.zoom_mode;
             let viewport = win.viewport_size;
+            // A failed upload leaves the previous texture and rotation state
+            // in place. Marking the rotation baked without pixels would draw
+            // the unrotated texture into swapped geometry, and the mismatch
+            // that remains here lets a later pass retry instead.
+            let Some(texture) = texture else {
+                return Task::none();
+            };
             let Some(viewer) = win.viewer_mut() else {
                 return Task::none();
             };
@@ -511,7 +518,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             let (w, h) = original_size;
             viewer.displayed = DisplayedImage::Full {
                 original_size,
-                rotated: texture,
+                rotated: Some(texture),
             };
             viewer.displayed_rotation = baked;
             viewer.pan = (0.0, 0.0);
@@ -629,6 +636,46 @@ mod tests {
                 .in_flight_thumbs
                 .contains(Path::new("a.png"))
         );
+    }
+
+    #[test]
+    fn a_failed_rotate_upload_leaves_the_view_untouched() {
+        let mut app = viewing_app(&["a.png"], 0);
+        {
+            let v = app.viewer_mut().unwrap();
+            v.displayed = DisplayedImage::Full {
+                original_size: (4, 2),
+                rotated: None,
+            };
+            v.rotation = 1;
+            v.displayed_rotation = 0;
+            v.zoom = 0.5;
+            v.pan = (12.0, -3.0);
+            v.manual_zoom = true;
+        }
+        let _ = update(
+            &mut app.window,
+            &mut app.shared,
+            Message::ViewRotated {
+                path: "a.png".into(),
+                baked: 1,
+                original_size: (2, 4),
+                texture: None,
+            },
+        );
+        // The rotation stays unbaked so a later pass retries, and the view
+        // (size, pan, zoom) never moves under the user.
+        let v = app.viewer().unwrap();
+        assert_eq!(v.displayed_rotation, 0);
+        assert_eq!(v.pan, (12.0, -3.0));
+        assert_eq!(v.zoom, 0.5);
+        assert!(matches!(
+            v.displayed,
+            DisplayedImage::Full {
+                original_size: (4, 2),
+                rotated: None
+            }
+        ));
     }
 
     #[test]
