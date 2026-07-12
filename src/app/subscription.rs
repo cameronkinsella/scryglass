@@ -202,6 +202,10 @@ fn config_watch_stream() -> impl Stream<Item = Envelope> {
                 return;
             };
             // Watch the directory (notify cannot watch a not-yet-existing file).
+            // On a fresh install the directory does not exist yet either, and a
+            // failed watch never restarts (the subscription identity is fixed),
+            // so create it here the way the first save would.
+            let _ = std::fs::create_dir_all(&dir);
             if watcher.watch(&dir, RecursiveMode::NonRecursive).is_err() {
                 return;
             }
