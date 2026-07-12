@@ -511,9 +511,12 @@ mod tests {
         assert_eq!(cfg.standard.browsing.prefetch_depth, 9);
     }
 
-    #[test]
-    fn toml_roundtrip_preserves_all_fields() {
-        let cfg = AppConfig {
+    /// Every field set away from its default, every Option `Some`. The
+    /// roundtrip test asserts the "every field" part. The documentation
+    /// test leans on it so Option keys actually serialize (the toml writer
+    /// omits a `None`, which would exempt the key from the check).
+    fn fully_populated() -> AppConfig {
+        AppConfig {
             standard: StandardConfig {
                 browsing: BrowsingConfig {
                     prefetch_depth: 3,
@@ -625,7 +628,12 @@ mod tests {
                     fullscreen: true,
                 },
             },
-        };
+        }
+    }
+
+    #[test]
+    fn toml_roundtrip_preserves_all_fields() {
+        let cfg = fully_populated();
         assert_eq!(AppConfig::from_toml(&cfg.to_toml()), cfg);
     }
 
@@ -644,23 +652,33 @@ mod tests {
 
     #[test]
     fn every_config_key_is_documented() {
-        fn collect_keys(value: &toml::Value, out: &mut std::collections::BTreeSet<String>) {
+        fn collect_keys(value: &toml::Value, out: &mut std::collections::BTreeSet<(String, bool)>) {
             if let toml::Value::Table(table) = value {
                 for (key, child) in table {
-                    out.insert(key.clone());
+                    out.insert((key.clone(), child.is_table()));
                     collect_keys(child, out);
                 }
             }
         }
-        let toml_str = AppConfig::default().to_toml();
+        // Serialize the fully populated config, not the default: the toml
+        // writer omits a None, which would exempt Option keys entirely.
+        let toml_str = fully_populated().to_toml();
         let value: toml::Value = toml::from_str(&toml_str).unwrap();
         let mut keys = std::collections::BTreeSet::new();
         collect_keys(&value, &mut keys);
 
         let doc = include_str!("../../docs/advanced-settings.md");
-        for key in &keys {
+        for (key, is_table) in &keys {
+            // A leaf key must appear as its own backticked term, or a short
+            // key like `x` would match any word containing the letter. Table
+            // names appear inside backticked `[section.path]` headings.
+            let documented = if *is_table {
+                doc.contains(key.as_str())
+            } else {
+                doc.contains(&format!("`{key}`"))
+            };
             assert!(
-                doc.contains(key.as_str()),
+                documented,
                 "config key `{key}` is not documented in docs/advanced-settings.md"
             );
         }
