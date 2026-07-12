@@ -205,8 +205,12 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                     viewer.nav.rename(&old, new.clone());
                     // Carry the store lease to the new path so the on-screen image
                     // stays resident across the rename (it still points at the same
-                    // pixels until a fresh decode under the new name).
-                    if let Some(lease) = viewer.cache.remove(&old) {
+                    // pixels until a fresh decode under the new name). The entry
+                    // rekeys with it, or a later evict and restore would re-decode
+                    // the old, vanished path and wedge on the blur.
+                    if let Some(mut lease) = viewer.cache.remove(&old) {
+                        let new_key = crate::media::store::ImageKey::new(&viewer.source, &new);
+                        shared.store.rename(&mut lease, new_key, new.clone());
                         viewer.cache.insert(new.clone(), lease);
                     }
                     let old_thumb = crate::media::pipeline::thumb_key(&viewer.source, &old);

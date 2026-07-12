@@ -556,6 +556,19 @@ impl<M: Medium> Store<M> {
         self.reconcile(&lease.key)
     }
 
+    /// Move an entry to a new key after its file was renamed, updating the
+    /// re-decode path with it. The counters and shared cell ride along, so
+    /// residency and the on-screen texture never move. Without this, a later
+    /// evict and restore would decode the old, vanished path and abandon the
+    /// image for good. O(1).
+    pub fn rename(&mut self, lease: &mut Lease<M>, new_key: ImageKey, new_path: PathBuf) {
+        if let Some(mut entry) = self.entries.remove(&lease.key) {
+            entry.path = new_path;
+            self.entries.insert(new_key.clone(), entry);
+        }
+        lease.key = new_key;
+    }
+
     /// A decode finished: the image is now in RAM. Drive it on toward demand.
     pub fn on_decoded(&mut self, key: ImageKey, ram: M::Ram) -> StoreOutcome<M> {
         if let Some(entry) = self.entries.get_mut(&key) {
@@ -936,6 +949,26 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn a_rename_rekeys_the_entry_and_its_redecode_path() {
+        let (mut store, mut lease) = resident_full();
+        let new_key = ImageKey::new(&Source::Fs, Path::new("b.png"));
+        store.rename(&mut lease, new_key.clone(), "b.png".into());
+        assert!(store.ram(&key()).is_none());
+        assert!(store.ram(&new_key).is_some());
+        assert!(lease.texture().is_some(), "the shared cell rides along");
+
+        // Evict, then renewed interest through the carried lease: the decode
+        // job reads the renamed file, not the old, vanished path.
+        store.retarget(&lease, Tier::Evicted);
+        let _ = store.pump();
+        let out = store.retarget(&lease, Tier::Full);
+        match out.jobs.as_slice() {
+            [Job::Decode { path, .. }] => assert_eq!(path, Path::new("b.png")),
+            _ => panic!("expected one decode of the new path"),
+        }
     }
 
     #[test]
