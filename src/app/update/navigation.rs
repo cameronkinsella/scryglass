@@ -136,27 +136,38 @@ pub(crate) fn open_viewer(
             current.clone(),
             ThumbUrgency::Urgent,
         ));
-        tasks.push(fire_load(
-            window_id,
-            &mut shared.store,
-            &pipeline,
-            &mut viewer,
-            current.clone(),
-            Tier::Full,
-            view,
-        ));
-        // Another window may already hold this image resident: show it at once,
-        // sharing the one texture with no fresh decode. Otherwise the load
-        // above brings it in and the thumbnail blur stands in until then.
-        let key = ImageKey::new(&viewer.source, &current);
-        let resident = viewer
-            .cache
-            .get(&current)
-            .and_then(|lease| lease.texture())
-            .is_some();
-        if resident && let Some(ram) = shared.store.ram(&key) {
-            let zoom_mode = shared.config.standard.display.zoom_mode;
-            show_loaded(&mut viewer, &current, ram.original_size, zoom_mode, view);
+        if let Some(anim_task) =
+            try_start_shared_anim(&mut shared.anim_store, &mut viewer, &current)
+        {
+            // Another window already decoded this animation: play the shared
+            // frames with no fresh decode, the same way a navigation onto it
+            // would. The urgent thumb stands in until frame 0 allocates.
+            viewer.pending_since = Some(Instant::now());
+            tasks.push(anim_task.map(Message::Anim));
+        } else {
+            tasks.push(fire_load(
+                window_id,
+                &mut shared.store,
+                &pipeline,
+                &mut viewer,
+                current.clone(),
+                Tier::Full,
+                view,
+            ));
+            // Another window may already hold this image resident: show it at
+            // once, sharing the one texture with no fresh decode. Otherwise the
+            // load above brings it in and the thumbnail blur stands in until
+            // then.
+            let key = ImageKey::new(&viewer.source, &current);
+            let resident = viewer
+                .cache
+                .get(&current)
+                .and_then(|lease| lease.texture())
+                .is_some();
+            if resident && let Some(ram) = shared.store.ram(&key) {
+                let zoom_mode = shared.config.standard.display.zoom_mode;
+                show_loaded(&mut viewer, &current, ram.original_size, zoom_mode, view);
+            }
         }
     }
     // Set the scroll offset before the thumbnailer fires, so it reads the
@@ -746,6 +757,53 @@ mod tests {
             let n: usize = p.file_stem().unwrap().to_str().unwrap().parse().unwrap();
             (90..=110).contains(&n)
         }));
+    }
+
+    #[test]
+    fn opening_a_window_on_a_shared_gif_reuses_the_frames() {
+        use crate::media::animation::{AnimatedImage, RawFrame};
+        use crate::media::pipeline::Source;
+        use crate::media::store::{AnimRam, ImageKey, Tier};
+        use std::sync::Arc;
+
+        let mut app = crate::app::test_support::empty_app();
+        let path = std::path::Path::new("a.gif");
+        let key = ImageKey::new(&Source::Fs, path);
+        // Another window's decode left the frames resident in the shared
+        // store. The lease stands in for that window's demand.
+        let (_lease, _) =
+            app.shared
+                .anim_store
+                .request(key.clone(), path.to_path_buf(), Source::Fs, Tier::InRam);
+        app.shared.anim_store.on_decoded(
+            key,
+            AnimRam {
+                frames: Arc::new(AnimatedImage {
+                    width: 2,
+                    height: 2,
+                    frames: vec![RawFrame {
+                        left: 0,
+                        top: 0,
+                        width: 2,
+                        height: 2,
+                        pixels: vec![0u8; 16],
+                        dispose: gif::DisposalMethod::Keep,
+                        delay: std::time::Duration::from_millis(100),
+                    }],
+                    thumbnail: None,
+                }),
+                decode_time: None,
+            },
+        );
+
+        let nav = crate::nav::Nav::new(vec![path.to_path_buf()], path).unwrap();
+        let _ = open_viewer(&mut app.window, &mut app.shared, nav, Source::Fs, false);
+
+        // The fresh window plays the shared frames instead of re-decoding
+        // the file through the still store.
+        let v = app.viewer().unwrap();
+        assert!(v.anim_player.has_cached(path));
+        assert!(!v.in_flight.contains(path));
     }
 
     #[test]
