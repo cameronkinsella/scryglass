@@ -272,39 +272,17 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                     .thumbs
                     .insert(thumb_key(&viewer.source, &path), thumb, cost);
             }
-            // Register the frames in the shared animation store and lease them here,
-            // so a second window on this GIF shares the one decode and its decay. The
-            // request's decode job is dropped: `on_decoded` resolves the demand
-            // from the frames already in hand. If another window decoded it first,
-            // `on_decoded` is a no-op and the lease shares those frames.
             let dims = (anim.width, anim.height);
-            let (lease, _) = shared.anim_store.request(
-                key.clone(),
-                path.clone(),
-                viewer.source.clone(),
-                Tier::InRam,
-            );
-            shared.anim_store.on_decoded(
+            let play = register_animation(
+                viewer,
+                &mut shared.anim_store,
                 key,
+                &path,
                 AnimRam {
                     frames: anim,
                     decode_time: Some(decode_time),
                 },
             );
-            viewer.anim_player.insert(path.clone(), lease);
-            // Start playback if this GIF is on screen, unless a dormant playback for it
-            // is already in place (a re-decode after a shared eviction): that resumes
-            // from where it was on its own once the frames are back, rather than
-            // restarting from the first frame.
-            let play = if viewer.nav.current() == path && !viewer.anim_player.is_active_on(&path) {
-                viewer
-                    .anim_player
-                    .try_start_from_cache(&path)
-                    .map(|t| t.map(AppMessage::Anim))
-                    .unwrap_or_else(Task::none)
-            } else {
-                Task::none()
-            };
             // A canvas past the device texture limit decodes fine but no
             // frame can ever upload. Say so instead of leaving the thumbnail
             // with no explanation.
@@ -577,6 +555,42 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
         }
     }
 }
+/// Register decoded frames in the shared animation store and lease them into
+/// this window, so a second window on this GIF shares the one decode and its
+/// decay. The request's decode job is dropped: `on_decoded` resolves the
+/// demand from the frames already in hand. If another window decoded it
+/// first, `on_decoded` is a no-op and the lease shares those frames.
+/// Playback starts if the GIF is on screen, unless a dormant playback is
+/// already in place (a re-decode after a shared eviction): that resumes from
+/// where it was on its own once the frames are back. The AnimDecoded core,
+/// shared with the orphaned-completion path so a closed window's decode
+/// lands for whichever window waits on it.
+pub(crate) fn register_animation(
+    viewer: &mut Viewer,
+    anim_store: &mut crate::media::store::Store<crate::media::store::Anim>,
+    key: ImageKey,
+    path: &std::path::Path,
+    ram: AnimRam,
+) -> Task<AppMessage> {
+    let (lease, _) = anim_store.request(
+        key.clone(),
+        path.to_path_buf(),
+        viewer.source.clone(),
+        Tier::InRam,
+    );
+    anim_store.on_decoded(key, ram);
+    viewer.anim_player.insert(path.to_path_buf(), lease);
+    if viewer.nav.current() == path && !viewer.anim_player.is_active_on(path) {
+        viewer
+            .anim_player
+            .try_start_from_cache(path)
+            .map(|t| t.map(AppMessage::Anim))
+            .unwrap_or_else(Task::none)
+    } else {
+        Task::none()
+    }
+}
+
 /// Swap in a reordered file list, keeping a pending move aimed at the same
 /// file. The old index means nothing in the new order, and a target no longer
 /// listed abandons the move.

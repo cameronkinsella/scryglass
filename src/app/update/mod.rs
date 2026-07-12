@@ -78,6 +78,13 @@ fn route(app: &mut App, envelope: Envelope) -> Task<Envelope> {
             let vp_before = win.viewport_size;
             let window_before = win.window_size;
             let shows_image = super::measure::displays_image(&message);
+            // A shared completion routes to the window that fired the job,
+            // but other windows can be waiting on the same file. Sweep them
+            // after the owner's dispatch, so the shared state is installed.
+            let anim_landed = match &message {
+                Message::Media(media::Message::AnimDecoded { path, .. }) => Some(path.clone()),
+                _ => None,
+            };
             let task = dispatch(win, &mut app.shared, message);
             // Remeasure the image area when an image lands on screen or a chrome toggle
             // moves the viewport without a resize. Not during a resize: the calibrated
@@ -89,7 +96,11 @@ fn route(app: &mut App, envelope: Envelope) -> Task<Envelope> {
             } else {
                 task
             };
-            Envelope::wrap(id, task)
+            let wrapped = Envelope::wrap(id, task);
+            match anim_landed {
+                Some(path) => Task::batch([wrapped, start_waiting_anims(app, Some(id), &path)]),
+                None => wrapped,
+            }
         }
         // Replay maximize/fullscreen now the window exists, not at open where it
         // races creation. Use the config: the window's own flag was reset by the
@@ -214,10 +225,72 @@ fn orphaned_media(app: &mut App, message: Message) -> Task<Envelope> {
     let Message::Media(message) = message else {
         return Task::none();
     };
+    // An animation the closed window decoded can have other windows waiting
+    // on it (their still leases went inert when the store forgot the key).
+    // Register the frames through the first waiting window instead of
+    // dropping them, then start any others.
+    if let media::Message::AnimDecoded {
+        key,
+        path,
+        anim,
+        decode_time,
+        ..
+    } = &message
+    {
+        app.shared.store.abandon(key);
+        let adopter = app.windows.iter_mut().find_map(|(&wid, win)| {
+            let viewer = win.viewer_mut()?;
+            (viewer.nav.current() == *path).then_some((wid, viewer))
+        });
+        let Some((wid, viewer)) = adopter else {
+            // Nobody waits on the frames, so they drop here, exactly as if
+            // no window had ever asked.
+            return Task::none();
+        };
+        viewer.cache.remove(path);
+        let ram = crate::media::store::AnimRam {
+            frames: anim.clone(),
+            decode_time: Some(*decode_time),
+        };
+        let play =
+            media::register_animation(viewer, &mut app.shared.anim_store, key.clone(), path, ram);
+        return Task::batch([
+            Envelope::wrap(wid, play),
+            start_waiting_anims(app, Some(wid), path),
+        ]);
+    }
     match apply_store_transition(&mut app.shared, &message) {
         Some(outcome) => run_shared_jobs(app, outcome),
         None => Task::none(),
     }
+}
+
+/// Start playback in every window sitting on `path` whose animation is not
+/// running yet, reusing the just-registered shared frames. Their still
+/// leases went inert when the still store forgot the key, so they are
+/// dropped here. `skip` is the window the completion already handled.
+fn start_waiting_anims(
+    app: &mut App,
+    skip: Option<iced::window::Id>,
+    path: &std::path::Path,
+) -> Task<Envelope> {
+    let mut tasks = Vec::new();
+    for (&wid, win) in app.windows.iter_mut() {
+        if Some(wid) == skip {
+            continue;
+        }
+        let Some(viewer) = win.viewer_mut() else {
+            continue;
+        };
+        if viewer.nav.current() != path {
+            continue;
+        }
+        viewer.cache.remove(path);
+        if let Some(task) = try_start_shared_anim(&mut app.shared.anim_store, viewer, path) {
+            tasks.push(Envelope::wrap(wid, task.map(Message::Anim)));
+        }
+    }
+    Task::batch(tasks)
 }
 
 /// The store-state transition a media completion drives, with no window display
@@ -242,12 +315,8 @@ fn apply_store_transition(
         media::Message::DecodeFailed { key, err, .. } => shared
             .store
             .on_decode_failed(key, matches!(err, crate::media::MediaError::Cancelled)),
-        // Nobody leases the frames. The still store forgets the key like the
-        // live handler does. Tile settles heal through their claim TTL.
-        media::Message::AnimDecoded { key, .. } => {
-            shared.store.abandon(key);
-            return None;
-        }
+        // AnimDecoded is intercepted by `orphaned_media` before this runs:
+        // adopting the frames needs the windows, which this helper never sees.
         _ => return None,
     };
     Some(outcome)
@@ -387,6 +456,95 @@ mod tests {
     use crate::app::test_support::{empty_app, into_app, viewing_app};
     use crate::app::{Modal, ViewerMessage};
     use crate::components::toasts::ToastKind;
+
+    fn shared_gif() -> std::sync::Arc<crate::media::animation::AnimatedImage> {
+        use crate::media::animation::{AnimatedImage, RawFrame};
+        let frame = || RawFrame {
+            left: 0,
+            top: 0,
+            width: 2,
+            height: 2,
+            pixels: vec![0u8; 16],
+            dispose: gif::DisposalMethod::Keep,
+            delay: std::time::Duration::from_millis(100),
+        };
+        std::sync::Arc::new(AnimatedImage {
+            width: 2,
+            height: 2,
+            frames: vec![frame(), frame()],
+            thumbnail: None,
+        })
+    }
+
+    /// Lease the pending still entry for `path` into the app's window `id`,
+    /// the state a window holds while another window's decode is in flight.
+    fn lease_pending(app: &mut App, id: iced::window::Id, path: &str) {
+        use crate::media::pipeline::Source;
+        use crate::media::store::{ImageKey, Tier};
+        let key = ImageKey::new(&Source::Fs, std::path::Path::new(path));
+        let (lease, _) = app
+            .shared
+            .store
+            .request(key, path.into(), Source::Fs, Tier::Full);
+        let win = app.windows.get_mut(&id).unwrap();
+        win.viewer_mut().unwrap().cache.insert(path.into(), lease);
+    }
+
+    fn anim_decoded(path: &str) -> Message {
+        use crate::media::pipeline::Source;
+        use crate::media::store::ImageKey;
+        Message::Media(media::Message::AnimDecoded {
+            key: ImageKey::new(&Source::Fs, std::path::Path::new(path)),
+            path: path.into(),
+            anim: shared_gif(),
+            decode_time: std::time::Duration::from_millis(1),
+            thumb: None,
+        })
+    }
+
+    #[test]
+    fn a_discovered_animation_starts_in_every_waiting_window() {
+        let (mut app, id_a) = into_app(viewing_app(&["a.gif"], 0));
+        let b = viewing_app(&["a.gif"], 0);
+        let id_b = b.window.id;
+        app.windows.insert(id_b, b.window);
+        lease_pending(&mut app, id_a, "a.gif");
+        lease_pending(&mut app, id_b, "a.gif");
+
+        // The decode lands in window A. B was only waiting on the shared
+        // entry, which the discovery abandons, so the sweep must start B
+        // from the registered frames.
+        let _ = route(&mut app, Envelope::Win(id_a, anim_decoded("a.gif")));
+
+        for id in [id_a, id_b] {
+            let v = app.windows[&id].viewer().unwrap();
+            assert!(
+                v.anim_player.has_cached(std::path::Path::new("a.gif")),
+                "both windows lease the shared frames"
+            );
+            assert!(
+                !v.cache.contains_key(std::path::Path::new("a.gif")),
+                "the inert still lease is gone"
+            );
+        }
+    }
+
+    #[test]
+    fn an_orphaned_animation_lands_in_a_waiting_window() {
+        let (mut app, id) = into_app(viewing_app(&["a.gif"], 0));
+        lease_pending(&mut app, id, "a.gif");
+
+        // The window that fired the decode closed before it landed.
+        let ghost = iced::window::Id::unique();
+        let _ = route(&mut app, Envelope::Win(ghost, anim_decoded("a.gif")));
+
+        let v = app.windows[&id].viewer().unwrap();
+        assert!(
+            v.anim_player.has_cached(std::path::Path::new("a.gif")),
+            "the surviving window adopts the frames instead of losing them"
+        );
+        assert!(!v.cache.contains_key(std::path::Path::new("a.gif")));
+    }
 
     // push_toast schedules its auto-dismiss with a tokio timer, which needs
     // a runtime in scope even though the returned Task is dropped here.
