@@ -157,22 +157,32 @@ pub fn filmstrip<'a>(
         );
     }
 
+    // A filesystem thumb key is the file's own path, so peek borrows it
+    // instead of rebuilding an owned key per cell on every redraw. Archive
+    // entries genuinely need the joined key.
+    let archive = match source {
+        crate::media::pipeline::Source::Archive(index) => Some(index.archive_path.as_path()),
+        crate::media::pipeline::Source::Fs => None,
+    };
     for (i, path) in files[range.clone()].iter().enumerate() {
         let index = range.start + i;
 
-        let content: Element<'a, FilmstripMessage> =
-            match thumbs.peek(&crate::media::pipeline::thumb_key(source, path)) {
-                Some(thumb) => image(thumb.handle.clone())
-                    .content_fit(iced::ContentFit::Cover)
-                    .width(Length::Fixed(THUMB_SIZE))
-                    .height(Length::Fixed(THUMB_SIZE))
-                    .into(),
-                None => container(space::horizontal())
-                    .width(Length::Fixed(THUMB_SIZE))
-                    .height(Length::Fixed(THUMB_SIZE))
-                    .style(theme::thumb_placeholder)
-                    .into(),
-            };
+        let thumb = match archive {
+            None => thumbs.peek(path),
+            Some(base) => thumbs.peek(&base.join(path)),
+        };
+        let content: Element<'a, FilmstripMessage> = match thumb {
+            Some(thumb) => image(thumb.handle.clone())
+                .content_fit(iced::ContentFit::Cover)
+                .width(Length::Fixed(THUMB_SIZE))
+                .height(Length::Fixed(THUMB_SIZE))
+                .into(),
+            None => container(space::horizontal())
+                .width(Length::Fixed(THUMB_SIZE))
+                .height(Length::Fixed(THUMB_SIZE))
+                .style(theme::thumb_placeholder)
+                .into(),
+        };
 
         let cell = button(content)
             .on_press(FilmstripMessage::Clicked(index))
