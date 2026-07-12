@@ -85,6 +85,10 @@ fn route(app: &mut App, envelope: Envelope) -> Task<Envelope> {
                 Message::Media(media::Message::AnimDecoded { path, .. }) => Some(path.clone()),
                 _ => None,
             };
+            let texture_landed = match &message {
+                Message::Media(media::Message::TextureReady { key, .. }) => Some(key.clone()),
+                _ => None,
+            };
             let task = dispatch(win, &mut app.shared, message);
             // Remeasure the image area when an image lands on screen or a chrome toggle
             // moves the viewport without a resize. Not during a resize: the calibrated
@@ -97,6 +101,13 @@ fn route(app: &mut App, envelope: Envelope) -> Task<Envelope> {
                 task
             };
             let wrapped = Envelope::wrap(id, task);
+            if let Some(key) = texture_landed {
+                for (&wid, win) in app.windows.iter_mut() {
+                    if wid != id {
+                        media::promote_if_waiting(win, &app.shared, &key);
+                    }
+                }
+            }
             match anim_landed {
                 Some(path) => Task::batch([wrapped, start_waiting_anims(app, Some(id), &path)]),
                 None => wrapped,
@@ -525,6 +536,50 @@ mod tests {
             assert!(
                 !v.cache.contains_key(std::path::Path::new("a.gif")),
                 "the inert still lease is gone"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shared_upload_promotes_every_waiting_window() {
+        use crate::media::pipeline::Source;
+        use crate::media::store::{ImageKey, RamImage, Tier};
+        use iced::widget::image::Handle;
+
+        let (mut app, id_a) = into_app(viewing_app(&["a.png"], 0));
+        let b = viewing_app(&["a.png"], 0);
+        let id_b = b.window.id;
+        app.windows.insert(id_b, b.window);
+        lease_pending(&mut app, id_a, "a.png");
+        lease_pending(&mut app, id_b, "a.png");
+
+        // The decode and its upload land in window A. B joined the pending
+        // entry, emitted no job of its own, and gets no message: the sweep
+        // is its only signal.
+        let key = ImageKey::new(&Source::Fs, std::path::Path::new("a.png"));
+        let decoded = Message::Media(media::Message::Decoded {
+            key: key.clone(),
+            path: "a.png".into(),
+            ram: Box::new(RamImage {
+                handle: Handle::from_rgba(2, 2, vec![0u8; 16]),
+                original_size: (2, 2),
+                decode_time: None,
+            }),
+            thumb: None,
+        });
+        let _ = route(&mut app, Envelope::Win(id_a, decoded));
+        let ready = Message::Media(media::Message::TextureReady {
+            key,
+            tier: Tier::Full,
+            texture: crate::ui::image_surface::test_keepalive(),
+        });
+        let _ = route(&mut app, Envelope::Win(id_a, ready));
+
+        for id in [id_a, id_b] {
+            let v = app.windows[&id].viewer().unwrap();
+            assert!(
+                matches!(v.displayed, crate::app::state::DisplayedImage::Full { .. }),
+                "both windows leave the blur once the shared texture lands"
             );
         }
     }

@@ -155,35 +155,16 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
 
         Message::TextureReady { key, tier, texture } => {
             let viewport = win.viewport_size;
-            let zoom_mode = shared.config.standard.display.zoom_mode;
             let pipeline = shared.pipeline.clone();
             let tiled = texture.tiles().is_some();
             // Swap the shared cell. Every window leasing this image now draws it.
             let outcome = shared.store.on_minted(key.clone(), tier, texture);
-            // If the on-screen image is still standing in with its blur, promote it
-            // to the full display now that a texture exists. This covers the image
-            // that became resident via a shared upload (another window's decode),
-            // so no decode of its own ever fired show_loaded.
-            let mut rotate = Task::none();
-            if let Some(viewer) = win.viewer_mut() {
-                let target = match &viewer.displayed {
-                    DisplayedImage::Placeholder(_) => viewer.displayed_path.clone(),
-                    // Nothing on screen at all (no thumbnail to stand in): the
-                    // cursor names what this window is waiting for. A fresh
-                    // window opening an image another window already holds in
-                    // RAM runs no decode, so this upload is its only signal.
-                    DisplayedImage::None => Some(viewer.nav.current().to_path_buf()),
-                    _ => None,
-                };
-                let target = target.filter(|path| ImageKey::new(&viewer.source, path) == key);
-                if let Some(path) = target
-                    && let Some(ram) = shared.store.ram(&key)
-                {
-                    show_loaded(viewer, &path, ram.original_size, zoom_mode, viewport);
-                }
+            promote_if_waiting(win, shared, &key);
+            let rotate = match win.viewer_mut() {
                 // A rotated image returning from decay re-derives its override
-                rotate = fire_rotate(viewer, &shared.store);
-            }
+                Some(viewer) => fire_rotate(viewer, &shared.store),
+                None => Task::none(),
+            };
             let jobs = run_jobs(win.id, outcome.jobs, &pipeline, Lane::Current, viewport);
             if tiled {
                 // A freshly minted pyramid is empty: fill its visible set now.
@@ -555,6 +536,35 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
         }
     }
 }
+/// If this window's view is still standing in with its blur (or nothing at
+/// all) for exactly the image behind `key`, promote it to the full display
+/// now that a texture exists. This covers the image that became resident via
+/// a shared upload (another window's decode), so no decode of this window's
+/// own ever fired show_loaded. The store answers one window's upload job,
+/// and the router sweeps every other window through here on its completion.
+pub(crate) fn promote_if_waiting(win: &mut Window, shared: &Shared, key: &ImageKey) {
+    let viewport = win.viewport_size;
+    let zoom_mode = shared.config.standard.display.zoom_mode;
+    let Some(viewer) = win.viewer_mut() else {
+        return;
+    };
+    let target = match &viewer.displayed {
+        DisplayedImage::Placeholder(_) => viewer.displayed_path.clone(),
+        // Nothing on screen at all (no thumbnail to stand in): the cursor
+        // names what this window is waiting for. A fresh window opening an
+        // image another window already holds in RAM runs no decode, so
+        // this upload is its only signal.
+        DisplayedImage::None => Some(viewer.nav.current().to_path_buf()),
+        _ => None,
+    };
+    let target = target.filter(|path| ImageKey::new(&viewer.source, path) == *key);
+    if let Some(path) = target
+        && let Some(ram) = shared.store.ram(key)
+    {
+        show_loaded(viewer, &path, ram.original_size, zoom_mode, viewport);
+    }
+}
+
 /// Register decoded frames in the shared animation store and lease them into
 /// this window, so a second window on this GIF shares the one decode and its
 /// decay. The request's decode job is dropped: `on_decoded` resolves the
