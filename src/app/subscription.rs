@@ -80,8 +80,9 @@ fn window_subscriptions(id: window::Id, win: &Window) -> Vec<Subscription<Messag
     // detection directly (see the Focused handler). This slow fallback only
     // covers a minimize that happens while the window is already unfocused, for
     // which no event fires. A focused window can't be minimized, so it never
-    // polls.
-    if win.viewer().is_some() && !win.focused {
+    // polls. Empty windows poll too: a stale flag on one would block the
+    // all-minimized working-set trim for the whole app.
+    if !win.focused {
         subs.push(
             iced::time::every(Duration::from_secs(1))
                 .map(|_| Message::Window(WindowMessage::CheckMinimize)),
