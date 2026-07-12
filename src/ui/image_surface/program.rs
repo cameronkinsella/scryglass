@@ -243,12 +243,17 @@ impl shader::Primitive for ImagePrimitive {
             // at its baked size, or a 100%-zoom image) also snaps its source to texel
             // centers, so the single tap is a pixel-exact copy rather than a softening
             // sub-pixel resample (worst on text). The image area is `bounds` in
-            // logical pixels, taken to physical by the scale factor.
+            // logical pixels, taken to physical by the scale factor. The widget's
+            // own offset rides in as the origin: the render pass viewport sits at
+            // the unrounded physical bounds, so the chrome above the image makes
+            // the framebuffer position fractional and the snap must cancel it.
+            let origin = (bounds.x * scale, bounds.y * scale);
             let (dst, src) = snap_placement_to_pixels(
                 placement.dst,
                 placement.src,
                 (self.tex_size[0], self.tex_size[1]),
                 (bounds.width * scale, bounds.height * scale),
+                origin,
                 near_one_to_one(footprint),
             );
             // A dead ref is a texture the decay freed while this window kept
@@ -275,6 +280,7 @@ impl shader::Primitive for ImagePrimitive {
                     raw,
                     scale,
                     (bounds.width * scale, bounds.height * scale),
+                    origin,
                     self.kernel,
                 );
                 return;

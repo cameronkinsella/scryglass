@@ -7,7 +7,7 @@
 use iced::advanced::widget::operation::Outcome;
 use iced::advanced::widget::{Id, Operation, operate};
 use iced::window;
-use iced::{Rectangle, Size, Task};
+use iced::{Rectangle, Task};
 
 use crate::app::Window;
 
@@ -38,10 +38,11 @@ pub(crate) fn displays_image(message: &Message) -> bool {
     )
 }
 
-/// Read the laid-out size of `window`'s image area, delivered back as an
+/// Read the laid-out bounds of `window`'s image area, delivered back as an
 /// `ImageAreaMeasured` tagged with the current window size (so a measurement the
-/// window has resized past can be dropped). Yields nothing until the container has
-/// been laid out.
+/// window has resized past can be dropped). The position rides along with the
+/// size: the blur snap needs the area's offset in the window. Yields nothing
+/// until the container has been laid out.
 pub(crate) fn image_area(window: &Window) -> Task<Message> {
     let at = window.window_size;
     operate(MeasureBounds {
@@ -54,23 +55,23 @@ pub(crate) fn image_area(window: &Window) -> Task<Message> {
 /// Captures the bounds of the container whose id matches `target`.
 struct MeasureBounds {
     target: Id,
-    found: Option<Size>,
+    found: Option<Rectangle>,
 }
 
-impl Operation<Size> for MeasureBounds {
-    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<Size>)) {
+impl Operation<Rectangle> for MeasureBounds {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<Rectangle>)) {
         operate(self);
     }
 
     fn container(&mut self, id: Option<&Id>, bounds: Rectangle) {
         if id == Some(&self.target) {
-            self.found = Some(bounds.size());
+            self.found = Some(bounds);
         }
     }
 
-    fn finish(&self) -> Outcome<Size> {
+    fn finish(&self) -> Outcome<Rectangle> {
         match self.found {
-            Some(size) => Outcome::Some(size),
+            Some(bounds) => Outcome::Some(bounds),
             None => Outcome::None,
         }
     }

@@ -58,6 +58,7 @@ pub(crate) fn empty_app() -> TestApp {
             open_menu: None,
             viewport_size: Size::new(800.0, 600.0),
             chrome_pad: Size::ZERO,
+            image_area_origin: iced::Point::ORIGIN,
             last_cursor_pos: iced::Point::ORIGIN,
             tile_epoch: 0,
             window_size: Size::new(800.0, 600.0),

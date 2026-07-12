@@ -159,6 +159,10 @@ pub struct Window {
     /// `recalc_viewport` tracks the true area during a resize without waiting on the
     /// async measurement. Zero until the first measurement calibrates it.
     pub(crate) chrome_pad: Size,
+    /// The measured image area's top-left in the window (logical px), so the
+    /// blur widget snaps to the same framebuffer pixels the shader surface
+    /// does. Zero until the first measurement.
+    pub(crate) image_area_origin: iced::Point,
     /// Last known cursor position (updated on every CursorMoved event).
     pub(crate) last_cursor_pos: iced::Point,
     /// Bumped by every view change that debounces its tile demand pass, so

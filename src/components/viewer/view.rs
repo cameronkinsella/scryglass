@@ -226,6 +226,7 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
                 viewer.zoom,
                 viewer.pan,
                 (win.viewport_size.width, win.viewport_size.height),
+                (win.image_area_origin.x, win.image_area_origin.y),
                 false,
             )
         }
@@ -316,6 +317,7 @@ fn blur_fallback<'a>(
             viewer.zoom,
             viewer.pan,
             (win.viewport_size.width, win.viewport_size.height),
+            (win.image_area_origin.x, win.image_area_origin.y),
             false,
         ),
         None => ui::image_display::empty_viewport(),

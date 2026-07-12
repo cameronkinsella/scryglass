@@ -36,13 +36,14 @@ pub enum Message {
     /// is crisp without bringing the window forward.
     Reactivate,
     CloseRequested(iced::window::Id),
-    /// iced's laid-out size of this window's image area (`area`), measured after
+    /// iced's laid-out bounds of this window's image area (`area`), measured after
     /// layout for the window size `at`. Corrects the chrome-estimated viewport to the
     /// true area, so the fit zoom and view-res bake match what is on screen and the
-    /// demote stays seamless. `at` is carried so a measurement the window has already
-    /// resized past is dropped rather than applied to a stale layout.
+    /// demote stays seamless. The position feeds the blur snap. `at` is carried so a
+    /// measurement the window has already resized past is dropped rather than
+    /// applied to a stale layout.
     ImageAreaMeasured {
-        area: Size,
+        area: iced::Rectangle,
         at: Size,
     },
 }
@@ -196,13 +197,18 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             decay::restart_decay(win, shared)
         }
 
-        Message::ImageAreaMeasured { area: size, at } => {
+        Message::ImageAreaMeasured { area, at } => {
             // Drop a measurement the window has since resized past: it was taken for a
             // stale layout, so applying it (or calibrating from it) would fight the
             // live resize. A fresh one follows for the settled size.
             if at != win.window_size {
                 return Task::none();
             }
+            // The area's position feeds the blur snap. Stored before the
+            // agreement gate: the first measurement can agree on size while
+            // the origin default is still zero.
+            win.image_area_origin = area.position();
+            let size = area.size();
             // Correct the chrome-estimated viewport to iced's true image area, so the
             // fit zoom and the view-res bake match what is on screen and the demote
             // stays seamless. Ignore a measurement that already agrees, so this does

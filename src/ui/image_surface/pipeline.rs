@@ -282,6 +282,7 @@ impl ImagePipeline {
         raw_footprint: [f32; 2],
         scale: f32,
         viewport_phys: (f32, f32),
+        origin: (f32, f32),
         kernel: DownscaleKernel,
     ) {
         use crate::media::tiles;
@@ -317,6 +318,7 @@ impl ImagePipeline {
                 src,
                 (bw as f32, bh as f32),
                 viewport_phys,
+                origin,
                 crate::ui::geometry::near_one_to_one(base_fp),
             );
             self.write_uniforms(
@@ -344,6 +346,7 @@ impl ImagePipeline {
                     src,
                     (shown.0 as f32, shown.1 as f32),
                     viewport_phys,
+                    origin,
                     true,
                 );
                 let espan = (edst[2] - edst[0], edst[3] - edst[1]);

@@ -22,7 +22,9 @@ use crate::ui::geometry::display_geometry;
 /// * `zoom`: zoom factor (1.0 = 100% of original pixel size).
 /// * `pan`: pan offset in logical pixels `(dx, dy)`.
 /// * `viewport`: size of the display area in logical pixels `(w, h)`.
+/// * `origin`: the display area's top-left in the window, logical pixels.
 /// * `pixelated`: nearest sampling when zoomed past 100% (crisp pixel art).
+#[allow(clippy::too_many_arguments)]
 pub fn image_display(
     handle: &Handle,
     texture_size: (u32, u32),
@@ -30,6 +32,7 @@ pub fn image_display(
     zoom: f32,
     pan: (f32, f32),
     viewport: (f32, f32),
+    origin: (f32, f32),
     pixelated: bool,
 ) -> Element<'_, Message> {
     let (vp_w, vp_h) = viewport;
@@ -51,18 +54,22 @@ pub fn image_display(
     };
     // Snap to the same whole-pixel rect the shader gives the sharp image, both size
     // and offset rounded the same way (`snap_placement_to_pixels`), so the swap
-    // between blur and sharp never shifts. `center` computes and floors the offset
-    // itself, drifting the blur up and left by a pixel. Positioning it explicitly at
-    // the rounded, already-integer offset leaves iced no fractional value to floor.
+    // between blur and sharp never shifts. That rounding happens in FRAMEBUFFER
+    // space: the widget's own physical offset in the window is fractional under
+    // chrome, so the area's origin rides in and cancels out. `center` computes and
+    // floors the offset itself, drifting the blur up and left by a pixel.
+    // Positioning it explicitly at the rounded offset leaves iced no fractional
+    // value to floor.
     let scale = crate::ui::image_surface::current_scale_factor().max(1.0);
-    let axis = |d0: f32, d1: f32, vp: f32| {
+    let axis = |d0: f32, d1: f32, vp: f32, org: f32| {
         let phys = vp * scale;
+        let origin = org * scale;
         let pixels = ((d1 - d0) * phys).round().max(1.0);
-        let a0 = ((d0 + d1) * 0.5 * phys - pixels * 0.5).round();
+        let a0 = (origin + (d0 + d1) * 0.5 * phys - pixels * 0.5).round() - origin;
         (a0 / scale, pixels / scale)
     };
-    let (left, w) = axis(dst[0], dst[2], vp_w);
-    let (top, h) = axis(dst[1], dst[3], vp_h);
+    let (left, w) = axis(dst[0], dst[2], vp_w, origin.0);
+    let (top, h) = axis(dst[1], dst[3], vp_h, origin.1);
     container(
         image(handle.clone())
             .content_fit(ContentFit::Fill)
@@ -143,8 +150,35 @@ mod tests {
     #[test]
     fn image_display_builds_fit_crop_and_empty_paths() {
         let handle = Handle::from_rgba(4, 4, vec![0u8; 4 * 4 * 4]);
-        let _ = image_display(&handle, (4, 4), (4, 4), 1.0, (0.0, 0.0), VP, false);
-        let _ = image_display(&handle, (4, 4), (4000, 3000), 5.0, (0.0, 0.0), VP, true);
-        let _ = image_display(&handle, (4, 4), (4, 4), 0.0, (0.0, 0.0), VP, false);
+        let _ = image_display(
+            &handle,
+            (4, 4),
+            (4, 4),
+            1.0,
+            (0.0, 0.0),
+            VP,
+            (0.0, 30.5),
+            false,
+        );
+        let _ = image_display(
+            &handle,
+            (4, 4),
+            (4000, 3000),
+            5.0,
+            (0.0, 0.0),
+            VP,
+            (0.0, 0.0),
+            true,
+        );
+        let _ = image_display(
+            &handle,
+            (4, 4),
+            (4, 4),
+            0.0,
+            (0.0, 0.0),
+            VP,
+            (0.0, 0.0),
+            false,
+        );
     }
 }

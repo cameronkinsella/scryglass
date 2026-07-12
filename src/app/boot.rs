@@ -154,6 +154,7 @@ pub(crate) fn new_window(id: window::Id, config: &AppConfig) -> Window {
         open_menu: None,
         viewport_size: size,
         chrome_pad: iced::Size::ZERO,
+        image_area_origin: iced::Point::ORIGIN,
         last_cursor_pos: Point::ORIGIN,
         tile_epoch: 0,
         window_size: size,

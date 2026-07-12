@@ -189,11 +189,16 @@ pub(crate) fn near_one_to_one(footprint: [f32; 2]) -> bool {
 
 /// Snap one axis so the display spans a whole number of physical pixels with its
 /// left/top on a pixel boundary, keeping the center. That puts every surface on
-/// one pixel grid. When `align_src`, also move the source window to cover exactly
-/// that many texels from a texel boundary, so each pixel center lands on a texel
-/// center and the single tap is exact (the near-1:1 copy). Otherwise the source
-/// is left as is (a real min/magnification keeps sampling the same span). Returns
-/// the new `(dst_start, dst_end, src_start, src_end)` in normalized units.
+/// one pixel grid. The boundary is a FRAMEBUFFER pixel's: `origin` is the
+/// widget's own physical offset in the window, which chrome above or beside the
+/// image area makes fractional, so rounding in widget-local space alone would
+/// land the edges between framebuffer pixels and soften the single tap. When
+/// `align_src`, also move the source window to cover exactly that many texels
+/// from a texel boundary, so each pixel center lands on a texel center and the
+/// single tap is exact (the near-1:1 copy). Otherwise the source is left as is
+/// (a real min/magnification keeps sampling the same span). Returns the new
+/// `(dst_start, dst_end, src_start, src_end)` in normalized units.
+#[allow(clippy::too_many_arguments)]
 fn snap_axis(
     d0: f32,
     d1: f32,
@@ -201,6 +206,7 @@ fn snap_axis(
     s1: f32,
     phys: f32,
     tex: f32,
+    origin: f32,
     align_src: bool,
 ) -> (f32, f32, f32, f32) {
     // A magnified image is drawn larger than its texture, so its displayed pixel span
@@ -220,7 +226,7 @@ fn snap_axis(
     let align = align_src && (src_texels - want).abs() <= dust;
     let pixels = if align { want.min(tex) } else { want };
     let center = (d0 + d1) * 0.5 * phys;
-    let a0 = (center - pixels * 0.5).round();
+    let a0 = (origin + center - pixels * 0.5).round() - origin;
     let (src0, src1) = if align {
         let src_center = (s0 + s1) * 0.5 * tex;
         let t0 = (src_center - pixels * 0.5).round().clamp(0.0, tex - pixels);
@@ -234,12 +240,14 @@ fn snap_axis(
 /// Snap `dst` to whole physical pixels so the surface sits on the pixel grid and a
 /// view-res demote never shifts it. When `align_src` (a near-1:1 copy) the source
 /// snaps to texel centers too, making the single tap a pixel-exact copy.
-/// `physical_viewport` is the image area in physical pixels.
+/// `physical_viewport` is the image area in physical pixels and `origin` its
+/// offset in the window, whose fractional part the snap must cancel.
 pub(crate) fn snap_placement_to_pixels(
     dst: [f32; 4],
     src: [f32; 4],
     tex_size: (f32, f32),
     physical_viewport: (f32, f32),
+    origin: (f32, f32),
     align_src: bool,
 ) -> ([f32; 4], [f32; 4]) {
     let (pw, ph) = physical_viewport;
@@ -247,8 +255,10 @@ pub(crate) fn snap_placement_to_pixels(
     if pw <= 0.0 || ph <= 0.0 || tw <= 0.0 || th <= 0.0 {
         return (dst, src);
     }
-    let (dx0, dx1, sx0, sx1) = snap_axis(dst[0], dst[2], src[0], src[2], pw, tw, align_src);
-    let (dy0, dy1, sy0, sy1) = snap_axis(dst[1], dst[3], src[1], src[3], ph, th, align_src);
+    let (dx0, dx1, sx0, sx1) =
+        snap_axis(dst[0], dst[2], src[0], src[2], pw, tw, origin.0, align_src);
+    let (dy0, dy1, sy0, sy1) =
+        snap_axis(dst[1], dst[3], src[1], src[3], ph, th, origin.1, align_src);
     ([dx0, dy0, dx1, dy1], [sx0, sy0, sx1, sy1])
 }
 
@@ -514,6 +524,7 @@ mod tests {
             [0.0, 0.0, 1.0, 1.0],
             (200.0, 100.0),
             (400.0, 200.0),
+            (0.0, 0.0),
             true,
         );
         assert!(((dst[2] - dst[0]) * 400.0 - 200.0).abs() < 1e-3);
@@ -532,6 +543,7 @@ mod tests {
             src_in,
             (5333.0, 3000.0),
             (1415.0, 631.2),
+            (0.0, 0.0),
             false,
         );
         assert_eq!(src, src_in);
@@ -550,6 +562,7 @@ mod tests {
             [0.0, 0.0, 1.0, 1.0],
             (200.0, 100.0),
             (600.0, 300.0),
+            (0.0, 0.0),
             false,
         );
         assert!(
@@ -573,6 +586,7 @@ mod tests {
             [0.0, 0.002, 1.0, 0.998],
             (1131.0, 636.0),
             (1131.0, 631.2),
+            (0.0, 0.0),
             true,
         );
         let shown_px = (dst[3] - dst[1]) * 631.2;
@@ -589,14 +603,16 @@ mod tests {
         // texels and shave the edges off a fully-fit image.
         let dst = [0.0, 0.0, 615.0 / 640.0, 575.0 / 600.0];
         let src = [0.0, 0.0, 1.0, 1.0];
-        let (sdst, ssrc) = snap_placement_to_pixels(dst, src, (625.0, 585.0), (640.0, 600.0), true);
+        let (sdst, ssrc) =
+            snap_placement_to_pixels(dst, src, (625.0, 585.0), (640.0, 600.0), (0.0, 0.0), true);
         assert_eq!(ssrc, src, "the full source must survive");
         let span = (sdst[2] - sdst[0]) * 640.0;
         assert!((span - 615.0).abs() < 0.5, "span {span}");
 
         // Even a two-texel window off a full-source fit is a visible shave.
         let dst = [0.0, 0.0, 623.0 / 640.0, 583.0 / 600.0];
-        let (_, ssrc) = snap_placement_to_pixels(dst, src, (625.0, 585.0), (640.0, 600.0), true);
+        let (_, ssrc) =
+            snap_placement_to_pixels(dst, src, (625.0, 585.0), (640.0, 600.0), (0.0, 0.0), true);
         assert_eq!(ssrc, src, "two texels of window still crop content");
     }
 
@@ -605,10 +621,34 @@ mod tests {
         // Within rounding dust of the texture size the exact copy engages.
         let dst = [0.0, 0.0, 625.4 / 640.0, 585.4 / 600.0];
         let src = [0.0, 0.0, 1.0, 1.0];
-        let (sdst, ssrc) = snap_placement_to_pixels(dst, src, (625.0, 585.0), (640.0, 600.0), true);
+        let (sdst, ssrc) =
+            snap_placement_to_pixels(dst, src, (625.0, 585.0), (640.0, 600.0), (0.0, 0.0), true);
         assert_eq!(ssrc, src);
         let span = (sdst[2] - sdst[0]) * 640.0;
         assert!((span - 625.0).abs() < 0.5, "span {span}");
+    }
+
+    #[test]
+    fn snap_cancels_a_fractional_widget_origin() {
+        // The image area sits below a toolbar whose measured height is not
+        // a whole physical pixel (37.5 at 125% scaling). The snapped edges
+        // must land on framebuffer pixels, origin included, or the near-1:1
+        // tap samples between texel rows and softens the whole image.
+        let origin = (0.0, 37.5);
+        let (dst, src) = snap_placement_to_pixels(
+            [0.25, 0.25, 0.75, 0.75],
+            [0.0, 0.0, 1.0, 1.0],
+            (200.0, 100.0),
+            (400.0, 200.0),
+            origin,
+            true,
+        );
+        assert_eq!(src, [0.0, 0.0, 1.0, 1.0]);
+        let framebuffer_y0 = origin.1 + dst[1] * 200.0;
+        let framebuffer_y1 = origin.1 + dst[3] * 200.0;
+        assert!(framebuffer_y0.fract().abs() < 1e-3, "y0 {framebuffer_y0}");
+        assert!(framebuffer_y1.fract().abs() < 1e-3, "y1 {framebuffer_y1}");
+        assert!(((dst[3] - dst[1]) * 200.0 - 100.0).abs() < 1e-3);
     }
 
     #[test]
@@ -616,11 +656,11 @@ mod tests {
         let dst = [0.1, 0.1, 0.9, 0.9];
         let src = [0.0, 0.0, 1.0, 1.0];
         assert_eq!(
-            snap_placement_to_pixels(dst, src, (200.0, 100.0), (0.0, 200.0), true),
+            snap_placement_to_pixels(dst, src, (200.0, 100.0), (0.0, 200.0), (0.0, 0.0), true),
             (dst, src)
         );
         assert_eq!(
-            snap_placement_to_pixels(dst, src, (0.0, 0.0), (400.0, 200.0), true),
+            snap_placement_to_pixels(dst, src, (0.0, 0.0), (400.0, 200.0), (0.0, 0.0), true),
             (dst, src)
         );
     }
