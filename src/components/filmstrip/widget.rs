@@ -52,7 +52,9 @@ pub fn visible_range(scroll_x: f32, viewport_w: f32, len: usize) -> Range<usize>
     if len == 0 {
         return 0..0;
     }
-    let first = (scroll_x / STRIDE).max(0.0) as usize;
+    // A rescan can shrink the list under a stored far-right scroll offset,
+    // and an unclamped first would invert the range and panic the cell slice.
+    let first = ((scroll_x / STRIDE).max(0.0) as usize).min(len);
     let count = (viewport_w / STRIDE).ceil() as usize + 1;
     let start = first.saturating_sub(OVERSCAN);
     let end = (first + count + OVERSCAN).min(len);
@@ -275,6 +277,15 @@ mod tests {
         let range = visible_range(0.0, 10_000.0, 5);
         assert_eq!(range, 0..5);
         assert_eq!(visible_range(0.0, 800.0, 0), 0..0);
+    }
+
+    #[test]
+    fn visible_range_survives_a_list_shrunk_under_the_scroll() {
+        // A far-right scroll whose directory shrank to 20 files behind it.
+        // The range must stay well formed or the cell slice panics.
+        let range = visible_range(59_037.0, 800.0, 20);
+        assert!(range.start <= range.end);
+        assert_eq!(range.end, 20);
     }
 
     #[test]
