@@ -246,7 +246,14 @@ impl AnimPlayer {
         if frames.frames.len() <= 1 {
             return None;
         }
-        Some(frames.frames[active.frame_index].delay)
+        // A shorter re-decode can leave a dormant index past the end. The
+        // subscription reads the delay before any Tick can clamp the index,
+        // so fall back to frame zero the way Tick will.
+        let frame = frames
+            .frames
+            .get(active.frame_index)
+            .unwrap_or(&frames.frames[0]);
+        Some(frame.delay)
     }
 
     /// Drop the leases for paths outside `keep`. The shared store frees a GIF's
@@ -542,6 +549,30 @@ mod tests {
         // of indexing out of bounds.
         let _ = player.update(AnimMessage::Tick, path);
         assert!(player.is_active_on(path));
+    }
+
+    #[test]
+    fn the_delay_reads_safely_past_a_shorter_redecode() {
+        let mut store = Store::<Anim>::default();
+        let mut player = AnimPlayer::new();
+        let path = Path::new("a.gif");
+        player.insert(path.to_path_buf(), lease_for(&mut store, path, 3));
+        let _ = player.try_start_from_cache(path);
+        let _ = player.update(AnimMessage::Tick, path);
+        let _ = player.update(AnimMessage::Tick, path);
+        store.retarget(player.lease(path).unwrap(), Tier::Evicted);
+        store.retarget(player.lease(path).unwrap(), Tier::InRam);
+        store.on_decoded(
+            ImageKey::new(&Source::Fs, path),
+            AnimRam {
+                frames: anim(2),
+                decode_time: None,
+            },
+        );
+
+        // The subscription reads the delay before any tick can clamp the
+        // dormant index, so the read itself must tolerate the short list.
+        assert!(player.current_delay().is_some());
     }
 
     #[test]
