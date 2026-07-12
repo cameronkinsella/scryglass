@@ -228,10 +228,21 @@ pub fn submit_upload(handle: Handle, ready: tokio::sync::oneshot::Sender<Keepali
     let Some(ctx) = UPLOAD_CONTEXT.get() else {
         return false;
     };
-    let Handle::Rgba { width, height, .. } = &handle else {
+    let Handle::Rgba {
+        width,
+        height,
+        pixels,
+        ..
+    } = &handle
+    else {
         return false;
     };
     if *width == 0 || *height == 0 || *width > ctx.max_dim || *height > ctx.max_dim {
+        return false;
+    }
+    // A buffer shorter than the declared size would panic the upload
+    // thread's row copies, killing every later upload with it.
+    if pixels.len() != *width as usize * *height as usize * 4 {
         return false;
     }
     ctx.jobs.send(Job::Upload { handle, ready }).is_ok()
@@ -249,13 +260,22 @@ pub fn submit_write_frame(
     let Some(ctx) = UPLOAD_CONTEXT.get() else {
         return false;
     };
-    let Handle::Rgba { width, height, .. } = &handle else {
+    let Handle::Rgba {
+        width,
+        height,
+        pixels,
+        ..
+    } = &handle
+    else {
         return false;
     };
     let Some((_, (tw, th))) = into.write_target() else {
         return false;
     };
     if *width != tw || *height != th {
+        return false;
+    }
+    if pixels.len() != *width as usize * *height as usize * 4 {
         return false;
     }
     ctx.jobs

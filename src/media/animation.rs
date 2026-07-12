@@ -254,6 +254,10 @@ impl FrameCanvas {
         &self.canvas
     }
 
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
     /// Apply disposal method after the composited pixels have been consumed.
     pub fn apply_disposal(&mut self, frame: &RawFrame) {
         let cw = self.width as usize;

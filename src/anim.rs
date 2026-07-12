@@ -114,6 +114,14 @@ impl AnimPlayer {
                 if active.frame_index >= frame_count {
                     active.frame_index = 0;
                 }
+                // It can come back a different size too. The old canvas would
+                // pack a wrong-length buffer into the new dimensions, which
+                // panics the shared upload thread. Restart from frame zero.
+                if active.canvas.size() != (frames.width, frames.height) {
+                    active.canvas = FrameCanvas::new(frames.width, frames.height);
+                    active.frame_index = 0;
+                    active.canvas.composite_frame(&frames.frames[0]);
+                }
 
                 // Apply disposal, advance, composite.
                 let current_frame = &frames.frames[active.frame_index];
@@ -218,15 +226,14 @@ impl AnimPlayer {
         self.active.as_ref()?.frame_texture.clone()
     }
 
-    /// The current frame's pixels as a handle, for clipboard copy.
+    /// The current frame's pixels as a handle, for clipboard copy. Sized by
+    /// the canvas itself, which a dormant resume can briefly leave behind a
+    /// re-decoded animation's dimensions.
     pub fn current_handle(&self) -> Option<Handle> {
-        let frames = self.active_frames()?;
+        self.active_frames()?;
         let active = self.active.as_ref()?;
-        Some(Handle::from_rgba(
-            frames.width,
-            frames.height,
-            active.canvas.pixels().to_vec(),
-        ))
+        let (w, h) = active.canvas.size();
+        Some(Handle::from_rgba(w, h, active.canvas.pixels().to_vec()))
     }
 
     /// Whether a multi-frame animation is active, resident, and ready to animate.
@@ -322,18 +329,23 @@ mod tests {
 
     /// A tiny `frames`-frame 2x2 animation for exercising the player without GPU.
     fn anim(frames: usize) -> Arc<AnimatedImage> {
+        sized_anim(frames, 2, 2)
+    }
+
+    /// Like [`anim`], at explicit dimensions, for size-changing re-decodes.
+    fn sized_anim(frames: usize, width: u32, height: u32) -> Arc<AnimatedImage> {
         let frame = || RawFrame {
             left: 0,
             top: 0,
-            width: 2,
-            height: 2,
-            pixels: vec![0u8; 16],
+            width,
+            height,
+            pixels: vec![0u8; (width * height * 4) as usize],
             dispose: gif::DisposalMethod::Keep,
             delay: Duration::from_millis(100),
         };
         Arc::new(AnimatedImage {
-            width: 2,
-            height: 2,
+            width,
+            height,
             frames: (0..frames).map(|_| frame()).collect(),
             thumbnail: None,
         })
@@ -549,6 +561,43 @@ mod tests {
         // of indexing out of bounds.
         let _ = player.update(AnimMessage::Tick, path);
         assert!(player.is_active_on(path));
+    }
+
+    #[test]
+    fn a_resized_redecode_rebuilds_the_canvas() {
+        let mut store = Store::<Anim>::default();
+        let mut player = AnimPlayer::new();
+        let path = Path::new("a.gif");
+        player.insert(path.to_path_buf(), lease_for(&mut store, path, 3));
+        let _ = player.try_start_from_cache(path);
+        let _ = player.update(AnimMessage::Tick, path);
+        store.retarget(player.lease(path).unwrap(), Tier::Evicted);
+
+        // The file was replaced on disk with a larger animation.
+        store.retarget(player.lease(path).unwrap(), Tier::InRam);
+        store.on_decoded(
+            ImageKey::new(&Source::Fs, path),
+            AnimRam {
+                frames: sized_anim(3, 4, 4),
+                decode_time: None,
+            },
+        );
+
+        // The tick composites onto a rebuilt canvas, so the packed buffer
+        // matches the new dimensions instead of panicking the upload thread.
+        let _ = player.update(AnimMessage::Tick, path);
+        let handle = player.current_handle().unwrap();
+        let Handle::Rgba {
+            width,
+            height,
+            pixels,
+            ..
+        } = handle
+        else {
+            panic!("expected an rgba handle");
+        };
+        assert_eq!((width, height), (4, 4));
+        assert_eq!(pixels.len(), 4 * 4 * 4);
     }
 
     #[test]
