@@ -26,6 +26,49 @@ fn socket_name() -> String {
     format!("scryglass-{user}.sock")
 }
 
+/// Largest accepted forward payload. A path is tiny even at the Windows
+/// extended-length limit, and the cap keeps a hostile peer from ballooning
+/// the read buffer.
+const MAX_PAYLOAD: u64 = 64 * 1024;
+
+/// How long a forwarding launch waits on the primary before giving up and
+/// running standalone.
+const FORWARD_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Encode a path losslessly for the wire: UTF-16 code units (little endian)
+/// on Windows, raw bytes elsewhere. A string round-trip would mangle the
+/// unusual but legal names (unpaired surrogates, non-UTF-8 bytes).
+#[cfg(windows)]
+fn encode_path(path: &Path) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+    path.as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect()
+}
+
+#[cfg(windows)]
+fn decode_path(bytes: &[u8]) -> PathBuf {
+    use std::os::windows::ffi::OsStringExt;
+    let wide: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    std::ffi::OsString::from_wide(&wide).into()
+}
+
+#[cfg(unix)]
+fn encode_path(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(unix)]
+fn decode_path(bytes: &[u8]) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::OsStr::from_bytes(bytes).into()
+}
+
 /// What this process should do after coordinating with any running instance.
 pub enum Role {
     /// This is the sole instance: run the app. Forwarded opens arrive via the
@@ -39,6 +82,13 @@ pub enum Role {
 /// On the primary, spawns the accept loop that feeds forwarded paths through.
 pub fn establish(initial_path: Option<&Path>) -> Role {
     let name = socket_name();
+    // Resolve against this launch's working directory before forwarding.
+    // The primary's differs, so a relative path would open the wrong file
+    // there.
+    let payload = initial_path
+        .map(|p| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()))
+        .map(|p| encode_path(&p))
+        .unwrap_or_default();
     let mut attempts = 0;
     loop {
         // Cap the handoff dance so a socket that stays claimed but keeps
@@ -49,17 +99,10 @@ pub fn establish(initial_path: Option<&Path>) -> Role {
             return Role::Primary;
         }
         // A running instance answers the socket: hand it the path and exit.
-        if let Ok(addr) = name.as_str().to_ns_name::<GenericNamespaced>()
-            && let Ok(mut stream) = Stream::connect(addr)
-        {
-            let payload = initial_path
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            if stream.write_all(payload.as_bytes()).is_ok() {
-                return Role::Forwarded;
-            }
-            // The write failed: the listener died between accept and read.
-            // Fall through and claim primary rather than dropping the open.
+        // The write failing (the listener died between accept and read) falls
+        // through to claim primary rather than dropping the open.
+        if try_forward(&name, payload.clone()) {
+            return Role::Forwarded;
         }
 
         // Nobody listening: try to become the primary by binding the socket.
@@ -77,6 +120,27 @@ pub fn establish(initial_path: Option<&Path>) -> Role {
             Err(_) => return Role::Primary,
         }
     }
+}
+
+/// Connect to a running primary and hand it the payload, bounded by
+/// [`FORWARD_TIMEOUT`]. The named-pipe connect waits unboundedly while a
+/// wedged primary holds the socket, which would leave this launch hanging
+/// with no window. Timing out degrades to standalone instead.
+fn try_forward(name: &str, payload: Vec<u8>) -> bool {
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let socket = name.to_owned();
+    std::thread::spawn(move || {
+        let delivered = socket
+            .as_str()
+            .to_ns_name::<GenericNamespaced>()
+            .ok()
+            .and_then(|addr| Stream::connect(addr).ok())
+            .is_some_and(|mut stream| stream.write_all(&payload).is_ok());
+        let _ = done_tx.send(delivered);
+    });
+    done_rx
+        .recv_timeout(FORWARD_TIMEOUT)
+        .is_ok_and(|delivered| delivered)
 }
 
 /// The accept loop's reaction to a run of consecutive `accept()` errors. A
@@ -111,7 +175,10 @@ fn spawn_accept_loop(listener: Listener) {
         // backs off and eventually gives up instead of spinning a full core.
         let mut failures: u32 = 0;
         loop {
-            let mut stream = match listener.accept() {
+            if tx.is_closed() {
+                return; // the app is gone
+            }
+            let stream = match listener.accept() {
                 Ok(stream) => {
                     failures = 0;
                     stream
@@ -127,16 +194,19 @@ fn spawn_accept_loop(listener: Listener) {
                     }
                 }
             };
-            let mut payload = String::new();
-            if stream.read_to_string(&mut payload).is_ok() {
-                let trimmed = payload.trim();
-                // A bare relaunch sends an empty payload. Forward it as None so
-                // the primary still opens an (empty) window.
-                let forwarded = (!trimmed.is_empty()).then(|| PathBuf::from(trimmed));
-                if tx.send(forwarded).is_err() {
-                    return; // the app is gone
+            // Read on a throwaway thread: the read blocks until the client
+            // closes its end, and one stalled client must not wedge the
+            // accept loop (and with it every future forward).
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let mut payload = Vec::new();
+                if stream.take(MAX_PAYLOAD).read_to_end(&mut payload).is_ok() {
+                    // A bare relaunch sends an empty payload. Forward it as
+                    // None so the primary still opens an (empty) window.
+                    let forwarded = (!payload.is_empty()).then(|| decode_path(&payload));
+                    let _ = tx.send(forwarded);
                 }
-            }
+            });
         }
     });
 }
@@ -151,6 +221,15 @@ pub fn take_forwards() -> Option<UnboundedReceiver<Option<PathBuf>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_wire_encoding_round_trips_unusual_names() {
+        // Trailing whitespace and non-ASCII both survive. The old string
+        // round-trip trimmed one and could mangle the other.
+        let path = Path::new("aria/más allá 🦀 .png");
+        assert_eq!(decode_path(&encode_path(path)), path);
+        assert!(encode_path(Path::new("")).is_empty());
+    }
 
     #[test]
     fn accept_backs_off_with_the_streak_then_gives_up() {
