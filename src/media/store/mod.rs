@@ -556,6 +556,14 @@ impl<M: Medium> Store<M> {
         self.reconcile(&lease.key)
     }
 
+    /// Whether the store still has an entry behind this lease. An abandoned
+    /// key (a failed decode, or a still that turned out to be an animation)
+    /// leaves the lease inert: reads stay `None` and retargets reconcile
+    /// nothing, so the holder should drop it and request afresh.
+    pub fn tracks(&self, lease: &Lease<M>) -> bool {
+        self.entries.contains_key(&lease.key)
+    }
+
     /// Retarget through an explicit renewal of interest: a parked entry (its
     /// uploads failed repeatedly) gets the failure count cleared first, the
     /// way a fresh request does, so the reconcile tries again. Each renewal

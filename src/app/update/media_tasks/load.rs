@@ -67,11 +67,18 @@ pub(crate) fn fire_load(
     }
     let lane = lane_for(want);
     if let Some(lease) = viewer.cache.get(&path) {
-        // Keep the higher demand, and reconcile even when it is unchanged:
-        // the touch heals an entry whose completion message was lost, and
-        // renewal unparks one whose uploads kept failing.
-        let outcome = store.renew(lease, want.max(lease.want()));
-        return run_jobs(window, outcome.jobs, pipeline, lane, view);
+        if store.tracks(lease) {
+            // Keep the higher demand, and reconcile even when it is unchanged:
+            // the touch heals an entry whose completion message was lost, and
+            // renewal unparks one whose uploads kept failing.
+            let outcome = store.renew(lease, want.max(lease.want()));
+            return run_jobs(window, outcome.jobs, pipeline, lane, view);
+        }
+        // The store abandoned the entry behind this lease (a failed decode,
+        // or another window discovered an animation), so retargets reconcile
+        // nothing forever. Drop it and fall through to a fresh request,
+        // restoring the documented "a later request re-creates" contract.
+        viewer.cache.remove(&path);
     }
     let key = ImageKey::new(&viewer.source, &path);
     let (lease, outcome) = store.request(key, path.clone(), viewer.source.clone(), want);
@@ -408,6 +415,49 @@ mod tests {
             .cache
             .get(std::path::Path::new("a.png"));
         assert_eq!(lease.unwrap().want(), Tier::Full);
+    }
+
+    #[test]
+    fn fire_load_replaces_a_lease_the_store_abandoned() {
+        use crate::media::store::{ImageKey, Tier};
+
+        // Two windows lease one pending decode; this window's lease goes
+        // inert when the entry is abandoned (the decode failed, or another
+        // window discovered an animation).
+        let mut app = viewing_app(&["a.png"], 0);
+        let key = ImageKey::new(&Source::Fs, std::path::Path::new("a.png"));
+        let (lease, _) =
+            app.shared
+                .store
+                .request(key.clone(), "a.png".into(), Source::Fs, Tier::Full);
+        app.window
+            .viewer_mut()
+            .unwrap()
+            .cache
+            .insert("a.png".into(), lease);
+        app.shared.store.abandon(&key);
+
+        // The next load through the cache hit must re-request instead of
+        // touching the missing entry forever.
+        let window = app.window.id;
+        let pipeline = app.shared.pipeline.clone();
+        let viewer = app.window.viewer_mut().unwrap();
+        let _ = fire_load(
+            window,
+            &mut app.shared.store,
+            &pipeline,
+            viewer,
+            "a.png".into(),
+            Tier::Full,
+            Size::new(800.0, 600.0),
+        );
+        let lease = app
+            .viewer()
+            .unwrap()
+            .cache
+            .get(std::path::Path::new("a.png"))
+            .expect("a fresh lease replaces the inert one");
+        assert!(app.shared.store.tracks(lease));
     }
 
     #[test]
