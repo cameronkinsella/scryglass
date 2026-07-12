@@ -56,20 +56,29 @@ use crate::config::ZoomMode;
 use crate::media::store::ImageKey;
 
 pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) -> Task<AppMessage> {
-    let fingerprint = |win: &Window| win.viewer().map(|v| (v.zoom, v.nav.cursor()));
+    let fingerprint = |win: &Window| {
+        win.viewer()
+            .map(|v| (v.zoom, v.nav.cursor(), v.pan, win.viewport_size))
+    };
     let before = fingerprint(win);
     let task = update_view(win, shared, message);
-    // A pan streams a tiled still's missing tiles immediately. A zoom change
-    // or navigation moves to a placement no frame has stamped yet, so its
-    // demand instead waits for the view to rest, never producing
-    // soon-obsolete tiles.
+    // A pan streams a tiled still's missing tiles immediately. A zoom change,
+    // navigation, or viewport change moves to a placement no frame has
+    // stamped yet, so its demand instead waits for the view to rest, never
+    // producing soon-obsolete tiles. An unchanged view fires nothing: every
+    // bare cursor move arrives here as a DragMove, and a per-move demand
+    // pass over a tiled still is pure lock and hash churn.
     let after = fingerprint(win);
-    let tiles = if after.is_none() {
-        Task::none()
-    } else if before != after {
-        crate::app::update::settle_tiles(win)
-    } else {
-        crate::app::update::fire_tiles(win, shared)
+    let tiles = match (before, after) {
+        (_, None) => Task::none(),
+        (Some(b), Some(a)) if b == a => Task::none(),
+        (Some((zoom, cursor, _, viewport)), Some((z, c, _, vp)))
+            if zoom == z && cursor == c && viewport == vp =>
+        {
+            // Only the pan moved.
+            crate::app::update::fire_tiles(win, shared)
+        }
+        _ => crate::app::update::settle_tiles(win),
     };
     Task::batch([task, tiles])
 }

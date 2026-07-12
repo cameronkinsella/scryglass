@@ -202,7 +202,18 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                     TileOutcome::Canceled if tiles.wanted_lod() == tile.lod => {
                         return super::media_tasks::fire_tiles(win, shared);
                     }
-                    TileOutcome::Canceled | TileOutcome::Failed => {}
+                    TileOutcome::Canceled => {}
+                    // A failed production schedules its own paced retry: an
+                    // unchanged view runs no ambient demand passes, so
+                    // nothing else would re-request the tile on a resting
+                    // view. The epoch guard drops it if the view moves on.
+                    TileOutcome::Failed => {
+                        let epoch = win.tile_epoch;
+                        return Task::future(async move {
+                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                            AppMessage::Media(Message::TilesSettled { epoch })
+                        });
+                    }
                 }
             }
             Task::none()
