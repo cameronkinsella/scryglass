@@ -221,6 +221,11 @@ pub fn upload_ready() -> bool {
     UPLOAD_CONTEXT.get().is_some()
 }
 
+/// The device's texture size limit, once the upload thread exists.
+pub fn max_texture_dim() -> Option<u32> {
+    UPLOAD_CONTEXT.get().map(|ctx| ctx.max_dim)
+}
+
 /// Queue an image for the upload thread. Returns false when the pipeline is not
 /// built yet (the first image) or the image is oversize for the device, in which
 /// case `ready` is dropped and the display falls back to its thumbnail.

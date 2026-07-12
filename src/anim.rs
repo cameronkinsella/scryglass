@@ -38,6 +38,9 @@ struct ActiveAnim {
     /// via `current_texture`, like a still reads its store cell). `None` until the
     /// first frame uploads.
     frame_texture: Option<crate::ui::image_surface::Keepalive>,
+    /// Whether the one first-frame upload retry has been used, so a
+    /// persistent failure cannot loop.
+    upload_retry_spent: bool,
 }
 
 /// Manages decoded-animation leases and playback.
@@ -89,10 +92,30 @@ impl AnimPlayer {
                 // the caller switches the display to this animation on the first
                 // frame and re-renders on each subsequent one.
                 active.frame_texture = Some(keepalive);
+                active.upload_retry_spent = false;
                 (Task::none(), Some((frames.width, frames.height)))
             }
 
-            AnimMessage::FrameAllocated(_path, None) => (Task::none(), None),
+            AnimMessage::FrameAllocated(path, None) => {
+                if current_path != path || self.active_frames().is_none() {
+                    return (Task::none(), None);
+                }
+                let Some(active) = self.active.as_mut() else {
+                    return (Task::none(), None);
+                };
+                // A failed FIRST frame has no tick to try again (the tick
+                // subscription needs the very texture that failed), unlike a
+                // mid-playback frame, which the next tick re-sends. Retry it
+                // once. Stills recover through the store's mint machinery,
+                // which animation frames bypass.
+                if active.frame_texture.is_some() || active.upload_retry_spent {
+                    return (Task::none(), None);
+                }
+                active.upload_retry_spent = true;
+                let (w, h) = active.canvas.size();
+                let handle = Handle::from_rgba(w, h, active.canvas.pixels().to_vec());
+                (upload_frame(handle, path), None)
+            }
 
             AnimMessage::Tick => {
                 // Read the shared frames through this window's lease. If they were
@@ -199,6 +222,7 @@ impl AnimPlayer {
             canvas,
             frame_index: 0,
             frame_texture: None,
+            upload_retry_spent: false,
         }));
 
         upload_frame(handle, path.to_path_buf())
@@ -283,10 +307,17 @@ fn should_reuse(existing_size: Option<(u32, u32)>, dims: (u32, u32)) -> bool {
 }
 
 /// Upload a composited frame through the still-image worker (off the render
-/// thread) and report its keepalive token. Retries briefly so a frame composited
-/// before the first render still finds the upload worker.
+/// thread) and report its keepalive token. Waits for the worker first: a
+/// window revealed late (a maximized relaunch) builds it well past any fixed
+/// retry count, the same wait the still path does.
 fn upload_frame(handle: Handle, path: PathBuf) -> Task<AnimMessage> {
     Task::future(async move {
+        for _ in 0..3750 {
+            if crate::ui::image_surface::upload_ready() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+        }
         for _ in 0..50 {
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
             if crate::ui::image_surface::submit_upload(handle.clone(), ready_tx) {
@@ -300,14 +331,20 @@ fn upload_frame(handle: Handle, path: PathBuf) -> Task<AnimMessage> {
 
 /// Write a composited frame into the animation's existing texture in place (no
 /// allocation) and report the same keepalive back. Modeled on `upload_frame`,
-/// retrying briefly for the same reason. `FrameAllocated` then re-stores the
-/// returned keepalive and drives the redraw exactly as a fresh upload does.
+/// waiting and retrying for the same reasons. `FrameAllocated` then re-stores
+/// the returned keepalive and drives the redraw exactly as a fresh upload does.
 fn write_frame(
     handle: Handle,
     into: crate::ui::image_surface::Keepalive,
     path: PathBuf,
 ) -> Task<AnimMessage> {
     Task::future(async move {
+        for _ in 0..3750 {
+            if crate::ui::image_surface::upload_ready() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+        }
         for _ in 0..50 {
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
             if crate::ui::image_surface::submit_write_frame(handle.clone(), into.clone(), ready_tx)

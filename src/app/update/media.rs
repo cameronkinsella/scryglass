@@ -277,6 +277,7 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             // request's decode job is dropped: `on_decoded` resolves the demand
             // from the frames already in hand. If another window decoded it first,
             // `on_decoded` is a no-op and the lease shares those frames.
+            let dims = (anim.width, anim.height);
             let (lease, _) = shared.anim_store.request(
                 key.clone(),
                 path.clone(),
@@ -304,7 +305,22 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
             } else {
                 Task::none()
             };
-            Task::batch([play, resolve_pending_nav(win, shared)])
+            // A canvas past the device texture limit decodes fine but no
+            // frame can ever upload. Say so instead of leaving the thumbnail
+            // with no explanation.
+            let too_large = crate::ui::image_surface::max_texture_dim()
+                .is_some_and(|max| dims.0 > max || dims.1 > max);
+            let toast = if too_large {
+                crate::app::update::push_toast(
+                    win,
+                    shared,
+                    crate::components::toasts::ToastKind::Error,
+                    format!("Animation is too large to display ({}x{})", dims.0, dims.1),
+                )
+            } else {
+                Task::none()
+            };
+            Task::batch([play, toast, resolve_pending_nav(win, shared)])
         }
 
         Message::DecodeFailed { key, path, err } => {
