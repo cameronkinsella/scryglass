@@ -178,6 +178,15 @@ impl Pipeline {
         self.scope(window).fetch_add(1, Ordering::SeqCst) + 1
     }
 
+    /// Forget a closed window's generation cell. The map otherwise grows by
+    /// one entry per window for the life of the process. In-flight loads
+    /// cloned the cell, so their staleness checks are unaffected.
+    pub fn drop_scope(&self, window: window::Id) {
+        if let Ok(mut scopes) = self.generations.lock() {
+            scopes.remove(&window);
+        }
+    }
+
     /// The generation scope for jobs that belong to no window: store re-mints
     /// off the shared pump, and decodes that surface after their window closed.
     /// No window's bump touches it, so a window-less job is never cancelled by

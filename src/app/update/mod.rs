@@ -101,6 +101,7 @@ fn route(app: &mut App, envelope: Envelope) -> Task<Envelope> {
         ),
         Envelope::Closed(id) => {
             app.windows.remove(&id);
+            app.shared.pipeline.drop_scope(id);
             // A daemon keeps running with no windows, so exit once the last one
             // is gone. iced::exit() does not terminate when the last window
             // closed while minimized (the idle winit loop never processes it),
