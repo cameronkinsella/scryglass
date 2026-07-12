@@ -37,8 +37,9 @@ pub fn subscription(app: &App) -> Subscription<Envelope> {
         config_watch(),
     ];
 
+    let minimized_video_pause = app.shared.config.advanced.resource.minimized.video.pause;
     for (&id, win) in &app.windows {
-        for sub in window_subscriptions(id, win) {
+        for sub in window_subscriptions(id, win, minimized_video_pause) {
             // Subscription::map requires a non-capturing closure, so carry the
             // window id through `with` instead of capturing it.
             subs.push(sub.with(id).map(|(id, message)| Envelope::Win(id, message)));
@@ -72,8 +73,13 @@ fn forward_stream() -> impl Stream<Item = Envelope> {
 }
 
 /// The timer and watch subscriptions for one window. Untagged. The caller
-/// wraps each with the window's id.
-fn window_subscriptions(id: window::Id, win: &Window) -> Vec<Subscription<Message>> {
+/// wraps each with the window's id. `minimized_video_pause` is the configured
+/// pause-on-minimize policy: opting out keeps a minimized video ticking.
+fn window_subscriptions(
+    id: window::Id,
+    win: &Window,
+    minimized_video_pause: bool,
+) -> Vec<Subscription<Message>> {
     let mut subs = Vec::new();
 
     // iced has no minimize event, so focus changes drive minimize/restore
@@ -120,10 +126,20 @@ fn window_subscriptions(id: window::Id, win: &Window) -> Vec<Subscription<Messag
         // A paused session drives no redraws, so a slow timer keeps the control fade
         // moving and drains any late frame, but only while such work remains, so a
         // paused background window does not redraw at 30Hz forever.
-        if !win.minimized
-            && let Some(session) = viewer.video.session.as_ref()
-        {
-            if session.playing {
+        if let Some(session) = viewer.video.session.as_ref() {
+            if win.minimized {
+                // With pause = false the session keeps playing while
+                // minimized, but the compositor delivers no redraws to an
+                // iconified window, so the vsync source would starve. The
+                // slow timer keeps poll() alive (feeding the audio watchdog)
+                // and drains frames instead.
+                if session.playing && !minimized_video_pause {
+                    subs.push(
+                        iced::time::every(Duration::from_millis(33))
+                            .map(|_| Message::VideoControls(VideoMessage::Tick)),
+                    );
+                }
+            } else if session.playing {
                 subs.push(window::frames().map(|_| Message::VideoControls(VideoMessage::Tick)));
             } else if paused_video_needs_tick(
                 viewer.video.controls_opacity,
