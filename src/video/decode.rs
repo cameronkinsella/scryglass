@@ -133,6 +133,9 @@ fn run_pipeline(
     let video_stop = stop.clone();
     let video_finished = video_done.clone();
     std::thread::spawn(move || {
+        // A decoder panic must read as end of stream, or the player waits
+        // for frames forever.
+        let _finish_on_panic = FinishOnPanic(video_finished.clone());
         let mut scaler: Option<ffmpeg::software::scaling::Context> = None;
         let mut frame = ffmpeg::frame::Video::empty();
         let mut sw_frame = ffmpeg::frame::Video::empty();
@@ -358,6 +361,18 @@ fn loop_offset(period_secs: f64, iteration: u64, base_secs: f64) -> Duration {
     Duration::from_secs_f64((period_secs * iteration as f64 - base_secs).max(0.0))
 }
 
+/// Sets the finished flag if the owning thread unwinds. Deliberate exits
+/// (session stop, receiver gone) drop it without effect.
+struct FinishOnPanic(Arc<AtomicBool>);
+
+impl Drop for FinishOnPanic {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 /// Drain every video frame the decoder has ready to the session, shifting each
 /// timestamp by `offset` so looped passes keep climbing with the clock. `Err`
 /// means the session is stopping, so the thread should exit.
@@ -396,7 +411,12 @@ fn drain_video(
         } else {
             &*frame
         };
-        send_video_frame(scaler, source, relative + offset, tx)?;
+        // Duration::from_secs_f64 panics on negative or non-finite input.
+        let shifted = relative + offset;
+        if !shifted.is_finite() || shifted < 0.0 {
+            continue;
+        }
+        send_video_frame(scaler, source, shifted, tx)?;
     }
     Ok(())
 }
@@ -543,12 +563,15 @@ fn send_video_frame(
 
 /// Map a frame PTS onto the session timeline, or None to drop it. Frames
 /// before the seek target drop. The first kept frame rebases to zero so
-/// it shows at once.
+/// it shows at once. Frames landing before that anchor (a missing or
+/// backwards PTS) drop too: a negative time would panic the Duration
+/// conversion downstream.
 fn rebase_pts(pts: f64, base: f64, origin: &mut Option<f64>) -> Option<f64> {
     if pts < base {
         return None;
     }
-    Some(pts - *origin.get_or_insert(pts))
+    let relative = pts - *origin.get_or_insert(pts);
+    (relative >= 0.0).then_some(relative)
 }
 
 /// True once audio `pts` reaches the seek target `base`. Earlier audio is
@@ -583,6 +606,17 @@ mod tests {
         rebase_pts(2.5, 2.0, &mut origin);
         assert_eq!(rebase_pts(3.0, 2.0, &mut origin), Some(0.5));
         assert_eq!(rebase_pts(4.0, 2.0, &mut origin), Some(1.5));
+    }
+
+    #[test]
+    fn a_frame_before_the_anchor_drops() {
+        // A transport stream can anchor at a nonzero PTS and then deliver
+        // a frame with no PTS, which decodes as zero. Passing the negative
+        // result on would panic the Duration conversion.
+        let mut origin = None;
+        assert_eq!(rebase_pts(5.0, 0.0, &mut origin), Some(0.0));
+        assert_eq!(rebase_pts(0.0, 0.0, &mut origin), None);
+        assert_eq!(rebase_pts(6.0, 0.0, &mut origin), Some(1.0));
     }
 
     #[test]
