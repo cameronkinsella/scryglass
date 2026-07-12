@@ -558,11 +558,12 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 return Task::none();
             }
             // Raise the on-screen image's lease to a full-res texture for crisp
-            // zoom. The store re-uploads from the RAM it already holds.
+            // zoom. The store re-uploads from the RAM it already holds, and the
+            // renewal unparks an entry whose uploads kept failing.
             let Some(lease) = viewer.cache.get(&path) else {
                 return Task::none();
             };
-            let outcome = shared.store.retarget(lease, Tier::Full);
+            let outcome = shared.store.renew(lease, Tier::Full);
             run_jobs(window, outcome.jobs, &pipeline, Lane::Current, viewport)
         }
 

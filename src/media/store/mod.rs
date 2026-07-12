@@ -556,6 +556,18 @@ impl<M: Medium> Store<M> {
         self.reconcile(&lease.key)
     }
 
+    /// Retarget through an explicit renewal of interest: a parked entry (its
+    /// uploads failed repeatedly) gets the failure count cleared first, the
+    /// way a fresh request does, so the reconcile tries again. Each renewal
+    /// allows one bounded round of attempts, so an image that can never mint
+    /// still cannot loop.
+    pub fn renew(&mut self, lease: &Lease<M>, to: Tier) -> StoreOutcome<M> {
+        if let Some(entry) = self.entries.get_mut(&lease.key) {
+            entry.mint_failures = 0;
+        }
+        self.retarget(lease, to)
+    }
+
     /// Move an entry to a new key after its file was renamed, updating the
     /// re-decode path with it. The counters and shared cell ride along, so
     /// residency and the on-screen texture never move. Without this, a later
@@ -949,6 +961,23 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn renewed_interest_unparks_a_mint_failed_entry() {
+        let mut store: Store = Store::default();
+        let (lease, _) = store.request(key(), "a.png".into(), Source::Fs, Tier::Full);
+        store.on_decoded(key(), ram());
+        for _ in 0..3 {
+            let _ = store.on_mint_failed(&key());
+        }
+        // Parked: a plain retarget re-emits nothing, by design.
+        let out = store.retarget(&lease, Tier::Full);
+        assert!(out.jobs.is_empty());
+        // Renewal through the held lease clears the park, the path every
+        // restore and promote takes, so the upload gets another round.
+        let out = store.renew(&lease, Tier::Full);
+        assert!(matches!(out.jobs.as_slice(), [Job::Upload { .. }]));
     }
 
     #[test]

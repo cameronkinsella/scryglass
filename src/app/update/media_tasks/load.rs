@@ -68,8 +68,9 @@ pub(crate) fn fire_load(
     let lane = lane_for(want);
     if let Some(lease) = viewer.cache.get(&path) {
         // Keep the higher demand, and reconcile even when it is unchanged:
-        // the touch heals an entry whose completion message was lost.
-        let outcome = store.retarget(lease, want.max(lease.want()));
+        // the touch heals an entry whose completion message was lost, and
+        // renewal unparks one whose uploads kept failing.
+        let outcome = store.renew(lease, want.max(lease.want()));
         return run_jobs(window, outcome.jobs, pipeline, lane, view);
     }
     let key = ImageKey::new(&viewer.source, &path);
