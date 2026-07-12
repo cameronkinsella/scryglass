@@ -386,7 +386,14 @@ pub(crate) fn set_volume(win: &mut Window, shared: &mut Shared, volume: f32) -> 
         session.set_volume(volume);
     }
     arm_volume_save();
-    Task::none()
+    // A paused video's ticks stop once its controls settle, so the deadline
+    // needs one wakeup of its own or the save waits for the next playback.
+    // Early wakeups from a burst see a pushed-forward deadline and no-op,
+    // keeping one write per burst.
+    Task::future(async {
+        tokio::time::sleep(VOLUME_SAVE_SETTLE + std::time::Duration::from_millis(50)).await;
+        Message::VideoControls(VideoMessage::Tick)
+    })
 }
 
 pub(crate) fn nudge_volume(win: &mut Window, shared: &mut Shared, delta: f32) -> Task<Message> {
