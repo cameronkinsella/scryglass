@@ -115,6 +115,10 @@ pub struct VideoSession {
     /// Keeps an extracted archive entry's temp file alive across
     /// seek/loop respawns, deleted when the last holder drops.
     pub temp: Option<std::sync::Arc<TempFileGuard>>,
+    /// Identity for the renderer's per-session plane textures. Unique across
+    /// sessions alive at once (two windows playing at the same time), and
+    /// carried across seek and suspend respawns so those reuse the textures.
+    id: u64,
 }
 
 /// A backgrounded video's released decode session: the state needed to re-open it
@@ -133,6 +137,7 @@ pub struct SuspendedVideo {
     hardware: bool,
     duration_us: u64,
     temp: Option<Arc<TempFileGuard>>,
+    id: u64,
 }
 
 impl VideoSession {
@@ -214,7 +219,16 @@ impl VideoSession {
             hardware,
             path,
             temp: None,
+            id: {
+                static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(0);
+                NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
+            },
         }
+    }
+
+    /// The identity the renderer keys this session's plane textures by.
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// A fresh session on the same file at `start`. Used for seeks and
@@ -234,6 +248,7 @@ impl VideoSession {
             .duration_us
             .store(self.duration_us.load(Ordering::Relaxed), Ordering::Relaxed);
         session.temp = self.temp.clone();
+        session.id = self.id;
         // A seek from a paused video stays paused, showing the new frame.
         if !self.playing {
             session.pause();
@@ -256,6 +271,7 @@ impl VideoSession {
             hardware: self.hardware,
             duration_us: self.duration_us.load(Ordering::Relaxed),
             temp: self.temp.clone(),
+            id: self.id,
         }
     }
 
@@ -274,6 +290,7 @@ impl VideoSession {
             .duration_us
             .store(saved.duration_us, Ordering::Relaxed);
         session.temp = saved.temp.clone();
+        session.id = saved.id;
         if !saved.playing {
             session.pause();
         }
@@ -298,6 +315,7 @@ impl VideoSession {
             .duration_us
             .store(saved.duration_us, Ordering::Relaxed);
         session.temp = saved.temp.clone();
+        session.id = saved.id;
         if !saved.playing {
             session.pause();
         }

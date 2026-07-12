@@ -22,6 +22,7 @@ use crate::video::VideoFrame;
 #[allow(clippy::too_many_arguments)]
 pub fn view(
     frame: Arc<VideoFrame>,
+    session: u64,
     zoom: f32,
     pan: (f32, f32),
     pixelated: bool,
@@ -32,6 +33,7 @@ pub fn view(
 ) -> Element<'static, Message> {
     shader::Shader::new(VideoSurface {
         frame,
+        session,
         zoom,
         pan,
         pixelated,
@@ -51,6 +53,9 @@ pub fn view(
 /// a frame-stale geometry.
 struct VideoSurface {
     frame: Arc<VideoFrame>,
+    /// The session the frame belongs to, keying its plane textures so two
+    /// windows playing at once never fight over one texture slot.
+    session: u64,
     zoom: f32,
     pan: (f32, f32),
     pixelated: bool,
@@ -87,6 +92,7 @@ impl<T> shader::Program<T> for VideoSurface {
     ) -> VideoPrimitive {
         VideoPrimitive {
             frame: self.frame.clone(),
+            session: self.session,
             zoom: self.zoom,
             pan: self.pan,
             zoom_mode: self.zoom_mode,
@@ -100,6 +106,7 @@ impl<T> shader::Program<T> for VideoSurface {
 /// A single frame's worth of work handed to the renderer.
 pub struct VideoPrimitive {
     frame: Arc<VideoFrame>,
+    session: u64,
     zoom: f32,
     pan: (f32, f32),
     zoom_mode: ZoomMode,
@@ -175,6 +182,7 @@ impl shader::Primitive for VideoPrimitive {
             pipeline.prepare(
                 device,
                 queue,
+                self.session,
                 &self.frame,
                 placement.dst,
                 placement.src,
@@ -186,7 +194,7 @@ impl shader::Primitive for VideoPrimitive {
 
     fn draw(&self, pipeline: &VideoPipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
         if self.frame.width > 0 && self.frame.height > 0 && self.zoom > 0.0 {
-            pipeline.draw(render_pass, self.high_quality);
+            pipeline.draw(render_pass, self.session, self.high_quality);
         }
         true
     }

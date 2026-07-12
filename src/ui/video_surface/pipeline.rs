@@ -3,6 +3,8 @@
 //! samplers, and the per-frame uniform buffer. The YUV-to-RGB conversion
 //! runs in the shader, so playback never pays for a CPU color conversion.
 
+use std::collections::HashMap;
+
 use iced::wgpu;
 use iced::widget::shader;
 
@@ -26,14 +28,22 @@ pub struct VideoPipeline {
     /// per prepare() from the placement zoom (like the uniforms), since the
     /// primitive cannot carry prepare-time results into draw.
     nearest: bool,
-    textures: Option<YuvTextures>,
-    last_id: Option<u64>,
+    /// Plane textures keyed by session, so two windows playing at once each
+    /// keep their own planes instead of thrashing one slot every frame. One
+    /// pipeline serves the whole app (the runtime stores it per primitive
+    /// type, not per window).
+    textures: HashMap<u64, YuvTextures>,
     /// Scratch buffers for the keep-alive, allocated on first use.
     keepalive: Option<(wgpu::Buffer, wgpu::Buffer)>,
 }
 
 /// Per-frame copy size, enough to hold the memory clock off its floor.
 const KEEP_ALIVE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Shared-trim generations a session's planes survive without a prepare.
+/// trim() runs once per window frame, so the allowance has to outlast a
+/// paused session's redraw gaps under another window's vsync cadence.
+const MAX_IDLE_TRIMS: u32 = 600;
 
 struct YuvTextures {
     width: u32,
@@ -46,6 +56,10 @@ struct YuvTextures {
     v: wgpu::Texture,
     bind_linear: wgpu::BindGroup,
     bind_nearest: wgpu::BindGroup,
+    /// The frame currently uploaded into the planes.
+    last_id: Option<u64>,
+    /// Trims since this session last prepared, for the age-out.
+    idle_trims: u32,
 }
 
 const UNIFORM_SIZE: u64 = 64;
@@ -151,10 +165,20 @@ impl shader::Pipeline for VideoPipeline {
             sampler_nearest: device.create_sampler(&sampler_desc(wgpu::FilterMode::Nearest)),
             is_srgb: format.is_srgb(),
             nearest: false,
-            textures: None,
-            last_id: None,
+            textures: HashMap::new(),
             keepalive: None,
         }
+    }
+
+    /// Runs once per window frame on the app-wide pipeline. Ages out the
+    /// plane textures of sessions that stopped preparing (closed windows,
+    /// replaced videos) without evicting a paused session between its
+    /// sparse redraws.
+    fn trim(&mut self) {
+        self.textures.retain(|_, t| {
+            t.idle_trims = t.idle_trims.saturating_add(1);
+            t.idle_trims <= MAX_IDLE_TRIMS
+        });
     }
 }
 
@@ -164,6 +188,7 @@ impl VideoPipeline {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        session: u64,
         frame: &VideoFrame,
         dst: [f32; 4],
         src: [f32; 4],
@@ -177,7 +202,7 @@ impl VideoPipeline {
             self.keep_gpu_awake(device, queue);
         }
 
-        let stale = match &self.textures {
+        let stale = match self.textures.get(&session) {
             Some(t) => {
                 t.width != frame.width
                     || t.height != frame.height
@@ -189,12 +214,15 @@ impl VideoPipeline {
         };
         if stale {
             let textures = self.create_textures(device, frame);
-            self.textures = Some(textures);
-            self.last_id = None;
+            self.textures.insert(session, textures);
         }
 
-        let textures = self.textures.as_ref().expect("textures just created");
-        if self.last_id != Some(frame.id) {
+        let textures = self
+            .textures
+            .get_mut(&session)
+            .expect("textures just created");
+        textures.idle_trims = 0;
+        if textures.last_id != Some(frame.id) {
             write_plane(
                 queue,
                 &textures.y,
@@ -234,7 +262,7 @@ impl VideoPipeline {
                     );
                 }
             }
-            self.last_id = Some(frame.id);
+            textures.last_id = Some(frame.id);
         }
 
         queue.write_buffer(
@@ -344,11 +372,18 @@ impl VideoPipeline {
             y,
             u,
             v,
+            last_id: None,
+            idle_trims: 0,
         }
     }
 
-    pub(super) fn draw(&self, render_pass: &mut wgpu::RenderPass<'_>, high_quality: bool) {
-        let Some(textures) = &self.textures else {
+    pub(super) fn draw(
+        &self,
+        render_pass: &mut wgpu::RenderPass<'_>,
+        session: u64,
+        high_quality: bool,
+    ) {
+        let Some(textures) = self.textures.get(&session) else {
             return;
         };
         let bind = if self.nearest {

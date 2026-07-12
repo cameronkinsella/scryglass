@@ -233,6 +233,7 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
             #[cfg(feature = "video")]
             Some(frame) => ui::video_surface::view(
                 frame,
+                viewer.video.session.as_ref().map_or(0, |s| s.id()),
                 viewer.zoom,
                 viewer.pan,
                 shared.config.standard.display.nearest_neighbor_zoom,
