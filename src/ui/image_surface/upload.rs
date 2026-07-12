@@ -300,6 +300,37 @@ pub fn current_scale_factor() -> f32 {
     })
 }
 
+/// Display scale per window, stamped by each window's draw. On mixed-DPI
+/// monitors the latest-draw global above is the wrong monitor's as often as
+/// not (the focused window draws last while a background window decays), so
+/// per-window decisions read their own stamp.
+static WINDOW_SCALES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<iced::window::Id, f32>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+pub(super) fn record_window_scale(window: iced::window::Id, scale: f32) {
+    if let Ok(mut scales) = WINDOW_SCALES.lock() {
+        scales.insert(window, scale);
+    }
+}
+
+/// The display scale of `window`'s own monitor, falling back to the latest
+/// draw anywhere before this window's first.
+pub fn scale_factor_for(window: iced::window::Id) -> f32 {
+    WINDOW_SCALES
+        .lock()
+        .ok()
+        .and_then(|scales| scales.get(&window).copied())
+        .unwrap_or_else(current_scale_factor)
+}
+
+/// Forget a closed window's scale stamp.
+pub fn forget_window_scale(window: iced::window::Id) {
+    if let Ok(mut scales) = WINDOW_SCALES.lock() {
+        scales.remove(&window);
+    }
+}
+
 /// The downscale kernel the most recent draw used, so a CPU-built view-res copy
 /// (a fresh prefetch) is filtered with the very kernel the on-screen full-res is,
 /// exactly like the GPU render path a demote takes.

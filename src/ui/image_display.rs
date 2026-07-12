@@ -23,6 +23,7 @@ use crate::ui::geometry::display_geometry;
 /// * `pan`: pan offset in logical pixels `(dx, dy)`.
 /// * `viewport`: size of the display area in logical pixels `(w, h)`.
 /// * `origin`: the display area's top-left in the window, logical pixels.
+/// * `scale_factor`: the window's own display scale, for the physical grid.
 /// * `pixelated`: nearest sampling when zoomed past 100% (crisp pixel art).
 #[allow(clippy::too_many_arguments)]
 pub fn image_display(
@@ -33,6 +34,7 @@ pub fn image_display(
     pan: (f32, f32),
     viewport: (f32, f32),
     origin: (f32, f32),
+    scale_factor: f32,
     pixelated: bool,
 ) -> Element<'_, Message> {
     let (vp_w, vp_h) = viewport;
@@ -60,7 +62,7 @@ pub fn image_display(
     // floors the offset itself, drifting the blur up and left by a pixel.
     // Positioning it explicitly at the rounded offset leaves iced no fractional
     // value to floor.
-    let scale = crate::ui::image_surface::current_scale_factor().max(1.0);
+    let scale = scale_factor.max(1.0);
     let axis = |d0: f32, d1: f32, vp: f32, org: f32| {
         let phys = vp * scale;
         let origin = org * scale;
@@ -158,6 +160,7 @@ mod tests {
             (0.0, 0.0),
             VP,
             (0.0, 30.5),
+            1.25,
             false,
         );
         let _ = image_display(
@@ -168,6 +171,7 @@ mod tests {
             (0.0, 0.0),
             VP,
             (0.0, 0.0),
+            1.0,
             true,
         );
         let _ = image_display(
@@ -178,6 +182,7 @@ mod tests {
             (0.0, 0.0),
             VP,
             (0.0, 0.0),
+            1.0,
             false,
         );
     }

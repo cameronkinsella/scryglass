@@ -237,9 +237,11 @@ impl ImagePipeline {
         );
     }
 
-    /// Record the display scale factor a draw reported, so an off-thread view-res
-    /// render sizes its copy to the physical display.
-    pub(super) fn record_scale_factor(&self, scale_factor: f32) {
+    /// Record the display scale factor a draw reported, per window and as the
+    /// latest-anywhere fallback, so an off-thread view-res render sizes its
+    /// copy to the drawing window's own physical display.
+    pub(super) fn record_scale_factor(&self, window: iced::window::Id, scale_factor: f32) {
+        super::upload::record_window_scale(window, scale_factor);
         if let Some(ctx) = UPLOAD_CONTEXT.get() {
             ctx.scale_factor
                 .store(scale_factor.to_bits(), Ordering::Relaxed);

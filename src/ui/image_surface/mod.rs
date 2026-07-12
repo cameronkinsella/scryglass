@@ -16,6 +16,6 @@ pub use resident::test_keepalive;
 pub use resident::{Keepalive, ResidentImage};
 pub use tiles::{DrawWant, MAX_TILE_DRAWS, TileSet};
 pub use upload::{
-    current_kernel, current_scale_factor, max_texture_dim, submit_render_downscale, submit_upload,
-    submit_write_frame, upload_ready,
+    current_kernel, forget_window_scale, max_texture_dim, scale_factor_for,
+    submit_render_downscale, submit_upload, submit_write_frame, upload_ready,
 };

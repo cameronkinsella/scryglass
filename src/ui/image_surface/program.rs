@@ -220,7 +220,7 @@ impl shader::Primitive for ImagePrimitive {
         bounds: &Rectangle,
         viewport: &shader::Viewport,
     ) {
-        pipeline.record_scale_factor(viewport.scale_factor());
+        pipeline.record_scale_factor(self.window, viewport.scale_factor());
         // Resolve the placement against iced's real widget size now, so the geometry
         // matches the size actually being drawn into rather than the app's viewport
         // estimate, which lags a frame behind during a resize.

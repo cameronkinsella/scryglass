@@ -70,7 +70,7 @@ pub(crate) fn fire_tiles(win: &Window, shared: &Shared) -> Task<Message> {
     let stamp = set.draw_stamp_for(win.id);
     let scale = stamp
         .map(|stamp| stamp.scale)
-        .unwrap_or_else(crate::ui::image_surface::current_scale_factor)
+        .unwrap_or_else(|| crate::ui::image_surface::scale_factor_for(win.id))
         .max(1.0);
     // A resting view that fits one texture is served by the base alone, at
     // EXACTLY the displayed size: the same one-pass copy the View tier

@@ -228,31 +228,51 @@ fn run_job(
             tier,
             ram,
             source,
-        } => Task::future(async move {
-            // The upload thread exists once any window draws a frame, which a
-            // window revealed late (a maximized relaunch) delays well past any
-            // fixed retry count. Wait for it, bounded only as a backstop.
-            for _ in 0..3750 {
-                if crate::ui::image_surface::upload_ready() {
-                    break;
+        } => {
+            // Resolved now, synchronously, for the window whose job this is:
+            // by the time the future runs, another window's draw may have
+            // restamped the latest-anywhere fallback.
+            let scale_factor = crate::ui::image_surface::scale_factor_for(window);
+            Task::future(async move {
+                // The upload thread exists once any window draws a frame, which a
+                // window revealed late (a maximized relaunch) delays well past any
+                // fixed retry count. Wait for it, bounded only as a backstop.
+                for _ in 0..3750 {
+                    if crate::ui::image_surface::upload_ready() {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(16)).await;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(16)).await;
-            }
-            // Retry briefly past readiness for the transient failure modes.
-            for _ in 0..30 {
-                let zoom = zoom_override.unwrap_or_else(|| fit_zoom(ram.original_size, view));
-                let texture = if tier >= Tier::Full {
-                    full_texture(&ram.handle, ram.original_size, source.clone(), zoom).await
-                } else {
-                    view_res_texture(source.clone(), &ram.handle, ram.original_size, zoom).await
-                };
-                if let Some(texture) = texture {
-                    return Message::Media(MediaMessage::TextureReady { key, tier, texture });
+                // Retry briefly past readiness for the transient failure modes.
+                for _ in 0..30 {
+                    let zoom = zoom_override.unwrap_or_else(|| fit_zoom(ram.original_size, view));
+                    let texture = if tier >= Tier::Full {
+                        full_texture(
+                            &ram.handle,
+                            ram.original_size,
+                            source.clone(),
+                            zoom,
+                            scale_factor,
+                        )
+                        .await
+                    } else {
+                        view_res_texture(
+                            source.clone(),
+                            &ram.handle,
+                            ram.original_size,
+                            zoom,
+                            scale_factor,
+                        )
+                        .await
+                    };
+                    if let Some(texture) = texture {
+                        return Message::Media(MediaMessage::TextureReady { key, tier, texture });
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(16)).await;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(16)).await;
-            }
-            Message::Media(MediaMessage::MintFailed { key })
-        }),
+                Message::Media(MediaMessage::MintFailed { key })
+            })
+        }
     }
 }
 
@@ -266,6 +286,7 @@ async fn full_texture(
     original_size: (u32, u32),
     source: Option<crate::ui::image_surface::Keepalive>,
     zoom: f32,
+    scale_factor: f32,
 ) -> Option<crate::ui::image_surface::Keepalive> {
     if let Handle::Rgba { width, height, .. } = handle
         && width.max(height) > &crate::media::registry::MAX_TEXTURE_DIM
@@ -275,14 +296,14 @@ async fn full_texture(
         // without its never-blank layer.
         let base = match source {
             Some(view) => view,
-            None => upload_at_res(handle, original_size, zoom, false).await?,
+            None => upload_at_res(handle, original_size, zoom, scale_factor, false).await?,
         };
         return Some(crate::ui::image_surface::ResidentImage::tiled(
             (*width, *height),
             base,
         ));
     }
-    upload_at_res(handle, original_size, 1.0, true).await
+    upload_at_res(handle, original_size, 1.0, scale_factor, true).await
 }
 
 /// Produce the view-resolution texture for `zoom`. When a full-res texture is still
@@ -295,20 +316,17 @@ async fn view_res_texture(
     handle: &Handle,
     original_size: (u32, u32),
     zoom: f32,
+    scale_factor: f32,
 ) -> Option<crate::ui::image_surface::Keepalive> {
     if let Some(src) = source {
-        let target = view_target(
-            original_size,
-            zoom,
-            crate::ui::image_surface::current_scale_factor(),
-        );
+        let target = view_target(original_size, zoom, scale_factor);
         if let Some(rx) = crate::ui::image_surface::submit_render_downscale(src, target)
             && let Ok(texture) = rx.await
         {
             return Some(texture);
         }
     }
-    upload_at_res(handle, original_size, zoom, false).await
+    upload_at_res(handle, original_size, zoom, scale_factor, false).await
 }
 
 /// Upload `handle` at full resolution (`full`) or downscaled to the view
@@ -318,6 +336,7 @@ async fn upload_at_res(
     handle: &Handle,
     original_size: (u32, u32),
     zoom: f32,
+    scale_factor: f32,
     full: bool,
 ) -> Option<crate::ui::image_surface::Keepalive> {
     if full {
@@ -326,7 +345,6 @@ async fn upload_at_res(
     // Bound concurrent derives so spamming through new neighbors never
     // saturates the CPU, the upload thread, or transient VRAM.
     let _permit = RESIZE_GATE.acquire().await.ok();
-    let scale_factor = crate::ui::image_surface::current_scale_factor();
     let target = view_target(original_size, zoom, scale_factor);
     let covers = target.0 >= original_size.0 && target.1 >= original_size.1;
     // The GPU bake renders the copy through the display shader, trading a
