@@ -163,6 +163,7 @@ fn stage_copy(
 ) -> wgpu::SubmissionIndex {
     let bytes_per_row = (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
     let total = bytes_per_row as u64 * height as u64;
+    // TODO: free when idle to release the VRAM
     if *staging_cap < total {
         *staging = Some(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("scryglass image staging"),

@@ -38,6 +38,8 @@ pub struct ImagePipeline {
 }
 
 impl shader::Pipeline for ImagePipeline {
+    // TODO(iced 0.15): device loss stops being a fatal panic there (wgpu 29),
+    //  so add GPU reset recovery: rebuild windows and textures on a fresh device.
     fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("scryglass image rgba"),

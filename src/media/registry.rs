@@ -7,8 +7,10 @@ use std::sync::LazyLock;
 
 use super::{DecodedMedia, MediaError};
 
-/// Conservative wgpu texture-size limit. iced doesn't expose the real
-/// device limit, but 8192 is the downlevel default and safe everywhere.
+/// Conservative wgpu texture-size limit. iced requests devices at wgpu's
+/// default limits, which cap textures at 8192 regardless of hardware.
+// TODO(iced 0.15): devices get the adapter's real limits there, so read
+//  this from the device at runtime instead of assuming the floor.
 pub const MAX_TEXTURE_DIM: u32 = 8192;
 
 /// Who a decode is for, deciding how an over-limit image is reduced.
