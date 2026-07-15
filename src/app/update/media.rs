@@ -238,7 +238,15 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
                 && std::sync::Arc::ptr_eq(&resident, &pyramid)
                 && let Some(tiles) = resident.tiles()
             {
+                let failed = texture.is_none();
                 tiles.settle_exact(target, tile, texture);
+                if exact_retry_wanted(tiles, target, failed) {
+                    let epoch = win.tile_epoch;
+                    return Task::future(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                        AppMessage::Media(Message::TilesSettled { epoch })
+                    });
+                }
             }
             Task::none()
         }
@@ -553,6 +561,18 @@ pub(crate) fn update(win: &mut Window, shared: &mut Shared, message: Message) ->
 /// a shared upload (another window's decode), so no decode of this window's
 /// own ever fired show_loaded. The store answers one window's upload job,
 /// and the router sweeps every other window through here on its completion.
+/// Whether a finished exact production should schedule the paced retry: it
+/// failed, and its target layer is still resident. A resting view runs no
+/// ambient demand passes, so nothing else would re-request the tile. An
+/// evicted target's productions bail rather than fail, so they never retry.
+fn exact_retry_wanted(
+    tiles: &crate::ui::image_surface::TileSet,
+    target: (u32, u32),
+    failed: bool,
+) -> bool {
+    failed && tiles.exact_serves(target)
+}
+
 pub(crate) fn promote_if_waiting(win: &mut Window, shared: &Shared, key: &ImageKey) {
     let viewport = win.viewport_size;
     let zoom_mode = shared.config.standard.display.zoom_mode;
@@ -688,6 +708,35 @@ mod tests {
                 .in_flight_thumbs
                 .contains(Path::new("a.png"))
         );
+    }
+
+    #[test]
+    fn a_failed_exact_tile_retries_only_while_its_target_serves() {
+        use crate::media::tiles::TileKey;
+        let pyramid = crate::ui::image_surface::ResidentImage::tiled(
+            (8192, 8192),
+            crate::ui::image_surface::test_keepalive(),
+        );
+        let tiles = pyramid.tiles().unwrap();
+        let target = (800, 600);
+        let tile = TileKey {
+            lod: 0,
+            col: 0,
+            row: 0,
+        };
+        tiles.ensure_exact(target);
+        assert!(tiles.try_claim_exact(target, tile));
+        tiles.settle_exact(target, tile, None);
+        // A genuine failure on a live target wants the paced retry. A
+        // successful production never does.
+        assert!(exact_retry_wanted(tiles, target, true));
+        assert!(!exact_retry_wanted(tiles, target, false));
+        // Push the target out of the exact cap: a production that bailed
+        // against the evicted layer must rest, not retry.
+        for i in 0..16 {
+            tiles.ensure_exact((100 + i, 100 + i));
+        }
+        assert!(!exact_retry_wanted(tiles, target, true));
     }
 
     #[test]
