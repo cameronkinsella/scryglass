@@ -3,6 +3,78 @@
 Notable changes to scryglass, newest first. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.3.0
+
+### Added
+
+- One process for all windows: opening another file joins the running
+  instance as a new window instead of launching a second copy.
+- Huge images open through a tiled level-of-detail pyramid within a
+  configurable RAM budget, so gigapixel files pan and zoom smoothly
+  instead of failing or stalling on a single giant texture.
+- A configurable resource model that returns RAM and VRAM from background
+  windows: per-media (still, animation, video) demotion, eviction, and
+  prefetch shedding for unfocused and minimized windows, plus an optional
+  Windows working-set trim. Fully documented in docs/advanced-settings.md.
+- Factor-aware, linear-light downscaling for stills and animations with a
+  choice of kernel (`downscale_kernel`), and matching high-quality video
+  downscaling (`video_high_quality_scaling`).
+- A startup present-mode setting backed by a cached driver capability
+  probe (`startup.present_mode`).
+- Portable mode: a `data/` folder beside the executable keeps config and
+  thumbnails with the install.
+- config.toml edits reload live across all open windows, and Settings
+  gains an Open Advanced Settings button. A malformed config is reported
+  and set aside instead of silently replaced, and saves are atomic.
+- Videos inside archives show a first-frame thumbnail.
+- Prefetch tuning: parallelism, VRAM residency mode, nearest-first order,
+  background-priority decodes, and a depth of `0` to turn it off.
+
+### Changed
+
+- Stills render through a GPU shader surface, pixel-exact at the render
+  size, replacing iced's built-in image widget.
+- Video frames are paced by the playback clock on a steady 120Hz tick,
+  so playback stays smooth in every window at once.
+- Animations share their decoded frames and decay state across windows,
+  and stills share one texture across windows.
+- Full window geometry (size, position, maximized, fullscreen) persists
+  and replays on reopen. Snap layouts are not saved as the window size.
+- The crisp-pixels toggle is now "Nearest-neighbor zoom", and its config
+  key is `nearest_neighbor_zoom`.
+- config.toml is grouped into three tiers: `[standard]` for settings with
+  in-app controls, `[advanced]` for file-only settings (scaling, the
+  resource model, startup), and the app-managed `[managed]`. Existing
+  config files reset to defaults on first launch.
+- A new original app icon: a magnifying glass over a stack of pancakes.
+- Faster navigation away from a playing video.
+
+### Fixed
+
+- Video geometry tracks a live resize exactly instead of lagging a frame
+  behind at a slight offset.
+- A video restoring from the background shows its thumbnail instead of a
+  blank frame until playback reopens.
+- A video stream with backwards or missing timestamps no longer freezes
+  playback.
+- A crash when files disappeared from the folder while a navigation onto
+  them was still pending.
+- A folder shrinking behind a far-scrolled filmstrip no longer crashes.
+- A corrupt or malicious image with an oversized header no longer aborts
+  the whole app trying to allocate gigabytes.
+- A video that cannot be opened now reports the error instead of spinning
+  forever, and no longer respawns a decode loop when set to loop.
+- The thumbnail cache stays within its memory budget while a large folder
+  fills in the background.
+- A folder that loses the on-screen file (deleted outside the app) keeps
+  the view and cursor in step instead of desyncing.
+- Fullscreen wheel zoom anchors under the cursor instead of a toolbar
+  height above it.
+- Quitting from the menu saves the window geometry the way the close
+  button does.
+- Two windows viewing the same very large image no longer fight over its
+  tiles, and one window's navigation no longer cancels another's decodes.
+
 ## 0.2.1
 
 ### Fixed
