@@ -242,7 +242,6 @@ fn image_view<'a>(win: &'a Window, shared: &'a Shared) -> Element<'a, Message> {
                 shared.config.advanced.scaling.video_high_quality_scaling,
                 shared.config.standard.display.zoom_mode,
                 viewer.manual_zoom,
-                viewer.video.session.as_ref().is_some_and(|s| s.playing),
             ),
             // No frame yet, or one dropped on release: the thumbnail blur
             // stands in, exactly like a still or animation without a texture.

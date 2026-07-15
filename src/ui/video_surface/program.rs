@@ -16,8 +16,7 @@ use crate::ui::geometry::{self, SurfacePlacement, snap_footprint_to_unit};
 use crate::video::VideoFrame;
 
 /// Build the video surface element for the current frame at the given zoom/pan.
-/// `high_quality` selects the factor-aware downscale for a minified frame. `playing`
-/// asks the compositor to redraw every display refresh so playback is vsync-paced.
+/// `high_quality` selects the factor-aware downscale for a minified frame.
 /// Fills the image area like the still-image widget does.
 #[allow(clippy::too_many_arguments)]
 pub fn view(
@@ -29,7 +28,6 @@ pub fn view(
     high_quality: bool,
     zoom_mode: ZoomMode,
     manual_zoom: bool,
-    playing: bool,
 ) -> Element<'static, Message> {
     shader::Shader::new(VideoSurface {
         frame,
@@ -40,7 +38,6 @@ pub fn view(
         zoom_mode,
         manual_zoom,
         high_quality,
-        playing,
     })
     .width(Length::Fill)
     .height(Length::Fill)
@@ -62,27 +59,11 @@ struct VideoSurface {
     zoom_mode: ZoomMode,
     manual_zoom: bool,
     high_quality: bool,
-    playing: bool,
 }
 
 impl<T> shader::Program<T> for VideoSurface {
     type State = ();
     type Primitive = VideoPrimitive;
-
-    /// While playing, ask for a redraw on the next display refresh. iced calls this on
-    /// every `RedrawRequested`, so the request renews each frame and the video draws
-    /// on every vsync (the panel's own rate) with no wall-clock timer, the pacing a
-    /// dedicated player uses. `poll()` advances the frame per redraw. Paused, the
-    /// request stops and a slow timer handles only the control fade.
-    fn update(
-        &self,
-        _state: &mut Self::State,
-        _event: &iced::Event,
-        _bounds: Rectangle,
-        _cursor: mouse::Cursor,
-    ) -> Option<shader::Action<T>> {
-        self.playing.then(shader::Action::request_redraw)
-    }
 
     fn draw(
         &self,

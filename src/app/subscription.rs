@@ -119,20 +119,19 @@ fn window_subscriptions(
             subs.push(iced::time::every(delay).map(|_| Message::Anim(AnimMessage::Tick)));
         }
 
-        // Video pacing. While playing, the video shader program requests a redraw on
-        // every display refresh, so `window::frames` fires once per vsync. Polling
-        // each one for the frame then due paces playback to the panel itself (display
-        // sync) rather than a wall-clock timer that beats against vsync and juddered.
-        // A paused session drives no redraws, so a slow timer keeps the control fade
-        // moving and drains any late frame, but only while such work remains, so a
-        // paused background window does not redraw at 30Hz forever.
+        // Video pacing: while playing, a steady 120Hz timer polls for the
+        // frame then due against the playback clock. The tick source must
+        // stay a bounded timer: any message redraws every window in this
+        // runtime, so a redraw-fed tick feeds back into an unbounded loop
+        // whose saturated queue starves every other window's paints.
+        // A paused session drives no ticks, except a slow timer that keeps
+        // the control fade moving and drains any late frame, but only while
+        // such work remains, so a paused background window rests.
         if let Some(session) = viewer.video.session.as_ref() {
             if win.minimized {
                 // With pause = false the session keeps playing while
-                // minimized, but the compositor delivers no redraws to an
-                // iconified window, so the vsync source would starve. The
-                // slow timer keeps poll() alive (feeding the audio watchdog)
-                // and drains frames instead.
+                // minimized. The slow timer keeps poll() alive (feeding the
+                // audio watchdog) and drains frames while nothing shows.
                 if session.playing && !minimized_video_pause {
                     subs.push(
                         iced::time::every(Duration::from_millis(33))
@@ -140,7 +139,10 @@ fn window_subscriptions(
                     );
                 }
             } else if session.playing {
-                subs.push(window::frames().map(|_| Message::VideoControls(VideoMessage::Tick)));
+                subs.push(
+                    iced::time::every(Duration::from_micros(8_333))
+                        .map(|_| Message::VideoControls(VideoMessage::Tick)),
+                );
             } else if paused_video_needs_tick(
                 viewer.video.controls_opacity,
                 viewer.video.seek_drag.is_some(),
