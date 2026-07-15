@@ -219,10 +219,7 @@ impl VideoSession {
             hardware,
             path,
             temp: None,
-            id: {
-                static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(0);
-                NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
-            },
+            id: next_session_id(),
         }
     }
 
@@ -557,6 +554,14 @@ fn loop_end(base: Duration, clock: Duration, duration: Duration) -> Duration {
     Duration::from_secs_f64((next * d - base.as_secs_f64()).max(0.0))
 }
 
+/// Mint a process-unique session id, starting at one. The renderer draws a
+/// frozen frame whose session was released under id zero, so a live session
+/// must never mint it or the two would share one plane-texture slot.
+fn next_session_id() -> u64 {
+    static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 /// The playback clock from its inputs: the audio sink position once audio
 /// is flowing, zero during decoder warmup before the first frame, otherwise
 /// the accumulated wall-clock time plus the current run.
@@ -579,6 +584,11 @@ fn compute_clock(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_ids_never_mint_zero() {
+        assert_ne!(next_session_id(), 0);
+    }
 
     #[test]
     fn audio_position_is_the_clock_when_audio_flows() {
