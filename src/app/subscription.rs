@@ -3,7 +3,9 @@
 //! and video frame pacing.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use iced::futures::{SinkExt, Stream};
 use iced::keyboard::Key;
@@ -327,6 +329,29 @@ fn shortcut_suppressed(event: &Event, status: event::Status) -> bool {
     status == event::Status::Captured && matches!(event, Event::Keyboard(_))
 }
 
+/// Floor between bare cursor-move messages: every message redraws every
+/// window, so mouse-rate messages starve the rearmost window's repaints.
+const BARE_MOVE_INTERVAL: Duration = Duration::from_millis(16);
+
+static LEFT_HELD: AtomicBool = AtomicBool::new(false);
+static LAST_BARE_MOVE_MS: AtomicU64 = AtomicU64::new(0);
+static MOVE_CLOCK: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+/// Whether this cursor move becomes a message: full rate while panning,
+/// floored otherwise.
+fn move_passes(now_ms: u64, panning: bool, last_emit: &AtomicU64) -> bool {
+    if panning {
+        return true;
+    }
+    let last = last_emit.load(Ordering::Relaxed);
+    // Saturate rather than wrap when a stale stamp outruns the clock.
+    if now_ms.saturating_sub(last) < BARE_MOVE_INTERVAL.as_millis() as u64 && last != 0 {
+        return false;
+    }
+    last_emit.store(now_ms.max(1), Ordering::Relaxed);
+    true
+}
+
 fn handle_event(event: Event, status: event::Status, _id: window::Id) -> Option<Message> {
     if shortcut_suppressed(&event, status) {
         return None;
@@ -379,12 +404,21 @@ fn handle_event(event: Event, status: event::Status, _id: window::Id) -> Option<
 
         // --- Mouse: cursor moved (for drag panning) ---
         Event::Mouse(mouse::Event::CursorMoved { position }) => {
-            Some(Message::Viewer(ViewerMessage::DragMove(*position)))
+            let now = MOVE_CLOCK.elapsed().as_millis() as u64;
+            move_passes(now, LEFT_HELD.load(Ordering::Relaxed), &LAST_BARE_MOVE_MS)
+                .then(|| Message::Viewer(ViewerMessage::DragMove(*position)))
         }
         Event::Mouse(mouse::Event::CursorLeft) => Some(Message::Viewer(ViewerMessage::CursorLeft)),
 
+        // --- Mouse: left button pressed (start of a possible pan) ---
+        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+            LEFT_HELD.store(true, Ordering::Relaxed);
+            None
+        }
+
         // --- Mouse: left button released (end drag) ---
         Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+            LEFT_HELD.store(false, Ordering::Relaxed);
             Some(Message::Viewer(ViewerMessage::DragEnd))
         }
 
@@ -470,6 +504,25 @@ mod tests {
             mouse::Button::Left,
         )));
         assert!(matches!(up, Some(Message::Viewer(ViewerMessage::DragEnd))));
+    }
+
+    #[test]
+    fn bare_moves_are_floored_and_pans_pass_at_full_rate() {
+        let gate = AtomicU64::new(0);
+        // First bare move passes and stamps the gate.
+        assert!(move_passes(100, false, &gate));
+        // A same-frame follow-up is swallowed; the next frame passes.
+        assert!(!move_passes(101, false, &gate));
+        assert!(move_passes(
+            100 + BARE_MOVE_INTERVAL.as_millis() as u64,
+            false,
+            &gate
+        ));
+        // Mid-pan moves always pass and leave the gate stamp alone.
+        assert!(move_passes(102, true, &gate));
+        assert!(move_passes(103, true, &gate));
+        // A clock reading behind the stamp stays swallowed instead of wrapping.
+        assert!(!move_passes(50, false, &gate));
     }
 
     #[test]
