@@ -45,6 +45,8 @@ pub enum Envelope {
     /// The watched config file changed but no longer parses. Keep the current
     /// settings and warn.
     ConfigInvalid,
+    /// The shared video pacing timer fired: tick every playing window.
+    VideoTick,
     /// The working-set trim timer fired for this generation (Windows only). A
     /// background-state change since arming bumps the generation, so a
     /// superseded timer no-ops.

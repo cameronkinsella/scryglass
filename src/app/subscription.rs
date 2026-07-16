@@ -37,6 +37,19 @@ pub fn subscription(app: &App) -> Subscription<Envelope> {
         config_watch(),
     ];
 
+    // One 120Hz tick, above any common video frame rate, paces every
+    // playing window. Per-window timers stack the message rate and
+    // starve the rearmost window's paints.
+    // TODO: pace on each window's measured vsync once a redraw can scope to one window.
+    if app
+        .windows
+        .values()
+        .any(crate::app::update::video_flow::drives_shared_tick)
+    {
+        // 8_333us is 1/120s.
+        subs.push(iced::time::every(Duration::from_micros(8_333)).map(|_| Envelope::VideoTick));
+    }
+
     let minimized_video_pause = app.shared.config.advanced.resource.minimized.video.pause;
     for (&id, win) in &app.windows {
         for sub in window_subscriptions(id, win, minimized_video_pause) {
@@ -119,13 +132,9 @@ fn window_subscriptions(
             subs.push(iced::time::every(delay).map(|_| Message::Anim(AnimMessage::Tick)));
         }
 
-        // Video pacing: while playing, a steady 120Hz timer polls for the
-        // frame then due against the playback clock. The tick source must
-        // stay a bounded timer: any message redraws every window in this
-        // runtime, so a redraw-fed tick feeds back into an unbounded loop
-        // whose saturated queue starves every other window's paints.
-        // A paused session drives no ticks, except a slow timer that keeps
-        // the control fade moving and drains any late frame, but only while
+        // A playing window is paced by the app-level shared tick. A paused
+        // session drives no ticks, except a slow timer that keeps the
+        // control fade moving and drains any late frame, but only while
         // such work remains, so a paused background window rests.
         if let Some(session) = viewer.video.session.as_ref() {
             if win.minimized {
@@ -138,16 +147,13 @@ fn window_subscriptions(
                             .map(|_| Message::VideoControls(VideoMessage::Tick)),
                     );
                 }
-            } else if session.playing {
-                subs.push(
-                    iced::time::every(Duration::from_micros(8_333))
-                        .map(|_| Message::VideoControls(VideoMessage::Tick)),
-                );
-            } else if paused_video_needs_tick(
-                viewer.video.controls_opacity,
-                viewer.video.seek_drag.is_some(),
-                session.showed_frame(),
-            ) {
+            } else if !session.playing
+                && paused_video_needs_tick(
+                    viewer.video.controls_opacity,
+                    viewer.video.seek_drag.is_some(),
+                    session.showed_frame(),
+                )
+            {
                 subs.push(
                     iced::time::every(Duration::from_millis(33))
                         .map(|_| Message::VideoControls(VideoMessage::Tick)),

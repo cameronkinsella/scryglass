@@ -144,6 +144,15 @@ fn route(app: &mut App, envelope: Envelope) -> Task<Envelope> {
             Task::none()
         }
         Envelope::ConfigInvalid => config_invalid_toast(app),
+        Envelope::VideoTick => {
+            let mut tasks = Vec::new();
+            for (&id, win) in app.windows.iter_mut() {
+                if video_flow::drives_shared_tick(win) {
+                    tasks.push(Envelope::wrap(id, video_flow::tick(win, &mut app.shared)));
+                }
+            }
+            Task::batch(tasks)
+        }
         #[cfg(target_os = "windows")]
         Envelope::TrimWorkingSet(generation) => working_set::on_timer(app, generation),
     }
@@ -468,6 +477,72 @@ mod tests {
     use crate::app::test_support::{empty_app, into_app, viewing_app};
     use crate::app::{Modal, ViewerMessage};
     use crate::components::toasts::ToastKind;
+
+    #[cfg(feature = "video")]
+    fn start_playing_video(win: &mut Window) {
+        let viewer = win.viewer_mut().unwrap();
+        viewer.displayed_path = Some(viewer.nav.current().to_path_buf());
+        let mut session = crate::video::VideoSession::open(
+            viewer.nav.current().to_path_buf(),
+            std::time::Duration::ZERO,
+            1.0,
+            false,
+            false,
+            false,
+        );
+        session.playing = true;
+        viewer.video.session = Some(session);
+        // Mid-fade, so one tick observably eases it.
+        viewer.video.controls_opacity = 0.5;
+    }
+
+    #[cfg(feature = "video")]
+    #[test]
+    fn the_shared_tick_reaches_every_playing_window() {
+        let (mut app, first) = into_app(viewing_app(&["a.mp4"], 0));
+        start_playing_video(app.windows.get_mut(&first).unwrap());
+        let mut extra = viewing_app(&["b.mp4"], 0).window;
+        start_playing_video(&mut extra);
+        app.windows.insert(extra.id, extra);
+
+        let _ = update(&mut app, Envelope::VideoTick);
+        for win in app.windows.values() {
+            assert_ne!(win.viewer().unwrap().video.controls_opacity, 0.5);
+        }
+    }
+
+    #[cfg(feature = "video")]
+    #[test]
+    fn the_shared_tick_skips_minimized_and_paused_windows() {
+        let (mut app, id) = into_app(viewing_app(&["a.mp4"], 0));
+        start_playing_video(app.windows.get_mut(&id).unwrap());
+        let win = app.windows.get_mut(&id).unwrap();
+        assert!(super::video_flow::drives_shared_tick(win));
+        win.minimized = true;
+        assert!(!super::video_flow::drives_shared_tick(win));
+        win.minimized = false;
+        win.viewer_mut()
+            .unwrap()
+            .video
+            .session
+            .as_mut()
+            .unwrap()
+            .playing = false;
+        assert!(!super::video_flow::drives_shared_tick(win));
+
+        let _ = update(&mut app, Envelope::VideoTick);
+        assert_eq!(
+            app.windows
+                .values()
+                .next()
+                .unwrap()
+                .viewer()
+                .unwrap()
+                .video
+                .controls_opacity,
+            0.5
+        );
+    }
 
     fn shared_gif() -> std::sync::Arc<crate::media::animation::AnimatedImage> {
         use crate::media::animation::{AnimatedImage, RawFrame};

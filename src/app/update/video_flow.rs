@@ -78,6 +78,16 @@ pub(crate) fn fire_video_extract(index: Arc<ArchiveIndex>, entry: PathBuf) -> Ta
     )
 }
 
+/// Whether the app-level shared pacing tick drives this window: a playing,
+/// non-minimized session. Minimized playback keeps its own slow timer.
+pub(crate) fn drives_shared_tick(win: &Window) -> bool {
+    !win.minimized
+        && win
+            .viewer()
+            .and_then(|v| v.video.session.as_ref())
+            .is_some_and(|s| s.playing)
+}
+
 pub(crate) fn tick(win: &mut Window, shared: &mut Shared) -> Task<Message> {
     // A volume drag or nudge burst arms a save deadline. Fire it here on the
     // update thread once it settles, so the write captures the live config
