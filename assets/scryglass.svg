@@ -1,19 +1,20 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="scryglass: a magnifying glass over a stack of pancakes">
-  <rect width="512" height="512" rx="72" fill="#201c38"/>
-  <!-- The handle starts under the lens so it emerges from behind the rim. -->
-  <line x1="358" y1="344" x2="466" y2="452" stroke="#9d94bd" stroke-width="52" stroke-linecap="round"/>
-  <line x1="400" y1="386" x2="450" y2="436" stroke="#6f668e" stroke-width="8" stroke-linecap="round"/>
-  <line x1="372" y1="358" x2="391" y2="377" stroke="#d9a93f" stroke-width="52"/>
-  <circle cx="252" cy="238" r="158" fill="#2b2647"/>
-  <!-- Stack centered on the lens. -->
-  <rect x="142" y="270" width="220" height="46" rx="23" fill="#d59243"/>
-  <rect x="130" y="228" width="244" height="46" rx="23" fill="#e3a154"/>
-  <rect x="142" y="186" width="220" height="46" rx="23" fill="#d59243"/>
-  <rect x="180" y="208" width="26" height="52" rx="13" fill="#8a521f"/>
-  <rect x="296" y="208" width="26" height="64" rx="13" fill="#8a521f"/>
-  <rect x="238" y="208" width="26" height="40" rx="13" fill="#8a521f"/>
-  <rect x="142" y="186" width="220" height="30" rx="15" fill="#8a521f"/>
-  <rect x="222" y="160" width="60" height="34" rx="8" fill="#f5dd7a"/>
-  <!-- Rim last, covering the handle joint. -->
-  <circle cx="252" cy="238" r="158" fill="none" stroke="#9d94bd" stroke-width="20"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img"
+     aria-label="scryglass: a magnifying glass over a stack of pancakes">
+    <rect width="512" height="512" rx="72" fill="#7f5bae"/>
+    <!-- The handle starts under the lens so it emerges from behind the rim. -->
+    <line x1="358" y1="344" x2="466" y2="452" stroke="#d7cce6" stroke-width="52" stroke-linecap="round"/>
+    <line x1="400" y1="386" x2="450" y2="436" stroke="#493366" stroke-width="8" stroke-linecap="round"/>
+    <line x1="372" y1="358" x2="391" y2="377" stroke="#e3a154" stroke-width="52"/>
+    <circle cx="252" cy="238" r="158" fill="#493366"/>
+    <!-- Stack centered on the lens. -->
+    <rect x="142" y="270" width="220" height="46" rx="23" fill="#d59243"/>
+    <rect x="130" y="228" width="244" height="46" rx="23" fill="#e3a154"/>
+    <rect x="142" y="186" width="220" height="46" rx="23" fill="#d59243"/>
+    <rect x="180" y="208" width="26" height="52" rx="13" fill="#8a521f"/>
+    <rect x="296" y="208" width="26" height="64" rx="13" fill="#8a521f"/>
+    <rect x="238" y="208" width="26" height="40" rx="13" fill="#8a521f"/>
+    <rect x="142" y="186" width="220" height="30" rx="15" fill="#8a521f"/>
+    <rect x="222" y="160" width="60" height="34" rx="8" fill="#f5dd7a"/>
+    <!-- Rim last, covering the handle joint. -->
+    <circle cx="252" cy="238" r="158" fill="none" stroke="#d7cce6" stroke-width="20"/>
 </svg>
