@@ -249,10 +249,26 @@ pub(crate) fn persist_geometry_and_close(
     shared: &mut Shared,
     id: iced::window::Id,
 ) -> Task<AppMessage> {
+    // A cross-monitor maximize or snap leaves the restored bounds on the
+    // old monitor. A minimized window parks offscreen, so skip it.
+    let mut restored_pos = win.restored_pos;
+    if !win.minimized {
+        let center = (
+            win.window_pos.x + win.window_size.width / 2.0,
+            win.window_pos.y + win.window_size.height / 2.0,
+        );
+        if let Some((x, y)) = crate::platform::restored_pos_on_current_monitor(
+            center,
+            (win.restored_pos.x, win.restored_pos.y),
+            (win.restored_size.width, win.restored_size.height),
+        ) {
+            restored_pos = iced::Point::new(x, y);
+        }
+    }
     shared.config.managed.window.width = win.restored_size.width;
     shared.config.managed.window.height = win.restored_size.height;
-    shared.config.managed.window.x = Some(win.restored_pos.x);
-    shared.config.managed.window.y = Some(win.restored_pos.y);
+    shared.config.managed.window.x = Some(restored_pos.x);
+    shared.config.managed.window.y = Some(restored_pos.y);
     shared.config.managed.window.maximized = win.maximized;
     shared.config.managed.window.fullscreen = win.fullscreen;
     let config = shared.config.clone();
