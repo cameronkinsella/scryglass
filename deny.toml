@@ -15,6 +15,10 @@ ignore = [
     # stack caps quick-xml below the fixed release.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
+    # rustybuzz is unmaintained with no safe upgrade. It reaches the tree
+    # through resvg's text shaping, which pins it until a release moves to
+    # harfrust.
+    "RUSTSEC-2026-0206",
 ]
 
 [licenses]
