@@ -4,7 +4,7 @@ name: Publish
 # The release workflow drafts it on tag; publishing that draft is the go-ahead.
 on:
   release:
-    types: [published]
+    types: [ published ]
 
 permissions:
   contents: read
@@ -47,12 +47,31 @@ jobs:
         run: |
           version=$(cargo metadata --format-version 1 --no-deps \
             | jq -r '.packages[] | select(.name == "scryglass-shader-common") | .version')
-          if curl -fsSL "https://crates.io/api/v1/crates/scryglass-shader-common" \
-            | jq -er --arg v "$version" '.versions[] | select(.num == $v)' >/dev/null; then
-            echo "new=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "new=true" >> "$GITHUB_OUTPUT"
-          fi
+
+          url="https://crates.io/api/v1/crates/scryglass-shader-common/$version"
+
+          body=$(mktemp)
+
+          status=$(curl -sS \
+            -o "$body" \
+            -w '%{http_code}' \
+            -H 'Accept: application/json' \
+            -H 'User-Agent: scryglass-ci (https://github.com/cameronkinsella/scryglass)' \
+            "$url")
+
+          case "$status" in
+            200)
+              echo "new=false" >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              echo "new=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::crates.io returned HTTP $status"
+              cat "$body" >&2
+              exit 1
+              ;;
+          esac
 
       # cargo publish waits for the index, so the main publish below can
       # resolve the fresh version.
