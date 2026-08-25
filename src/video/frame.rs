@@ -151,7 +151,9 @@ mod tests {
     }
 
     fn pixels(rgba: &[u8]) -> Vec<(u8, u8, u8, u8)> {
-        rgba.chunks_exact(4)
+        rgba.as_chunks::<4>()
+            .0
+            .iter()
             .map(|p| (p[0], p[1], p[2], p[3]))
             .collect()
     }

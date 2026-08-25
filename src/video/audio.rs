@@ -47,7 +47,7 @@ pub(crate) fn send_audio_frame(
     // Packed f32 stereo: plane 0 holds interleaved bytes.
     let sample_bytes = resampled.samples() * 2 * size_of::<f32>();
     let data = &resampled.data(0)[..sample_bytes];
-    for chunk in data.chunks_exact(4) {
+    for chunk in data.as_chunks::<4>().0 {
         let sample = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         if pcm_tx.send(sample).is_err() {
             return Err(());
